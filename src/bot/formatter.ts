@@ -1,5 +1,5 @@
 import { escapeHtml, truncateText, splitForTelegram } from '../utils/text.js';
-import type { PostToolUsePayload, NotificationPayload } from '../types/hooks.js';
+import type { PostToolUsePayload, PreToolUsePayload, NotificationPayload } from '../types/hooks.js';
 import type { SessionInfo } from '../types/sessions.js';
 
 /**
@@ -129,6 +129,171 @@ export function formatNotification(payload: NotificationPayload): string {
     default:
       return `\u{1F514} <b>Notification</b>\n${message}`;
   }
+}
+
+// --- Phase 3: Approval formatting ---
+
+/** Risk level for tool approval display */
+type RiskLevel = 'safe' | 'caution' | 'danger';
+
+/**
+ * Classify a tool's risk level for the approval message.
+ * Per user decision: show risk indicator (safe/caution/danger based on tool type).
+ */
+function classifyRisk(toolName: string): RiskLevel {
+  // Danger: tools that execute arbitrary commands or delete things
+  const dangerTools = new Set(['Bash', 'BashBackground']);
+  if (dangerTools.has(toolName)) return 'danger';
+
+  // Caution: tools that modify files
+  const cautionTools = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+  if (cautionTools.has(toolName)) return 'caution';
+
+  // Safe: read-only tools
+  return 'safe';
+}
+
+/** Emoji for each risk level */
+const RISK_EMOJI: Record<RiskLevel, string> = {
+  safe: '\u{1F7E2}',     // green circle
+  caution: '\u{1F7E1}',  // yellow circle
+  danger: '\u{1F534}',   // red circle
+};
+
+/** Label for each risk level */
+const RISK_LABEL: Record<RiskLevel, string> = {
+  safe: 'Safe',
+  caution: 'Caution',
+  danger: 'Danger',
+};
+
+/**
+ * Format a PreToolUse approval request message.
+ * Per user decision: "Show tool name, what it wants to do (file path, command),
+ * and a risk indicator (safe/caution/danger based on tool type). Include a compact
+ * preview of tool input: bash command text, file path + first few lines of edit,
+ * truncated to ~200 chars."
+ *
+ * Returns HTML text suitable for sending with an InlineKeyboard.
+ */
+export function formatApprovalRequest(payload: PreToolUsePayload): string {
+  const risk = classifyRisk(payload.tool_name);
+  const riskEmoji = RISK_EMOJI[risk];
+  const riskLabel = RISK_LABEL[risk];
+  const toolName = escapeHtml(payload.tool_name);
+
+  const parts: string[] = [
+    `${riskEmoji} <b>Approval Required</b> [${riskLabel}]`,
+    `<b>Tool:</b> ${toolName}`,
+  ];
+
+  // Add compact preview of what the tool wants to do
+  const preview = buildToolPreview(payload.tool_name, payload.tool_input);
+  if (preview) {
+    parts.push(preview);
+  }
+
+  return parts.join('\n');
+}
+
+/**
+ * Build a compact preview of the tool input for the approval message.
+ * Truncated to ~200 chars per user decision.
+ */
+function buildToolPreview(toolName: string, input: Record<string, unknown>): string {
+  switch (toolName) {
+    case 'Bash':
+    case 'BashBackground': {
+      const cmd = (input.command as string) || '';
+      const truncated = escapeHtml(truncateText(cmd, 200));
+      return `<b>Command:</b>\n<pre>${truncated}</pre>`;
+    }
+
+    case 'Write': {
+      const filePath = (input.file_path as string) || (input.path as string) || '';
+      const content = (input.content as string) || '';
+      const preview = escapeHtml(truncateText(content, 150));
+      return `<b>File:</b> <code>${escapeHtml(filePath)}</code>\n<pre>${preview}</pre>`;
+    }
+
+    case 'Edit':
+    case 'MultiEdit': {
+      const filePath = (input.file_path as string) || (input.path as string) || '';
+      const oldStr = (input.old_string as string) || '';
+      const newStr = (input.new_string as string) || '';
+      const combined = `- ${oldStr}\n+ ${newStr}`;
+      const preview = escapeHtml(truncateText(combined, 200));
+      return `<b>File:</b> <code>${escapeHtml(filePath)}</code>\n<pre>${preview}</pre>`;
+    }
+
+    case 'Read': {
+      const filePath = (input.file_path as string) || (input.path as string) || '';
+      return `<b>File:</b> <code>${escapeHtml(filePath)}</code>`;
+    }
+
+    case 'Glob': {
+      const pattern = (input.pattern as string) || '';
+      return `<b>Pattern:</b> <code>${escapeHtml(pattern)}</code>`;
+    }
+
+    case 'Grep': {
+      const pattern = (input.pattern as string) || '';
+      const path = (input.path as string) || '';
+      return `<b>Pattern:</b> <code>${escapeHtml(pattern)}</code>` +
+        (path ? ` in <code>${escapeHtml(path)}</code>` : '');
+    }
+
+    default: {
+      // Generic: show JSON preview of input
+      let inputStr = '';
+      try {
+        inputStr = JSON.stringify(input, null, 2);
+      } catch {
+        inputStr = String(input);
+      }
+      const preview = escapeHtml(truncateText(inputStr, 200));
+      return `<pre>${preview}</pre>`;
+    }
+  }
+}
+
+/**
+ * Format the result text appended to an approval message after the user acts.
+ * Per user decision: "update message in place -- replace buttons with
+ * 'Approved' or 'Denied' text + who acted + timestamp"
+ *
+ * @param decision 'allow' or 'deny'
+ * @param who Username or first name of the person who acted
+ * @param originalText The original approval request message text
+ */
+export function formatApprovalResult(
+  decision: 'allow' | 'deny',
+  who: string,
+  originalText: string,
+): string {
+  const timestamp = new Date().toLocaleTimeString();
+  const escapedWho = escapeHtml(who);
+
+  if (decision === 'allow') {
+    return `${originalText}\n\n\u2705 <b>Approved</b> by ${escapedWho} at ${timestamp}`;
+  }
+  return `${originalText}\n\n\u274C <b>Denied</b> by ${escapedWho} at ${timestamp}`;
+}
+
+/**
+ * Format the expired text for an approval that timed out.
+ * Per user decision: "On expiry: update message in place with
+ * 'Expired -- auto-denied after 5m'"
+ *
+ * @param originalText The original approval request message text
+ * @param timeoutMs The timeout duration in milliseconds
+ */
+export function formatApprovalExpired(
+  originalText: string,
+  timeoutMs: number,
+): string {
+  const minutes = Math.round(timeoutMs / 60000);
+  return `${originalText}\n\n\u23F0 <b>Expired</b> \u2014 auto-denied after ${minutes}m`;
 }
 
 // --- Compact one-liners for reads/searches ---
