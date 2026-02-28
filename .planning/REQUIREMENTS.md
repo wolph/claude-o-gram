@@ -9,10 +9,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Session Management
 
-- [ ] **SESS-01**: Bot auto-creates a Telegram forum topic when a Claude Code session starts (via SessionStart hook)
-- [ ] **SESS-02**: Bot auto-closes the topic when the Claude Code session ends (via SessionEnd hook)
-- [ ] **SESS-03**: Bot auto-discovers new sessions without manual registration
-- [ ] **SESS-04**: Concurrent sessions each get their own topic with isolated message routing
+- [x] **SESS-01**: Bot auto-creates a Telegram forum topic when a Claude Code session starts (via SessionStart hook)
+- [x] **SESS-02**: Bot auto-closes the topic when the Claude Code session ends (via SessionEnd hook)
+- [x] **SESS-03**: Bot auto-discovers new sessions without manual registration
+- [x] **SESS-04**: Concurrent sessions each get their own topic with isolated message routing
 - [x] **SESS-05**: Each machine runs its own bot with a separate BotFather token, appearing as a distinct group member
 
 ### Monitoring
@@ -68,10 +68,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SESS-01 | Phase 1 | Pending |
-| SESS-02 | Phase 1 | Pending |
-| SESS-03 | Phase 1 | Pending |
-| SESS-04 | Phase 1 | Pending |
+| SESS-01 | Phase 1 | Complete |
+| SESS-02 | Phase 1 | Complete |
+| SESS-03 | Phase 1 | Complete |
+| SESS-04 | Phase 1 | Complete |
 | SESS-05 | Phase 1 | Complete |
 | MNTR-01 | Phase 2 | Pending |
 | MNTR-02 | Phase 2 | Pending |
