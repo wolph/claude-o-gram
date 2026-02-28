@@ -26,9 +26,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Control
 
-- [ ] **CTRL-01**: PreToolUse hook blocks and posts permission questions to Telegram with inline Approve/Deny buttons
-- [ ] **CTRL-02**: User can reply with custom text input from Telegram that feeds back into Claude Code
-- [ ] **CTRL-03**: Blocked hooks auto-deny after a configurable timeout if no response is received
+- [x] **CTRL-01**: PreToolUse hook blocks and posts permission questions to Telegram with inline Approve/Deny buttons
+- [x] **CTRL-02**: User can reply with custom text input from Telegram that feeds back into Claude Code
+- [x] **CTRL-03**: Blocked hooks auto-deny after a configurable timeout if no response is received
 
 ### UX
 
@@ -79,9 +79,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MNTR-04 | Phase 1 | Complete |
 | MNTR-05 | Phase 2 | Complete |
 | MNTR-06 | Phase 2 | Complete |
-| CTRL-01 | Phase 3 | Pending |
-| CTRL-02 | Phase 3 | Pending |
-| CTRL-03 | Phase 3 | Pending |
+| CTRL-01 | Phase 3 | Complete |
+| CTRL-02 | Phase 3 | Complete |
+| CTRL-03 | Phase 3 | Complete |
 | UX-01 | Phase 1 | Complete |
 | UX-02 | Phase 1 | Complete |
 | UX-03 | Phase 2 | Complete |

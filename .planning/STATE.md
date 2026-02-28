@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 02
-current_phase_name: Monitoring
-current_plan: Not started
-status: completed
-last_updated: "2026-02-28T20:50:53.471Z"
+current_phase: 03
+current_phase_name: Control
+current_plan: 2
+status: in-progress
+last_updated: "2026-02-28T22:49:13Z"
 last_activity: 2026-02-28
 progress:
   total_phases: 3
   completed_phases: 2
-  total_plans: 7
-  completed_plans: 7
-  percent: 100
+  total_plans: 9
+  completed_plans: 8
+  percent: 89
 ---
 
 # Project State
@@ -23,20 +23,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-02-28)
 
 **Core value:** See what Claude Code is doing and respond to its questions from anywhere, without needing to be at the terminal.
-**Current focus:** Phase 2: Monitoring
+**Current focus:** Phase 3: Control
 
 ## Current Position
 
-**Current Phase:** 02
-**Current Phase Name:** Monitoring
+**Current Phase:** 03
+**Current Phase Name:** Control
 **Total Phases:** 3
-**Current Plan:** Not started
-**Total Plans in Phase:** 3
-**Status:** Milestone complete
+**Current Plan:** 2 of 2
+**Total Plans in Phase:** 2
+**Status:** In progress
 **Last Activity:** 2026-02-28
-**Last Activity Description:** Phase 02 complete
+**Last Activity Description:** Completed 03-01-PLAN.md (Control types and core modules)
 
-**Progress:** [██████████] 100%
+**Progress:** [████████░░] 89%
 
 ## Performance Metrics
 
@@ -63,6 +63,7 @@ See: .planning/PROJECT.md (updated 2026-02-28)
 | Phase 02 P01 | 4min | 2 tasks | 12 files |
 | Phase 02 P02 | 3min | 2 tasks | 3 files |
 | Phase 02 P03 | 4min | 2 tasks | 3 files |
+| Phase 03 P01 | 3min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -94,6 +95,10 @@ Recent decisions affecting current work:
 - [Phase 02]: Context warnings use per-session warned80/warned95 booleans to avoid duplicate warnings
 - [Phase 02]: StatusMessage initialization is fire-and-forget to not block session start flow
 - [Phase 02]: Session end sends final closed status update with 500ms delay before destroy
+- [Phase 03]: ApprovalManager uses deferred promise pattern: waitForDecision returns promise, decide/timeout resolves it
+- [Phase 03]: Risk classification: Bash/BashBackground=danger, Write/Edit/MultiEdit/NotebookEdit=caution, all others=safe
+- [Phase 03]: TextInputManager uses tmux set-buffer + paste-buffer -p (bracketed paste) + send-keys Enter
+- [Phase 03]: tmuxPane defaults to null for backward compatibility with pre-Phase-3 persisted sessions
 
 ### Pending Todos
 
@@ -107,5 +112,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-28
-Stopped at: Roadmap created, ready to plan Phase 1
+Stopped at: Completed 03-01-PLAN.md
 Resume file: None
