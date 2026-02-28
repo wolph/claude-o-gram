@@ -68,29 +68,29 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SESS-01 | — | Pending |
-| SESS-02 | — | Pending |
-| SESS-03 | — | Pending |
-| SESS-04 | — | Pending |
-| SESS-05 | — | Pending |
-| MNTR-01 | — | Pending |
-| MNTR-02 | — | Pending |
-| MNTR-03 | — | Pending |
-| MNTR-04 | — | Pending |
-| MNTR-05 | — | Pending |
-| MNTR-06 | — | Pending |
-| CTRL-01 | — | Pending |
-| CTRL-02 | — | Pending |
-| CTRL-03 | — | Pending |
-| UX-01 | — | Pending |
-| UX-02 | — | Pending |
-| UX-03 | — | Pending |
+| SESS-01 | Phase 1 | Pending |
+| SESS-02 | Phase 1 | Pending |
+| SESS-03 | Phase 1 | Pending |
+| SESS-04 | Phase 1 | Pending |
+| SESS-05 | Phase 1 | Pending |
+| MNTR-01 | Phase 2 | Pending |
+| MNTR-02 | Phase 2 | Pending |
+| MNTR-03 | Phase 2 | Pending |
+| MNTR-04 | Phase 1 | Pending |
+| MNTR-05 | Phase 2 | Pending |
+| MNTR-06 | Phase 2 | Pending |
+| CTRL-01 | Phase 3 | Pending |
+| CTRL-02 | Phase 3 | Pending |
+| CTRL-03 | Phase 3 | Pending |
+| UX-01 | Phase 1 | Pending |
+| UX-02 | Phase 1 | Pending |
+| UX-03 | Phase 2 | Pending |
 
 **Coverage:**
 - v1 requirements: 17 total
-- Mapped to phases: 0
-- Unmapped: 17 ⚠️
+- Mapped to phases: 17
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-02-28*
-*Last updated: 2026-02-28 after initial definition*
+*Last updated: 2026-02-28 after roadmap creation*
