@@ -104,20 +104,24 @@ exit 0
   // Merge into settings: preserve existing hooks for other events
   const existingHooks =
     (settings.hooks as Record<string, unknown> | undefined) || {};
-  settings.hooks = { ...existingHooks, ...hookConfig };
 
-  // For PreToolUse, append our hook to any existing user hooks rather than replacing
+  // For PreToolUse, append our hook to existing user hooks rather than replacing
   const existingPreToolUse = (existingHooks.PreToolUse as unknown[]) || [];
   const ourPreToolUse = hookConfig.PreToolUse as unknown[];
-  // Only add ours if not already present (check by URL)
   const ourUrl = `${baseUrl}/hooks/pre-tool-use`;
-  const alreadyInstalled = existingPreToolUse.some((entry: unknown) => {
+
+  // Filter out our previous entry (if any), keep all user hooks
+  const userPreToolUse = existingPreToolUse.filter((entry: unknown) => {
     const e = entry as { hooks?: Array<{ url?: string }> };
-    return e.hooks?.some((h) => h.url === ourUrl);
+    return !e.hooks?.some((h) => h.url === ourUrl);
   });
-  if (!alreadyInstalled && existingPreToolUse.length > 0) {
-    (settings.hooks as Record<string, unknown>).PreToolUse = [...existingPreToolUse, ...ourPreToolUse];
-  }
+
+  // Rebuild PreToolUse: user hooks first, then ours
+  const mergedPreToolUse = userPreToolUse.length > 0
+    ? [...userPreToolUse, ...ourPreToolUse]
+    : ourPreToolUse;
+
+  settings.hooks = { ...existingHooks, ...hookConfig, PreToolUse: mergedPreToolUse };
 
   // Write back atomically
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');

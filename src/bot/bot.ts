@@ -113,10 +113,10 @@ export async function createBot(
 
   // Handle Approve button taps
   bot.callbackQuery(/^approve:(.+)$/, async (ctx) => {
-    await ctx.answerCallbackQuery(); // Dismiss loading spinner immediately
     const toolUseId = ctx.match[1];
     const pending = approvalManager.decide(toolUseId, 'allow');
     if (pending) {
+      await ctx.answerCallbackQuery(); // Dismiss loading spinner
       const who = ctx.from?.username
         ? `@${ctx.from.username}`
         : ctx.from?.first_name || 'User';
@@ -134,7 +134,7 @@ export async function createBot(
         }
       }
     } else {
-      // Approval already resolved (timeout or duplicate tap)
+      // Approval already resolved (timeout or duplicate tap) — show alert
       await ctx.answerCallbackQuery({
         text: 'This approval has already expired.',
         show_alert: true,
@@ -144,10 +144,10 @@ export async function createBot(
 
   // Handle Deny button taps
   bot.callbackQuery(/^deny:(.+)$/, async (ctx) => {
-    await ctx.answerCallbackQuery(); // Dismiss loading spinner immediately
     const toolUseId = ctx.match[1];
     const pending = approvalManager.decide(toolUseId, 'deny');
     if (pending) {
+      await ctx.answerCallbackQuery(); // Dismiss loading spinner
       const who = ctx.from?.username
         ? `@${ctx.from.username}`
         : ctx.from?.first_name || 'User';
@@ -164,6 +164,7 @@ export async function createBot(
         }
       }
     } else {
+      // Approval already resolved (timeout or duplicate tap) — show alert
       await ctx.answerCallbackQuery({
         text: 'This approval has already expired.',
         show_alert: true,
