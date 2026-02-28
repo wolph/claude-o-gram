@@ -73,16 +73,22 @@ export class HookHandlers {
     }
 
     // Create new session
+    const now = new Date().toISOString();
     const session: SessionInfo = {
       sessionId: payload.session_id,
       threadId: 0, // Set after Telegram topic creation in Plan 04 wiring
       cwd: payload.cwd,
       topicName,
-      startedAt: new Date().toISOString(),
+      startedAt: now,
       status: 'active',
       transcriptPath: payload.transcript_path,
       toolCallCount: 0,
       filesChanged: new Set<string>(),
+      verbosity: 'normal', // Will be overridden by config default in wiring layer
+      statusMessageId: 0,
+      suppressedCounts: {},
+      contextPercent: 0,
+      lastActivityAt: now,
     };
 
     this.sessionStore.set(payload.session_id, session);

@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import type { AppConfig } from './types/config.js';
+import { parseVerbosityTier } from './monitoring/verbosity.js';
 
 /**
  * Load and validate application configuration from environment variables.
@@ -42,5 +43,8 @@ export function loadConfig(): AppConfig {
     hookServerPort: parseInt(process.env.HOOK_SERVER_PORT || '3456', 10),
     hookServerHost: process.env.HOOK_SERVER_HOST || '127.0.0.1',
     dataDir: process.env.DATA_DIR || './data',
+    defaultVerbosity: parseVerbosityTier(process.env.VERBOSITY_DEFAULT),
+    idleTimeoutMs: parseInt(process.env.IDLE_TIMEOUT_MS || '120000', 10),
+    summaryIntervalMs: parseInt(process.env.SUMMARY_INTERVAL_MS || '300000', 10),
   };
 }
