@@ -61,11 +61,11 @@ Plans:
   1. When Claude Code requests a blocked tool call, an approval message with inline Approve/Deny buttons appears in the session topic, and tapping a button unblocks Claude Code with the chosen decision
   2. If no response is received within the configured timeout, the tool call is auto-denied (not auto-approved) and the approval buttons are replaced with an "Expired" indicator
   3. User can reply with text in the session topic and that text is fed back into the Claude Code session as input
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 03-01: TBD
-- [ ] 03-02: TBD
+- [ ] 03-01-PLAN.md -- Types, config, ApprovalManager, TextInputManager, approval formatter
+- [ ] 03-02-PLAN.md -- PreToolUse route, callback handlers, text input handler, hook install, full wiring
 
 ## Progress
 
@@ -76,4 +76,4 @@ Phases execute in numeric order: 1 -> 2 -> 3
 |-------|----------------|--------|-----------|
 | 1. Foundation | 4/4 | Complete   | 2026-02-28 |
 | 2. Monitoring | 0/3 | Planning complete | - |
-| 3. Control | 0/0 | Not started | - |
+| 3. Control | 0/2 | Planning complete | - |
