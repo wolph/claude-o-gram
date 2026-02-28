@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -36,7 +36,26 @@ export function installHooks(port: number): void {
     }
   }
 
-  // Define hook configuration for our three hook events
+  // Calculate PreToolUse hook timeout: must exceed APPROVAL_TIMEOUT_MS
+  // Default APPROVAL_TIMEOUT_MS is 300000 (5 min = 300s), so hook timeout = 360s
+  const approvalTimeoutMs = parseInt(process.env.APPROVAL_TIMEOUT_MS || '300000', 10);
+  const preToolUseTimeoutSec = Math.ceil(approvalTimeoutMs / 1000) + 60;
+
+  // Install SessionStart command hook for tmux pane capture
+  const tmuxScript = `#!/bin/bash
+# Capture tmux pane ID for text input injection
+if [ -n "$TMUX_PANE" ] && [ -n "$CLAUDE_SESSION_ID" ]; then
+  echo "$TMUX_PANE" > "/tmp/claude-tmux-pane-\${CLAUDE_SESSION_ID}.txt" 2>/dev/null || true
+fi
+exit 0
+`;
+  const hooksDir = join(claudeDir, 'hooks');
+  mkdirSync(hooksDir, { recursive: true });
+  const scriptPath = join(hooksDir, 'capture-tmux-pane.sh');
+  writeFileSync(scriptPath, tmuxScript, 'utf-8');
+  chmodSync(scriptPath, 0o755);
+
+  // Define hook configuration for our hook events
   const baseUrl = `http://127.0.0.1:${port}`;
   const hookConfig: Record<string, unknown> = {
     SessionStart: [
@@ -44,6 +63,7 @@ export function installHooks(port: number): void {
         matcher: '',
         hooks: [
           { type: 'http', url: `${baseUrl}/hooks/session-start`, timeout: 10 },
+          { type: 'command', command: scriptPath, timeout: 5 },
         ],
       },
     ],
@@ -71,12 +91,33 @@ export function installHooks(port: number): void {
         ],
       },
     ],
+    PreToolUse: [
+      {
+        matcher: '',
+        hooks: [
+          { type: 'http', url: `${baseUrl}/hooks/pre-tool-use`, timeout: preToolUseTimeoutSec },
+        ],
+      },
+    ],
   };
 
   // Merge into settings: preserve existing hooks for other events
   const existingHooks =
     (settings.hooks as Record<string, unknown> | undefined) || {};
   settings.hooks = { ...existingHooks, ...hookConfig };
+
+  // For PreToolUse, append our hook to any existing user hooks rather than replacing
+  const existingPreToolUse = (existingHooks.PreToolUse as unknown[]) || [];
+  const ourPreToolUse = hookConfig.PreToolUse as unknown[];
+  // Only add ours if not already present (check by URL)
+  const ourUrl = `${baseUrl}/hooks/pre-tool-use`;
+  const alreadyInstalled = existingPreToolUse.some((entry: unknown) => {
+    const e = entry as { hooks?: Array<{ url?: string }> };
+    return e.hooks?.some((h) => h.url === ourUrl);
+  });
+  if (!alreadyInstalled && existingPreToolUse.length > 0) {
+    (settings.hooks as Record<string, unknown>).PreToolUse = [...existingPreToolUse, ...ourPreToolUse];
+  }
 
   // Write back atomically
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');

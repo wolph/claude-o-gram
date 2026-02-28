@@ -5,6 +5,7 @@ import type {
   SessionEndPayload,
   PostToolUsePayload,
   NotificationPayload,
+  PreToolUsePayload,
 } from '../types/hooks.js';
 import type { HookHandlers } from './handlers.js';
 
@@ -76,6 +77,58 @@ export async function createHookServer(
           request.log.error(err, 'Error handling notification hook');
         });
       return {};
+    }
+  );
+
+  // POST /hooks/pre-tool-use
+  // BLOCKING: Unlike other hooks, this route awaits the handler.
+  // The HTTP connection stays open until the user approves/denies or timeout fires.
+  // Claude Code waits for the response before proceeding with the tool call.
+  fastify.post<{ Body: PreToolUsePayload }>(
+    '/hooks/pre-tool-use',
+    async (request) => {
+      const payload = request.body as PreToolUsePayload;
+
+      // AUTO_APPROVE bypass: skip approval, return allow immediately
+      if (config.autoApprove) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'allow',
+            permissionDecisionReason: 'Auto-approved (AUTO_APPROVE=true)',
+          },
+        };
+      }
+
+      // If permission_mode indicates Claude auto-approves, mirror that behavior.
+      // Don't interrupt with approval prompts for tools Claude itself wouldn't prompt for.
+      if (
+        payload.permission_mode === 'bypassPermissions' ||
+        payload.permission_mode === 'dontAsk'
+      ) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'allow',
+            permissionDecisionReason: 'Auto-approved (permission mode)',
+          },
+        };
+      }
+
+      try {
+        // Delegate to handler -- THIS AWAITS until user decides or timeout
+        return await handlers.handlePreToolUse(payload);
+      } catch (err) {
+        request.log.error(err, 'Error handling pre-tool-use hook');
+        // On error, allow the tool call (non-blocking error behavior)
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'allow',
+            permissionDecisionReason: 'Auto-approved (hook error)',
+          },
+        };
+      }
     }
   );
 

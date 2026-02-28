@@ -168,6 +168,15 @@ export class SessionStore {
     return counts;
   }
 
+  /** Update the tmux pane ID for a session */
+  updateTmuxPane(sessionId: string, tmuxPane: string | null): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.tmuxPane = tmuxPane;
+      this.save();
+    }
+  }
+
   /** Get all sessions (active and closed) */
   getAllSessions(): SessionInfo[] {
     return Array.from(this.sessions.values());

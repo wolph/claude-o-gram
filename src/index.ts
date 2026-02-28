@@ -266,6 +266,17 @@ export async function main(): Promise<void> {
       // Notifications are immediate (not batched) -- they are time-sensitive
       await batcher.enqueueImmediate(session.threadId, html);
     },
+
+    // Phase 3: PreToolUse approval handler (stub -- wired fully in Task 2)
+    onPreToolUse: async (_session, _payload) => {
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+          permissionDecisionReason: 'Auto-approved (not yet wired)',
+        },
+      };
+    },
   };
 
   // 9. Create hook handlers with session store and callbacks

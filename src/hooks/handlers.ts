@@ -5,6 +5,7 @@ import type {
   SessionEndPayload,
   PostToolUsePayload,
   NotificationPayload,
+  PreToolUsePayload,
 } from '../types/hooks.js';
 import type { SessionStore } from '../sessions/session-store.js';
 import { shouldPostToolCall } from '../monitoring/verbosity.js';
@@ -19,6 +20,7 @@ export interface HookCallbacks {
   onSessionEnd(session: SessionInfo): Promise<void>;
   onToolUse(session: SessionInfo, payload: PostToolUsePayload): Promise<void>;
   onNotification(session: SessionInfo, payload: NotificationPayload): Promise<void>;
+  onPreToolUse(session: SessionInfo, payload: PreToolUsePayload): Promise<Record<string, unknown>>;
 }
 
 /** Tool names that modify files (used to track changed files) */
@@ -164,6 +166,28 @@ export class HookHandlers {
     }
     this.sessionStore.updateLastActivity(payload.session_id);
     await this.callbacks.onNotification(session, payload);
+  }
+
+  /**
+   * Handle a PreToolUse hook event.
+   * BLOCKING: Returns the response body that becomes the HTTP response.
+   * The connection stays open until the user decides or timeout fires.
+   */
+  async handlePreToolUse(payload: PreToolUsePayload): Promise<Record<string, unknown>> {
+    const session = this.sessionStore.get(payload.session_id);
+    if (!session) {
+      console.warn(`PreToolUse received for unknown session: ${payload.session_id}`);
+      // Unknown session -- allow the tool call
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+          permissionDecisionReason: 'Auto-approved (unknown session)',
+        },
+      };
+    }
+    this.sessionStore.updateLastActivity(payload.session_id);
+    return this.callbacks.onPreToolUse(session, payload);
   }
 }
 
