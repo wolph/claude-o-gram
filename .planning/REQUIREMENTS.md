@@ -17,9 +17,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Monitoring
 
-- [ ] **MNTR-01**: Tool calls (file reads, edits, bash commands) are posted to the session topic via PostToolUse hook
+- [x] **MNTR-01**: Tool calls (file reads, edits, bash commands) are posted to the session topic via PostToolUse hook
 - [ ] **MNTR-02**: Claude's text output is captured by parsing JSONL transcript files and posted to the topic
-- [ ] **MNTR-03**: Notification hook events (permission prompts, idle alerts) are forwarded to the topic
+- [x] **MNTR-03**: Notification hook events (permission prompts, idle alerts) are forwarded to the topic
 - [x] **MNTR-04**: Messages are batched and queued to stay under Telegram's 20 msg/min rate limit
 - [ ] **MNTR-05**: A live-updating status message in each topic shows remaining context window and quota usage (updated via editMessageText)
 - [ ] **MNTR-06**: Periodic summary updates aggregate activity ("Working on X, 3 files edited")
@@ -34,7 +34,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **UX-01**: Messages use HTML formatting with code blocks for commands, bold for tool names
 - [x] **UX-02**: Outputs exceeding 4096 characters are sent as .txt document attachments
-- [ ] **UX-03**: Users can configure verbosity to filter which events get posted to Telegram
+- [x] **UX-03**: Users can configure verbosity to filter which events get posted to Telegram
 
 ## v2 Requirements
 
@@ -73,9 +73,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SESS-03 | Phase 1 | Complete |
 | SESS-04 | Phase 1 | Complete |
 | SESS-05 | Phase 1 | Complete |
-| MNTR-01 | Phase 2 | Pending |
+| MNTR-01 | Phase 2 | Complete |
 | MNTR-02 | Phase 2 | Pending |
-| MNTR-03 | Phase 2 | Pending |
+| MNTR-03 | Phase 2 | Complete |
 | MNTR-04 | Phase 1 | Complete |
 | MNTR-05 | Phase 2 | Pending |
 | MNTR-06 | Phase 2 | Pending |
@@ -84,7 +84,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CTRL-03 | Phase 3 | Pending |
 | UX-01 | Phase 1 | Complete |
 | UX-02 | Phase 1 | Complete |
-| UX-03 | Phase 2 | Pending |
+| UX-03 | Phase 2 | Complete |
 
 **Coverage:**
 - v1 requirements: 17 total

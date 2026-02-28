@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 01
-current_phase_name: Foundation
-current_plan: Not started
-status: completed
-last_updated: "2026-02-28T19:33:44.998Z"
+current_phase: 02
+current_phase_name: Monitoring
+current_plan: 02
+status: executing
+last_updated: "2026-02-28T20:33:51.723Z"
 last_activity: 2026-02-28
 progress:
   total_phases: 3
   completed_phases: 1
-  total_plans: 4
-  completed_plans: 4
-  percent: 100
+  total_plans: 7
+  completed_plans: 5
+  percent: 71
 ---
 
 # Project State
@@ -23,20 +23,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-02-28)
 
 **Core value:** See what Claude Code is doing and respond to its questions from anywhere, without needing to be at the terminal.
-**Current focus:** Phase 1: Foundation
+**Current focus:** Phase 2: Monitoring
 
 ## Current Position
 
-**Current Phase:** 01
-**Current Phase Name:** Foundation
+**Current Phase:** 02
+**Current Phase Name:** Monitoring
 **Total Phases:** 3
-**Current Plan:** Not started
-**Total Plans in Phase:** 4
-**Status:** Milestone complete
+**Current Plan:** 02
+**Total Plans in Phase:** 3
+**Status:** In progress
 **Last Activity:** 2026-02-28
-**Last Activity Description:** Phase 01 complete
+**Last Activity Description:** Completed 02-01-PLAN.md (Monitoring Foundation)
 
-**Progress:** [██████████] 100%
+**Progress:** [███████░░░] 71%
 
 ## Performance Metrics
 
@@ -60,6 +60,7 @@ See: .planning/PROJECT.md (updated 2026-02-28)
 | Phase 01 P02 | 2min | 2 tasks | 3 files |
 | Phase 01 P03 | 4min | 2 tasks | 5 files |
 | Phase 01 P04 | 30min | 2 tasks | 2 files |
+| Phase 02 P01 | 4min | 2 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -81,6 +82,9 @@ Recent decisions affecting current work:
 - [Phase 01]: MessageBatcher uses fire-and-forget flush during shutdown to avoid blocking process exit
 - [Phase 01]: Auto-install hooks on every startup (idempotent merge) -- no stale URLs if port changes, no flag to maintain
 - [Phase 01]: Reconnect-on-restart sends bot restart notice to open topics rather than reopening (topic was never closed)
+- [Phase 02]: Verbosity filter runs before callback dispatch -- suppressed tool calls never reach Telegram
+- [Phase 02]: Notification messages sent via enqueueImmediate (not batched) since they are urgent
+- [Phase 02]: New SessionInfo monitoring fields initialized with sensible defaults in handleSessionStart
 
 ### Pending Todos
 
