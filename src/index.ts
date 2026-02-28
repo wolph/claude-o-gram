@@ -1,9 +1,10 @@
 import { join } from 'node:path';
+import { readFileSync, unlinkSync, existsSync } from 'node:fs';
 import { loadConfig } from './config.js';
 import { SessionStore } from './sessions/session-store.js';
 import { createHookHandlers, type HookCallbacks } from './hooks/handlers.js';
 import { createHookServer } from './hooks/server.js';
-import { createBot } from './bot/bot.js';
+import { createBot, makeApprovalKeyboard } from './bot/bot.js';
 import { TopicManager } from './bot/topics.js';
 import { MessageBatcher } from './bot/rate-limiter.js';
 import {
@@ -11,14 +12,19 @@ import {
   formatSessionEnd,
   formatToolUse,
   formatNotification,
+  formatApprovalRequest,
+  formatApprovalExpired,
 } from './bot/formatter.js';
 import { installHooks } from './utils/install-hooks.js';
 import { TranscriptWatcher, calculateContextPercentage } from './monitoring/transcript-watcher.js';
 import { StatusMessage } from './monitoring/status-message.js';
 import { SummaryTimer } from './monitoring/summary-timer.js';
 import { escapeHtml } from './utils/text.js';
+import { ApprovalManager } from './control/approval-manager.js';
+import { TextInputManager } from './control/input-manager.js';
 import type { SessionInfo } from './types/sessions.js';
 import type { StatusData } from './types/monitoring.js';
+import type { PreToolUsePayload } from './types/hooks.js';
 
 /** Per-session monitoring instances */
 interface SessionMonitor {
@@ -52,6 +58,24 @@ function buildStatusData(session: SessionInfo, currentTool: string): StatusData 
 }
 
 /**
+ * Try to read the tmux pane ID from the temp file written by the command hook.
+ * Returns the pane ID if found, null otherwise. Cleans up the file after reading.
+ */
+function tryReadTmuxPane(sessionId: string): string | null {
+  try {
+    const tmuxFile = `/tmp/claude-tmux-pane-${sessionId}.txt`;
+    if (existsSync(tmuxFile)) {
+      const paneId = readFileSync(tmuxFile, 'utf-8').trim();
+      if (paneId) {
+        try { unlinkSync(tmuxFile); } catch { /* ignore */ }
+        return paneId;
+      }
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+/**
  * Main entry point for the Claude Code Telegram Bridge.
  *
  * Single-process daemon (per research Pattern 1) that:
@@ -75,21 +99,48 @@ export async function main(): Promise<void> {
     join(config.dataDir, 'sessions.json'),
   );
 
-  // 4. Create bot instance (with plugins, not yet started)
-  const bot = await createBot(config, sessionStore);
+  // 4. Phase 3: Create control managers
+  const approvalManager = new ApprovalManager(config.approvalTimeoutMs);
+  const inputManager = new TextInputManager();
 
-  // 5. Create topic manager wired to bot
+  // 5. Create bot instance (with plugins, not yet started)
+  const bot = await createBot(config, sessionStore, approvalManager, inputManager);
+
+  // 6. Create topic manager wired to bot
   const topicManager = new TopicManager(bot, config.telegramChatId);
 
-  // 6. Create message batcher wired to topic manager
+  // 7. Create message batcher wired to topic manager
   const batcher = new MessageBatcher(
     (threadId, html) => topicManager.sendMessage(threadId, html),
     (threadId, content, filename, caption) =>
       topicManager.sendDocument(threadId, content, filename, caption),
   );
 
-  // 7. Per-session monitoring instances
+  // 8. Per-session monitoring instances
   const monitors = new Map<string, SessionMonitor>();
+
+  // Phase 3: Track original message text for approval expiry edits
+  const approvalMessageTexts = new Map<string, string>();
+  // Track whether denials were caused by timeout (vs user button press)
+  const timeoutDenials = new Set<string>();
+
+  // Phase 3: Set up approval timeout callback
+  approvalManager.setTimeoutCallback(async (toolUseId, pending) => {
+    timeoutDenials.add(toolUseId);
+    const originalText = approvalMessageTexts.get(toolUseId) || '';
+    approvalMessageTexts.delete(toolUseId);
+    try {
+      const expiredText = formatApprovalExpired(originalText, config.approvalTimeoutMs);
+      await bot.api.editMessageText(
+        config.telegramChatId,
+        pending.messageId,
+        expiredText,
+        { parse_mode: 'HTML', reply_markup: undefined },
+      );
+    } catch (err) {
+      console.warn('Failed to edit expired approval message:', err instanceof Error ? err.message : err);
+    }
+  });
 
   /**
    * Initialize monitoring components for a session.
@@ -210,6 +261,13 @@ export async function main(): Promise<void> {
 
       // Initialize monitoring components for this session
       initMonitoring(session);
+
+      // Phase 3: Try to capture tmux pane ID from the temp file written by the command hook
+      const paneId = tryReadTmuxPane(session.sessionId);
+      if (paneId) {
+        sessionStore.updateTmuxPane(session.sessionId, paneId);
+        session.tmuxPane = paneId;
+      }
     },
 
     onSessionEnd: async (session) => {
@@ -231,6 +289,12 @@ export async function main(): Promise<void> {
         monitor.statusMessage.destroy();
         monitors.delete(session.sessionId);
       }
+
+      // Phase 3: Clean up control state
+      approvalManager.cleanupSession(session.sessionId);
+      inputManager.cleanup(session.sessionId);
+      // Clean up tmux pane file if it still exists
+      try { unlinkSync(`/tmp/claude-tmux-pane-${session.sessionId}.txt`); } catch { /* ignore */ }
 
       const summary = formatSessionEnd(latest, 'completed');
       // Send immediately (not batched) -- this is a lifecycle event
@@ -267,13 +331,66 @@ export async function main(): Promise<void> {
       await batcher.enqueueImmediate(session.threadId, html);
     },
 
-    // Phase 3: PreToolUse approval handler (stub -- wired fully in Task 2)
-    onPreToolUse: async (_session, _payload) => {
+    // Phase 3: PreToolUse approval handler
+    onPreToolUse: async (session, payload: PreToolUsePayload) => {
+      // Lazy tmux pane capture: if not yet captured, try again
+      if (!session.tmuxPane) {
+        const paneId = tryReadTmuxPane(session.sessionId);
+        if (paneId) {
+          sessionStore.updateTmuxPane(session.sessionId, paneId);
+          session.tmuxPane = paneId;
+        }
+      }
+
+      // Format the approval request message
+      const approvalHtml = formatApprovalRequest(payload);
+      const keyboard = makeApprovalKeyboard(payload.tool_use_id);
+
+      // Send approval message with inline keyboard to the session topic
+      const msg = await bot.api.sendMessage(config.telegramChatId, approvalHtml, {
+        message_thread_id: session.threadId,
+        parse_mode: 'HTML',
+        reply_markup: keyboard,
+      });
+
+      // Store original text for expiry editing
+      approvalMessageTexts.set(payload.tool_use_id, approvalHtml);
+
+      // Wait for user decision or timeout -- THIS BLOCKS THE HTTP RESPONSE
+      const decision = await approvalManager.waitForDecision(
+        payload.tool_use_id,
+        session.sessionId,
+        session.threadId,
+        msg.message_id,
+        payload.tool_name,
+      );
+
+      // Clean up stored text (may already be cleaned by timeout callback)
+      approvalMessageTexts.delete(payload.tool_use_id);
+
+      // Build the hook response
+      if (decision === 'allow') {
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'allow',
+            permissionDecisionReason: 'Approved by user via Telegram',
+          },
+        };
+      }
+
+      // Determine if denial was user-initiated or timeout
+      const isTimeout = timeoutDenials.has(payload.tool_use_id);
+      timeoutDenials.delete(payload.tool_use_id);
+      const reason = isTimeout
+        ? 'Auto-denied: approval timeout'
+        : 'Denied by user via Telegram';
+
       return {
         hookSpecificOutput: {
           hookEventName: 'PreToolUse',
-          permissionDecision: 'allow',
-          permissionDecisionReason: 'Auto-approved (not yet wired)',
+          permissionDecision: 'deny',
+          permissionDecisionReason: reason,
         },
       };
     },
@@ -332,6 +449,8 @@ export async function main(): Promise<void> {
       monitor.statusMessage.destroy();
     }
     monitors.clear();
+    // Phase 3: Clean up control managers
+    approvalManager.shutdown();
     batcher.shutdown();
     bot.stop();
     await server.close();
