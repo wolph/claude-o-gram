@@ -1,6 +1,7 @@
 import { writeFileSync, readFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SessionInfo } from '../types/sessions.js';
+import type { VerbosityTier } from '../types/monitoring.js';
 
 /**
  * In-memory session map with atomic JSON file persistence.
@@ -102,6 +103,69 @@ export class SessionStore {
 
     (session.filesChanged as Set<string>).add(filePath);
     this.save();
+  }
+
+  // --- Phase 2 monitoring methods ---
+
+  /** Update the last activity timestamp for idle detection */
+  updateLastActivity(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.lastActivityAt = new Date().toISOString();
+      this.save();
+    }
+  }
+
+  /** Increment the suppressed tool call count for a given tool name */
+  incrementSuppressedCount(sessionId: string, toolName: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      if (!session.suppressedCounts) {
+        session.suppressedCounts = {};
+      }
+      session.suppressedCounts[toolName] = (session.suppressedCounts[toolName] || 0) + 1;
+      this.save();
+    }
+  }
+
+  /** Update the verbosity tier for a session */
+  updateVerbosity(sessionId: string, tier: VerbosityTier): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.verbosity = tier;
+      this.save();
+    }
+  }
+
+  /** Update the pinned status message ID */
+  updateStatusMessageId(sessionId: string, messageId: number): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.statusMessageId = messageId;
+      this.save();
+    }
+  }
+
+  /** Update the context window usage percentage */
+  updateContextPercent(sessionId: string, percent: number): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.contextPercent = percent;
+      this.save();
+    }
+  }
+
+  /**
+   * Get and reset the suppressed counts for periodic summary reporting.
+   * Returns the counts record and resets it to an empty object.
+   */
+  getSuppressedCounts(sessionId: string): Record<string, number> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return {};
+    const counts = session.suppressedCounts || {};
+    session.suppressedCounts = {};
+    this.save();
+    return counts;
   }
 
   /** Get all sessions (active and closed) */

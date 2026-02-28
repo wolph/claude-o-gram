@@ -63,6 +63,14 @@ export function installHooks(port: number): void {
         ],
       },
     ],
+    Notification: [
+      {
+        matcher: '',
+        hooks: [
+          { type: 'http', url: `${baseUrl}/hooks/notification`, timeout: 10 },
+        ],
+      },
+    ],
   };
 
   // Merge into settings: preserve existing hooks for other events

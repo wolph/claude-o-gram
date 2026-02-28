@@ -4,6 +4,7 @@ import type {
   SessionStartPayload,
   SessionEndPayload,
   PostToolUsePayload,
+  NotificationPayload,
 } from '../types/hooks.js';
 import type { HookHandlers } from './handlers.js';
 
@@ -59,6 +60,20 @@ export async function createHookServer(
         .handlePostToolUse(request.body as PostToolUsePayload)
         .catch((err) => {
           request.log.error(err, 'Error handling post-tool-use hook');
+        });
+      return {};
+    }
+  );
+
+  // POST /hooks/notification
+  // Fire and forget: process asynchronously to avoid slowing Claude Code
+  fastify.post<{ Body: NotificationPayload }>(
+    '/hooks/notification',
+    async (request) => {
+      handlers
+        .handleNotification(request.body as NotificationPayload)
+        .catch((err) => {
+          request.log.error(err, 'Error handling notification hook');
         });
       return {};
     }

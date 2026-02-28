@@ -1,5 +1,5 @@
 import { escapeHtml, truncateText, splitForTelegram } from '../utils/text.js';
-import type { PostToolUsePayload } from '../types/hooks.js';
+import type { PostToolUsePayload, NotificationPayload } from '../types/hooks.js';
 import type { SessionInfo } from '../types/sessions.js';
 
 /**
@@ -94,6 +94,40 @@ export function formatToolUse(
 
     default:
       return formatDefault(toolName, input);
+  }
+}
+
+/**
+ * Format a Notification hook event into HTML with urgency-based styling.
+ * Permission prompts are visually distinct from regular tool calls.
+ */
+export function formatNotification(payload: NotificationPayload): string {
+  const message = escapeHtml(payload.message);
+  const title = payload.title ? escapeHtml(payload.title) : undefined;
+
+  switch (payload.notification_type) {
+    case 'permission_prompt':
+      return [
+        `\u26A0\uFE0F <b>Permission Required</b>`,
+        title ? `<b>${title}</b>` : '',
+        `<blockquote>${message}</blockquote>`,
+      ].filter(Boolean).join('\n');
+
+    case 'idle_prompt':
+      return `\u{1F4A4} <b>Claude is idle</b>\n${message}`;
+
+    case 'auth_success':
+      return `\u2705 <b>Authentication successful</b>\n${message}`;
+
+    case 'elicitation_dialog':
+      return [
+        `\u2753 <b>Input Needed</b>`,
+        title ? `<b>${title}</b>` : '',
+        message,
+      ].filter(Boolean).join('\n');
+
+    default:
+      return `\u{1F514} <b>Notification</b>\n${message}`;
   }
 }
 

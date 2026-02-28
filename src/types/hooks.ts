@@ -31,3 +31,11 @@ export interface PostToolUsePayload extends HookPayload {
   tool_response: Record<string, unknown>;
   tool_use_id: string;
 }
+
+/** Payload for Notification hook event (permission prompts, idle alerts, etc.) */
+export interface NotificationPayload extends HookPayload {
+  hook_event_name: 'Notification';
+  notification_type: 'permission_prompt' | 'idle_prompt' | 'auth_success' | 'elicitation_dialog';
+  message: string;
+  title?: string;
+}

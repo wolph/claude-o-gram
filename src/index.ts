@@ -10,6 +10,7 @@ import {
   formatSessionStart,
   formatSessionEnd,
   formatToolUse,
+  formatNotification,
 } from './bot/formatter.js';
 import { installHooks } from './utils/install-hooks.js';
 
@@ -87,6 +88,12 @@ export async function main(): Promise<void> {
       const result = formatToolUse(payload);
       // Enqueue (batched) -- tool use messages are high frequency
       batcher.enqueue(session.threadId, result.text, result.attachment);
+    },
+
+    onNotification: async (session, payload) => {
+      const text = formatNotification(payload);
+      // Send immediately -- notifications are urgent (permission prompts, etc.)
+      await batcher.enqueueImmediate(session.threadId, text);
     },
   };
 

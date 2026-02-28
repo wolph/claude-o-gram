@@ -4,8 +4,10 @@ import type {
   SessionStartPayload,
   SessionEndPayload,
   PostToolUsePayload,
+  NotificationPayload,
 } from '../types/hooks.js';
 import type { SessionStore } from '../sessions/session-store.js';
+import { shouldPostToolCall } from '../monitoring/verbosity.js';
 
 /**
  * Callback interface for delegating Telegram actions.
@@ -16,6 +18,7 @@ export interface HookCallbacks {
   onSessionStart(session: SessionInfo, isResume: boolean): Promise<void>;
   onSessionEnd(session: SessionInfo): Promise<void>;
   onToolUse(session: SessionInfo, payload: PostToolUsePayload): Promise<void>;
+  onNotification(session: SessionInfo, payload: NotificationPayload): Promise<void>;
 }
 
 /** Tool names that modify files (used to track changed files) */
@@ -114,7 +117,7 @@ export class HookHandlers {
 
   /**
    * Handle a PostToolUse hook event.
-   * Tracks tool usage and file changes, then delegates to the onToolUse callback.
+   * Checks verbosity filter before posting. Tracks tool usage and file changes.
    */
   async handlePostToolUse(payload: PostToolUsePayload): Promise<void> {
     const session = this.sessionStore.get(payload.session_id);
@@ -125,6 +128,8 @@ export class HookHandlers {
       return;
     }
 
+    // Update activity timestamp for idle detection
+    this.sessionStore.updateLastActivity(payload.session_id);
     this.sessionStore.incrementToolCount(payload.session_id);
 
     // Track file changes for Write, Edit, MultiEdit tools
@@ -135,7 +140,29 @@ export class HookHandlers {
       }
     }
 
+    // Verbosity filter: check if this tool call should be posted to Telegram
+    const verbosity = session.verbosity || 'normal';
+    if (!shouldPostToolCall(payload.tool_name, verbosity)) {
+      // Track suppressed call for periodic summary
+      this.sessionStore.incrementSuppressedCount(payload.session_id, payload.tool_name);
+      return; // Skip posting to Telegram
+    }
+
     await this.callbacks.onToolUse(session, payload);
+  }
+
+  /**
+   * Handle a Notification hook event.
+   * Delegates to the onNotification callback for Telegram posting.
+   */
+  async handleNotification(payload: NotificationPayload): Promise<void> {
+    const session = this.sessionStore.get(payload.session_id);
+    if (!session) {
+      console.warn(`Notification received for unknown session: ${payload.session_id}`);
+      return;
+    }
+    this.sessionStore.updateLastActivity(payload.session_id);
+    await this.callbacks.onNotification(session, payload);
   }
 }
 
