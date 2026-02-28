@@ -32,6 +32,14 @@ export interface PostToolUsePayload extends HookPayload {
   tool_use_id: string;
 }
 
+/** Payload for PreToolUse hook event (blocking approval flow) */
+export interface PreToolUsePayload extends HookPayload {
+  hook_event_name: 'PreToolUse';
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+  tool_use_id: string;
+}
+
 /** Payload for Notification hook event (permission prompts, idle alerts, etc.) */
 export interface NotificationPayload extends HookPayload {
   hook_event_name: 'Notification';

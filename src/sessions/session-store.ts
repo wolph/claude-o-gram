@@ -213,11 +213,13 @@ export class SessionStore {
 
       for (const [id, session] of Object.entries(data)) {
         // Convert filesChanged from array (JSON) to Set (in-memory)
+        // Ensure Phase 3 fields have defaults for sessions saved before Phase 3
         this.sessions.set(id, {
           ...session,
           filesChanged: new Set(
             Array.isArray(session.filesChanged) ? session.filesChanged : []
           ),
+          tmuxPane: session.tmuxPane ?? null,
         });
       }
     } catch (err) {

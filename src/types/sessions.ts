@@ -37,4 +37,9 @@ export interface SessionInfo {
   contextPercent: number;
   /** ISO timestamp of the last hook event, for idle detection */
   lastActivityAt: string;
+
+  // --- Phase 3 control fields ---
+
+  /** tmux pane ID captured at session start (e.g., "%5"), null if not running in tmux */
+  tmuxPane: string | null;
 }

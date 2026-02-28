@@ -92,6 +92,7 @@ export class HookHandlers {
       suppressedCounts: {},
       contextPercent: 0,
       lastActivityAt: now,
+      tmuxPane: null,
     };
 
     this.sessionStore.set(payload.session_id, session);

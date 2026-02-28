@@ -21,4 +21,11 @@ export interface AppConfig {
   idleTimeoutMs: number;
   /** Periodic summary interval in milliseconds (default: 300000 = 5 minutes) */
   summaryIntervalMs: number;
+
+  // --- Phase 3 control config ---
+
+  /** Approval timeout in milliseconds before auto-deny (default: 300000 = 5 minutes) */
+  approvalTimeoutMs: number;
+  /** When true, bypass all approval prompts and auto-allow (default: false) */
+  autoApprove: boolean;
 }
