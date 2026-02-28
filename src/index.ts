@@ -38,7 +38,7 @@ export async function main(): Promise<void> {
   );
 
   // 4. Create bot instance (with plugins, not yet started)
-  const bot = await createBot(config);
+  const bot = await createBot(config, sessionStore);
 
   // 5. Create topic manager wired to bot
   const topicManager = new TopicManager(bot, config.telegramChatId);

@@ -108,6 +108,66 @@ export class TopicManager {
   }
 
   /**
+   * Send an HTML-formatted message to a specific topic and return the message_id.
+   * Unlike sendMessage (which returns void), this is used when the caller needs
+   * the message ID (e.g., for status message creation and pinning).
+   */
+  async sendMessageRaw(threadId: number, html: string): Promise<number> {
+    let text = html;
+    if (text.length > 4096) {
+      text = text.slice(0, 4000) + '\n... (truncated)';
+    }
+    const msg = await this.bot.api.sendMessage(this.chatId, text, {
+      message_thread_id: threadId,
+    });
+    return msg.message_id;
+  }
+
+  /**
+   * Edit an existing message in place.
+   * Silently ignores "message is not modified" errors (Pitfall 2).
+   */
+  async editMessage(messageId: number, html: string): Promise<void> {
+    try {
+      await this.bot.api.editMessageText(this.chatId, messageId, html);
+    } catch (err) {
+      // Ignore "message is not modified" errors (Pitfall 2)
+      if (err instanceof Error && err.message.includes('message is not modified')) {
+        return;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Pin a message in the chat. Non-fatal: bot may lack pin rights (Pitfall 5).
+   */
+  async pinMessage(messageId: number): Promise<void> {
+    try {
+      await this.bot.api.pinChatMessage(this.chatId, messageId, {
+        disable_notification: true,
+      });
+    } catch (err) {
+      // Non-fatal: bot may lack pin rights (Pitfall 5)
+      console.warn('Failed to pin message:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  /**
+   * Edit a forum topic's name. Topic name limited to 128 chars.
+   * Non-fatal on error.
+   */
+  async editTopicName(threadId: number, name: string): Promise<void> {
+    try {
+      // Topic name limited to 128 chars
+      const truncated = name.length > 128 ? name.slice(0, 128) : name;
+      await this.bot.api.editForumTopic(this.chatId, threadId, { name: truncated });
+    } catch (err) {
+      console.warn('Failed to edit topic name:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  /**
    * Post a bot restart notification to an active topic.
    * Used when the bot reconnects after a restart.
    */
