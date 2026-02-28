@@ -28,11 +28,13 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Multiple concurrent sessions on the same machine each get their own isolated topic with no message cross-talk
   4. Messages posted to Telegram use HTML formatting with code blocks and bold tool names, and outputs over 4096 characters arrive as .txt file attachments
   5. Rapid message bursts are batched and queued so the bot never hits Telegram's 20 msg/min rate limit
-**Plans**: TBD
+**Plans:** 4 plans
 
 Plans:
-- [ ] 01-01: TBD
-- [ ] 01-02: TBD
+- [ ] 01-01-PLAN.md -- Project scaffolding, type contracts, and config loader
+- [ ] 01-02-PLAN.md -- Session store and Fastify hook server
+- [ ] 01-03-PLAN.md -- Telegram bot, topic lifecycle, message formatting, and rate limiting
+- [ ] 01-04-PLAN.md -- Integration wiring, hook auto-install, and end-to-end verification
 
 ### Phase 2: Monitoring
 **Goal**: Users can passively observe everything Claude Code is doing from Telegram -- every tool call, every text response, every notification, with a live status indicator and periodic summaries
@@ -71,6 +73,6 @@ Phases execute in numeric order: 1 -> 2 -> 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 0/0 | Not started | - |
+| 1. Foundation | 0/4 | Planning complete | - |
 | 2. Monitoring | 0/0 | Not started | - |
 | 3. Control | 0/0 | Not started | - |
