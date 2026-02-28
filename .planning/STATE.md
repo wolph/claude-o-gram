@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 1
 current_phase_name: Foundation
 current_plan: 4
-status: executing
-last_updated: "2026-02-28T19:07:04.903Z"
+status: verifying
+last_updated: "2026-02-28T19:28:21.274Z"
 last_activity: 2026-02-28
 progress:
   total_phases: 3
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 4
-  completed_plans: 3
-  percent: 75
+  completed_plans: 4
+  percent: 100
 ---
 
 # Project State
@@ -32,11 +32,11 @@ See: .planning/PROJECT.md (updated 2026-02-28)
 **Total Phases:** 3
 **Current Plan:** 4
 **Total Plans in Phase:** 4
-**Status:** Ready to execute
+**Status:** Phase complete — ready for verification
 **Last Activity:** 2026-02-28
 **Last Activity Description:** Completed 01-01 (Project scaffold and type contracts)
 
-**Progress:** [████████░░] 75%
+**Progress:** [██████████] 100%
 
 ## Performance Metrics
 
@@ -59,6 +59,7 @@ See: .planning/PROJECT.md (updated 2026-02-28)
 | Phase 01 P01 | 2min | 2 tasks | 8 files |
 | Phase 01 P02 | 2min | 2 tasks | 3 files |
 | Phase 01 P03 | 4min | 2 tasks | 5 files |
+| Phase 01 P04 | 30min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -78,6 +79,8 @@ Recent decisions affecting current work:
 - [Phase 01]: Custom HTML parse_mode transformer instead of @grammyjs/parse-mode plugin (v2 removed transformer API)
 - [Phase 01]: splitForTelegram uses 4000 char threshold (not 4096) to leave room for message template wrapping
 - [Phase 01]: MessageBatcher uses fire-and-forget flush during shutdown to avoid blocking process exit
+- [Phase 01]: Auto-install hooks on every startup (idempotent merge) -- no stale URLs if port changes, no flag to maintain
+- [Phase 01]: Reconnect-on-restart sends bot restart notice to open topics rather than reopening (topic was never closed)
 
 ### Pending Todos
 

@@ -12,7 +12,7 @@ This roadmap delivers a per-machine Telegram bot that bridges Claude Code sessio
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Foundation** - HTTP server, Telegram bot, session-to-topic lifecycle, message formatting, and rate limiting
+- [x] **Phase 1: Foundation** - HTTP server, Telegram bot, session-to-topic lifecycle, message formatting, and rate limiting (completed 2026-02-28)
 - [ ] **Phase 2: Monitoring** - Tool call forwarding, text output capture, notifications, status dashboard, summaries, and verbosity filtering
 - [ ] **Phase 3: Control** - Blocking approval flow with inline buttons, timeout handling, and bidirectional text input from Telegram
 
@@ -28,7 +28,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Multiple concurrent sessions on the same machine each get their own isolated topic with no message cross-talk
   4. Messages posted to Telegram use HTML formatting with code blocks and bold tool names, and outputs over 4096 characters arrive as .txt file attachments
   5. Rapid message bursts are batched and queued so the bot never hits Telegram's 20 msg/min rate limit
-**Plans:** 4 plans
+**Plans:** 4/4 plans complete
 
 Plans:
 - [ ] 01-01-PLAN.md -- Project scaffolding, type contracts, and config loader
@@ -73,6 +73,6 @@ Phases execute in numeric order: 1 -> 2 -> 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 0/4 | Planning complete | - |
+| 1. Foundation | 4/4 | Complete   | 2026-02-28 |
 | 2. Monitoring | 0/0 | Not started | - |
 | 3. Control | 0/0 | Not started | - |
