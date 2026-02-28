@@ -13,7 +13,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [ ] **SESS-02**: Bot auto-closes the topic when the Claude Code session ends (via SessionEnd hook)
 - [ ] **SESS-03**: Bot auto-discovers new sessions without manual registration
 - [ ] **SESS-04**: Concurrent sessions each get their own topic with isolated message routing
-- [ ] **SESS-05**: Each machine runs its own bot with a separate BotFather token, appearing as a distinct group member
+- [x] **SESS-05**: Each machine runs its own bot with a separate BotFather token, appearing as a distinct group member
 
 ### Monitoring
 
@@ -72,7 +72,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SESS-02 | Phase 1 | Pending |
 | SESS-03 | Phase 1 | Pending |
 | SESS-04 | Phase 1 | Pending |
-| SESS-05 | Phase 1 | Pending |
+| SESS-05 | Phase 1 | Complete |
 | MNTR-01 | Phase 2 | Pending |
 | MNTR-02 | Phase 2 | Pending |
 | MNTR-03 | Phase 2 | Pending |
