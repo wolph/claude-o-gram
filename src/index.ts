@@ -22,6 +22,8 @@ import { escapeHtml, markdownToHtml, isProceduralNarration, convertCommandsForTe
 import { ApprovalManager } from './control/approval-manager.js';
 import { InputRouter } from './input/input-router.js';
 import { CommandRegistry } from './bot/command-registry.js';
+import { expandCache, cacheKey } from './bot/expand-cache.js';
+import { InlineKeyboard } from 'grammy';
 import type { SessionInfo } from './types/sessions.js';
 import type { StatusData } from './types/monitoring.js';
 import type { PreToolUsePayload } from './types/hooks.js';
@@ -104,6 +106,41 @@ export async function main(): Promise<void> {
       topicManager.sendDocument(threadId, content, filename, caption),
   );
 
+  // 7b. Per-thread pending expand data, cleared on flush
+  const pendingExpandData = new Map<number, Array<{ toolName: string; expandContent: string }>>();
+
+  // 7c. Wire batcher onFlush callback for expand cache population
+  batcher.setOnFlush((threadId, messageIds, originalMessages) => {
+    const expandData = pendingExpandData.get(threadId);
+    pendingExpandData.delete(threadId);
+
+    if (!expandData || expandData.length === 0) return;
+    if (messageIds.length === 0) return;
+
+    // The first messageId corresponds to the batched tool message
+    const msgId = messageIds[0];
+    const key = cacheKey(config.telegramChatId, msgId);
+
+    // Build compact text (the original combined message)
+    const compactHtml = originalMessages.join('\n\n');
+
+    expandCache.set(key, {
+      compact: compactHtml,
+      tools: expandData.map(d => ({ name: d.toolName, expanded: d.expandContent })),
+    });
+
+    // Edit the message to add an Expand button
+    const keyboard = new InlineKeyboard().text('\u25B8 Expand', `exp:${msgId}`);
+    void bot.api.editMessageText(config.telegramChatId, msgId, compactHtml, {
+      parse_mode: 'HTML',
+      reply_markup: keyboard,
+    }).catch(err => {
+      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+        console.warn('Failed to add expand button:', err instanceof Error ? err.message : err);
+      }
+    });
+  });
+
   // 8. Per-session monitoring instances
   const monitors = new Map<string, SessionMonitor>();
 
@@ -151,13 +188,13 @@ export async function main(): Promise<void> {
 
         if (text.length > 3000) {
           const truncated = text.slice(0, 1500) + '\n... (truncated)';
-          batcher.enqueue(session.threadId, `<b>Claude:</b>\n${markdownToHtml(truncated)}`, {
+          batcher.enqueue(session.threadId, markdownToHtml(truncated), {
             content: text,
             filename: 'claude-output.txt',
             caption: 'Full Claude output',
           });
         } else {
-          batcher.enqueue(session.threadId, `<b>Claude:</b>\n${markdownToHtml(text)}`);
+          batcher.enqueue(session.threadId, markdownToHtml(text));
         }
       },
       // onUsageUpdate: update context percentage and status message
@@ -297,8 +334,18 @@ export async function main(): Promise<void> {
 
     onToolUse: async (session, payload) => {
       const result = formatToolCompact(payload);
-      // Enqueue (batched) -- tool use messages are high frequency
-      // TODO(06-02): wire expand cache and keyboard attachment
+
+      // Track expand data for this thread's pending batch
+      if (result.expandContent) {
+        let pending = pendingExpandData.get(session.threadId);
+        if (!pending) {
+          pending = [];
+          pendingExpandData.set(session.threadId, pending);
+        }
+        pending.push({ toolName: result.toolName, expandContent: result.expandContent });
+      }
+
+      // Enqueue compact one-liner (batched with 2s window)
       batcher.enqueue(session.threadId, result.compact);
 
       // Update status message with current tool
