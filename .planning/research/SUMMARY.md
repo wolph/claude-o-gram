@@ -1,222 +1,218 @@
 # Project Research Summary
 
-**Project:** Claude Code Telegram Bridge
-**Domain:** Per-machine Telegram bot daemon bridging Claude Code CLI sessions (hooks, monitoring, bidirectional control)
-**Researched:** 2026-02-28
-**Confidence:** HIGH
+**Project:** Claude Code Telegram Bridge v2.0 SDK Migration
+**Domain:** Telegram bot daemon migrating from HTTP hook/tmux architecture to Claude Agent SDK
+**Researched:** 2026-03-01
+**Confidence:** HIGH (with two MEDIUM-confidence gaps noted)
 
 ## Executive Summary
 
-This project is a lightweight, hook-native per-machine daemon that bridges Claude Code sessions to Telegram forum topics. Experts build tools in this category using official event hooks as the primary data channel — not terminal emulation, polling, or SDK wrapping. Three competing implementations exist (ccbot, RichardAtCT/claude-o-gram, Claude-Code-Remote), and all share a common flaw: they either require tmux, wrap the Claude SDK directly, or use terminal emulation (PTY). Our differentiating position is hook-native architecture on Node.js with zero additional infrastructure: Claude Code's `type: "http"` hooks POST directly to a local Fastify server, which is the same process as the Telegram bot. This eliminates an entire IPC layer that all competitors have to build and maintain.
+The v2.0 migration replaces the entire v1.0 infrastructure layer -- Fastify HTTP hook server, tmux text injection, JSONL transcript file watcher, and hook auto-installer -- with the Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`). This is an inversion of control: the bot shifts from a passive observer that discovers externally-launched Claude Code sessions to an active controller that spawns and owns sessions via the SDK's `query()` function. The Telegram-facing layer (grammY, topic management, rate limiting, formatting, approval UI) survives intact. The net effect is eliminating ~650 lines of fragile infrastructure code and replacing it with ~400 lines of SDK integration code, while gaining new capabilities (bot-initiated sessions, session interruption, dynamic permissions, image input) that were impossible in v1.
 
-The recommended approach is a single Node.js 25 process running grammY (long-polling) and Fastify (local HTTP) simultaneously. Claude Code hooks post to `localhost:4100`, the daemon routes events to Telegram forum topics (one topic per session), and approval requests use a Promise-based bridge that holds the HTTP response open until the user taps Approve/Deny in Telegram. The stack is already installed on this machine (Node v25.0.0 with native TypeScript support), the Telegram Bot API has stable forum topic support since Bot API 6.1, and all hook events needed are documented and verified. This is a well-understood integration with known-good patterns from the claude-code-hooks-multi-agent-observability project.
+The recommended approach is to use the SDK's V1 `query()` API with streaming input mode (`AsyncIterable<SDKUserMessage>` prompt). This gives the bot multi-turn conversation support, programmatic tool approval via `canUseTool` callback, and structured event streaming -- all through a single async generator. The V2 preview API (`unstable_v2_createSession`) is explicitly ruled out: it silently ignores critical options like `permissionMode` and `canUseTool` (GitHub issue #176, unfixed). The core new component is a `SessionManager` that orchestrates concurrent SDK sessions, each running its own `for await` event loop consuming `SDKMessage` objects and routing them to Telegram.
 
-The primary risks are: (1) hook timeout behavior — a timed-out PreToolUse hook auto-approves the tool call unless the hook explicitly exits with code 2, so the internal timeout must always deny rather than rely on Claude Code's process kill; (2) Telegram rate limits — 20 messages per minute per group means message batching is mandatory once Claude executes more than a handful of tools; (3) bidirectional text input from Telegram to Claude has no clean mechanism in the hook system and must be deferred to a post-MVP phase. Everything else is straightforward and well-documented.
+The three highest-impact risks are: (1) the AsyncIterable streaming input mode has a confirmed bug (#207, unfixed) that doubles token costs by triggering redundant AI turns -- the workaround is one-shot `query()` with `resume: sessionId` per user message; (2) each `query()` call spawns a separate OS process (~12s cold start, ~50-100MB RAM) that becomes an orphan if the bot crashes (#142, unfixed); (3) the `canUseTool` callback blocks the entire agent loop during approval waits, requiring short timeouts and auto-approval of safe tools. All three are well-understood with documented workarounds, but they must be addressed in the architecture from day one -- not retrofitted.
 
 ## Key Findings
 
 ### Recommended Stack
 
-The stack decision is settled and high-confidence. Node.js 25 runs TypeScript natively (erasable syntax only — no enums), making the development experience clean without a build step during iteration. grammY is the clear choice for Telegram (typed, modern, active plugin ecosystem), Fastify for the local HTTP server (built-in schema validation, fast), and better-sqlite3 is optional but useful for session persistence across restarts. The most important architectural decision is using `type: "http"` hooks rather than `type: "command"` hooks — this eliminates shell scripts, IPC bridges, and socket management entirely.
+The migration is a net subtraction in dependencies. Two packages are added (the Agent SDK and its Zod peer dependency) and two are removed (Fastify and Pino). The existing grammY Telegram stack, TypeScript toolchain, and dotenv remain unchanged. The SDK requires `ANTHROPIC_API_KEY` as a new environment variable -- a billing model change from v1.0 which used the user's existing Claude.ai auth.
 
 **Core technologies:**
-- **Node.js 25.x** — runtime, native TypeScript support, event loop handles concurrent polling + HTTP + file watching
-- **TypeScript 5.9.x** — type safety; use `const` objects/string unions instead of enums (erasable syntax constraint)
-- **grammY 1.40.x** — Telegram Bot API client; TypeScript-first, active, best plugin ecosystem; use with `@grammyjs/auto-retry` + `@grammyjs/transformer-throttler` for rate limit handling
-- **Fastify 5.7.x** — local HTTP server for Claude Code HTTP hooks; schema validation built-in; eliminates all custom IPC code
-- **better-sqlite3 12.6.x** — optional but recommended for session-map persistence across restarts; synchronous API is simpler
-- **chokidar 5.0.x** — JSONL transcript file watcher for Claude's text output (not captured by hooks); ESM-only, requires Node >= 20
-- **zod 4.3.x** — runtime validation of hook JSON payloads and config files
+- **@anthropic-ai/claude-agent-sdk ^0.2.63** -- replaces Fastify hook server, tmux injection, JSONL watcher, and hook installer with a single `query()` async generator
+- **zod ^4.0.0** -- required peer dependency of the Agent SDK (not used directly in bot code)
+- **grammy ^1.40.1 + plugins** -- KEPT unchanged; Telegram interface is orthogonal to Claude interface
+- **dotenv ^17.3.1** -- KEPT; now also loads `ANTHROPIC_API_KEY`
+- **TypeScript 5.9.x / ES2022 target** -- KEPT unchanged; compatible with SDK V1 API
 
-**Critical version notes:** chokidar 5.x is ESM-only (requires `"type": "module"` in package.json). TypeScript enums are unsupported with Node 25 native execution. Use `node --env-file=.env` instead of dotenv.
+**Removed:** `fastify` (no HTTP server needed), `pino` (only used by Fastify)
+
+**Critical decision:** Use V1 `query()` API, not V2 `unstable_v2_createSession()`. V2 silently ignores `permissionMode`, `cwd`, `allowedTools`, and `canUseTool`. V1 is production-ready and fully supports streaming input for multi-turn conversations.
 
 ### Expected Features
 
-Three tiers of features emerge from competitive analysis and hook system capabilities.
+**Must migrate (table stakes -- regressions if broken):**
+- **TS-01: Session lifecycle management** -- bot calls `query()` directly, owns session creation/teardown; `SDKSystemMessage` (init) replaces SessionStart hook
+- **TS-02: Tool call notifications** -- PostToolUse hook callbacks or `SDKAssistantMessage` tool_use blocks replace HTTP PostToolUse handler
+- **TS-03: Claude text output capture** -- `SDKAssistantMessage` text blocks replace JSONL transcript watcher entirely
+- **TS-04: Tool approval flow** -- `canUseTool` async callback replaces PreToolUse HTTP blocking; same deferred-promise pattern
+- **TS-05: User text input** -- AsyncIterable prompt replaces tmux send-keys; this is the killer improvement of the migration
+- **TS-06: Notification forwarding** -- Notification hook callback; direct 1:1 mapping
+- **TS-07/08/09/10: Rate limiting, status messages, verbosity, summary timer** -- preserved as-is (Telegram-side concerns)
 
-**Must have (table stakes):**
-- **Session-to-topic mapping** — `SessionStart` hook creates a Telegram forum topic; `SessionEnd` closes it. Foundation for everything else.
-- **Tool call notifications** — `PostToolUse` hook posts tool name, file path, and truncated output to the session topic.
-- **Permission request forwarding with inline Approve/Deny** — `PreToolUse` blocking hook posts tool details with inline keyboard; holds HTTP response open until user responds in Telegram.
-- **Notification forwarding** — `Notification` hook (idle_prompt, permission_prompt) forwarded to session topic.
-- **Timeout handling for blocked hooks** — internal timeout exits with code 2 (deny) before Claude Code's process-kill timeout fires.
-- **HTML message formatting** — use `parse_mode: "HTML"` (not MarkdownV2), `<pre>` for code blocks, `<code>` for paths.
+**New capabilities enabled by SDK (differentiators):**
+- **DF-01: Bot-initiated sessions** -- users start Claude sessions from Telegram via `/run <prompt>` (this becomes the DEFAULT flow since the bot IS the Claude runtime)
+- **DF-02: Dynamic permission modes** -- `/yolo` and `/careful` commands to change permission mode mid-session
+- **DF-03: Session interruption** -- `/stop` command calls `query.interrupt()`
+- **DF-04: Streaming tool progress** -- real-time "Using Bash..." indicators via stream events
 
-**Should have (competitive):**
-- **Text output capture** — chokidar watches JSONL transcript file; parses new assistant message lines since last offset.
-- **Custom text input from Telegram** — the hardest feature; requires deeper research on injection mechanism.
-- **Smart message batching** — debounce PostToolUse events 2-3 seconds, batch into single messages; mandatory for rate limit compliance.
-- **Configurable verbosity** — filter which events reach Telegram (suppress Read/Glob/Grep by default).
-- **File sharing for large outputs** — outputs > 4096 chars sent as `.txt` document attachments.
-- **Periodic summary updates** — aggregate tool activity into status messages every N tool calls or N seconds.
+**Defer to v2.1+:**
+- DF-05: Subagent tracking (low value, medium complexity)
+- DF-07: AskUserQuestion structured UI (high complexity)
+- DF-08: Image input from Telegram (medium complexity, low priority)
 
-**Defer (v2+):**
-- SubagentStart/Stop tracking (agent teams are still new in Claude Code)
-- Session resume/reconnect after bot restart
-- Multi-machine dashboard topic
-- Message threading within topics
+**Anti-features (do NOT build):**
+- Token-by-token streaming to Telegram (rate limits make it impossible)
+- HTTP wrapper around the SDK (Telegram IS the remote access layer)
+- Auto-approve all tools by default (dangerous; subagents inherit it)
+- Custom tool implementations (scope creep; use built-in tools + MCP)
+- V2 preview API (unstable, silently broken)
 
 ### Architecture Approach
 
-The architecture is a single long-lived Node.js process with two entry points: a Fastify HTTP server (receives Claude Code hook POSTs) and a grammY bot (long-polls Telegram for messages and callback queries). These share in-process state — a session map (sessionId → topicId), an approval queue (Map of Promises keyed by requestId), and optionally a SQLite database for persistence. The key insight is that the HTTP response to a PreToolUse hook is held open using a Promise whose `resolve` function is stored in the approval queue; when the user taps Approve/Deny in Telegram, the callback_query handler resolves the Promise, and the HTTP handler returns the decision JSON to Claude Code. This Promise-bridging pattern is the architectural core of the blocking approval flow.
+The v2.0 architecture centers on a `SessionManager` that orchestrates concurrent SDK sessions. Each session consists of a `query()` instance, an `InputChannel` (AsyncIterable wrapper for streaming user messages), an `AbortController` for cancellation, and a background `for await` event loop that consumes `SDKMessage` objects and routes them to Telegram via a `MessageRouter`. The `MessageRouter` replaces both the HookHandlers and TranscriptWatcher from v1, classifying SDK messages by type and dispatching to the existing MessageBatcher, StatusMessage, and SummaryTimer components. The approval flow uses the same deferred-promise pattern as v1, but the promise now resolves inside the `canUseTool` callback instead of an HTTP response handler.
 
-**Major components:**
-1. **HTTP Server (Fastify)** — receives Claude Code hook POSTs at `/hooks/{event}`, routes to event handlers
-2. **Session Manager** — in-memory `Map<sessionId, Session>` with reverse lookup `Map<topicId, sessionId>` for routing Telegram replies
-3. **Telegram Client (grammY)** — creates/closes forum topics, sends messages to topics, handles callback queries and text messages
-4. **Approval Queue** — `Map<requestId, PendingApproval>` with stored Promise resolvers; bridges synchronous HTTP with async Telegram callbacks
-5. **Log Watcher (chokidar)** — tails JSONL transcript file per session, extracts assistant text messages not captured by hooks
-6. **Message Formatter** — converts hook JSON to HTML-formatted Telegram messages; handles 4096-char limits via splitting or file upload
+**New components to create:**
+1. **SessionManager** (`src/sdk/session-manager.ts`) -- orchestrates N concurrent sessions; start/stop/input/abort; HIGH complexity
+2. **MessageRouter** (`src/sdk/message-router.ts`) -- classifies SDKMessages, routes to Telegram formatters; MEDIUM complexity
+3. **InputChannel** (`src/sdk/input-channel.ts`) -- AsyncIterable push-pull bridge for streaming user input; MEDIUM complexity
+4. **SDK types adapter** (`src/sdk/types.ts`) -- bridges SDK types to internal types; LOW complexity
+
+**Components to delete:** `hooks/server.ts`, `hooks/handlers.ts`, `utils/install-hooks.ts`, `monitoring/transcript-watcher.ts`, `types/hooks.ts`
+
+**Components preserved:** bot/bot.ts, bot/topics.ts, bot/rate-limiter.ts, bot/formatter.ts (minor updates), monitoring/status-message.ts, monitoring/summary-timer.ts, monitoring/verbosity.ts, control/approval-manager.ts (interface change), sessions/session-store.ts (simplified)
 
 ### Critical Pitfalls
 
-1. **Hook timeout auto-approves instead of denying** — Claude Code's process-kill timeout exits with signal codes (137/143) which are treated as non-blocking errors, so execution proceeds. Fix: implement an internal timeout in the hook/daemon that always exits with code 2 to deny, fired before Claude Code's timeout.
+All three researchers flagged overlapping concerns. The top 5 pitfalls, ranked by combined severity and recovery cost:
 
-2. **Telegram rate limits drop messages and block approvals** — 20 msg/min per group; rapid tool calls (10+ per minute is routine) will hit this. When rate-limited, ALL bot API calls fail, including approval buttons from other sessions. Fix: message batching with debounce from day one; circuit breaker pauses all output during `retry_after` window.
+1. **AsyncIterable double-turn bug (#207, UNFIXED)** -- streaming input mode triggers two AI turns per user message, doubling token costs. Prevention: use one-shot `query()` + `resume: sessionId` pattern until the bug is fixed. This is the single most expensive pitfall if missed ($140-700/month wasted per reporter's estimate). Recovery cost: MEDIUM (refactor session interaction pattern).
 
-3. **MarkdownV2 parse failures silently drop messages** — arbitrary code output contains all 18+ MarkdownV2 special characters. Fix: use HTML parse mode exclusively; `<pre>` blocks do not require content escaping; add plain-text fallback if HTML parsing fails.
+2. **Orphaned child processes on crash (#142, UNFIXED)** -- each `query()` spawns a child process; bot crash leaves orphans consuming 50-100MB each. Prevention: PID tracking, startup orphan cleanup, systemd cgroup management. Recovery cost: LOW (add cleanup script), but consequences are HIGH (OOM over time).
 
-4. **Session isolation failure with concurrent sessions** — multiple Claude Code sessions share the same hook endpoints; without session_id-keyed routing, approval responses can be routed to the wrong session. Fix: extract `session_id` from every hook POST and use it as the routing key for all state.
+3. **Event loop interference between grammY and SDK** -- tight `for await` loops over SDK messages starve grammY's update processing, causing approval buttons to time out. Prevention: async message queuing, yield control with `setImmediate()`, keep callback query handlers lightweight. Recovery cost: HIGH (architectural refactor if not designed correctly from day one).
 
-5. **4096-character message limit breaks code blocks** — naive splitting breaks HTML tags, producing malformed messages or parse errors. Fix: formatting-aware splitter that closes tags before split points; fall back to file attachment for output > 12000 chars.
+4. **canUseTool blocks the entire agent loop** -- during approval waits, the Claude session is completely paused. Prevention: short timeouts (60-120s), auto-approve safe read-only tools, "waiting for approval" status messages. Recovery cost: LOW (configuration change).
+
+5. **SDK settings isolation** -- SDK defaults to loading NO filesystem settings (empty `settingSources`). Claude Code sessions started via SDK behave differently from CLI sessions. Prevention: explicitly set `settingSources: ['user', 'project', 'local']` or configure everything programmatically. Recovery cost: LOW (one-line fix once diagnosed).
 
 ## Implications for Roadmap
 
-Based on combined research, the architecture's dependency chain and pitfall-to-phase mapping from PITFALLS.md directly suggest a 6-phase build order.
+Based on the combined dependency analysis from ARCHITECTURE.md and pitfall-to-phase mapping from PITFALLS.md, the migration should follow a 5-phase structure. This differs from the v1.0 research (6 phases) because the SDK consolidates several v1 concerns into fewer components.
 
-### Phase 1: Foundation (HTTP Server + Bot Skeleton + Session Routing)
+### Phase 1: SDK Foundation + Session Lifecycle
 
-**Rationale:** Every other feature depends on the core plumbing: a running HTTP server, a Telegram bot that can send messages, and session_id-to-topic routing. The two critical pitfalls (hook timeout behavior and session isolation) must be designed correctly here — both are expensive to retrofit. This is the phase where the Promise-bridging pattern for approval flow is established.
+**Rationale:** Everything depends on `query()` working correctly. The process lifecycle (Pitfall 1: cold start, Pitfall 5: orphaned processes), session interaction pattern (Pitfall 2: double-turn), and event loop coexistence (Pitfall 6: grammY interference) must be designed before any feature work. This phase validates the fundamental SDK integration.
 
-**Delivers:** HTTP server receiving hook POSTs; Telegram bot initialized with long-polling; in-memory session map; basic PostToolUse events posted to a manually created topic; Claude Code hook configuration (`~/.claude/settings.json`) wired to localhost:4100.
+**Delivers:** SDK dependency installed; updated types and config (remove hook server fields, add API key); InputChannel implementation; SessionManager skeleton with single-session `query()` + `for await` loop; orphan process cleanup on startup; session ID capture and persistence; topic creation on session init; basic text output forwarding to Telegram.
 
-**Addresses:** Session-to-topic mapping (table stakes), multi-session support (table stakes)
+**Addresses features:** TS-01 (session lifecycle), TS-03 (text output capture), DF-01 (bot-initiated sessions via `/run`)
 
-**Avoids:** Session isolation failure (Pitfall 5 — design session_id routing from day one), hook timeout auto-approve (Pitfall 1 — establish exit-code-2 contract immediately)
+**Avoids pitfalls:** Process spawn overhead (1), double-turn bug (2) via one-shot+resume pattern, V2 API (3) by using V1, orphaned processes (5), event loop interference (6), settings isolation (10)
 
-**Research flag:** Standard patterns. HTTP hooks are documented, grammY initialization is documented. Skip research-phase.
+**Key decision:** One-shot `query()` + `resume` vs. streaming input. Research strongly recommends one-shot+resume due to the double-turn bug (#207). Design the InputChannel to support both patterns so switching to streaming input is a single-module change when #207 is fixed.
 
-### Phase 2: Session Lifecycle + Message Formatting
+### Phase 2: Approval Flow + Tool Notifications
 
-**Rationale:** Once the plumbing exists, formalize session creation and teardown (createForumTopic / closeForumTopic) and establish the message formatting layer. Message formatting (HTML mode, splitting, file fallback) must come before any real output forwarding because MarkdownV2 failures silently drop messages. Rate limit handling also belongs here since it affects every outbound message.
+**Rationale:** The `canUseTool` callback is the second-highest-value feature after basic session management. It requires Phase 1's SessionManager but is independent of text input or monitoring. The approval flow architecture (Pitfall 4: blocking agent loop, Pitfall 9: hook vs canUseTool execution order) must be correctly established before adding more complexity.
 
-**Delivers:** Auto-created forum topics on SessionStart; auto-closed topics on SessionEnd; HTML message formatter with 4096-char splitter and file-upload fallback; message batching/debouncing; grammY rate limit plugins configured.
+**Delivers:** `canUseTool` callback wired to ApprovalManager's deferred-promise pattern; AbortSignal awareness; auto-approve for safe read-only tools (Read, Glob, Grep); PostToolUse hook callbacks forwarding tool notifications to Telegram; Notification hook callbacks.
 
-**Addresses:** Topic lifecycle management, notification forwarding, basic message formatting, smart message batching
+**Addresses features:** TS-04 (tool approval), TS-02 (tool call notifications), TS-06 (notification forwarding)
 
-**Avoids:** MarkdownV2 parse failures (Pitfall 4), Telegram rate limits (Pitfall 3), 4096-char truncation (Pitfall 6), General topic thread_id bug
+**Avoids pitfalls:** canUseTool blocking (4), hook vs canUseTool execution order (9)
 
-**Research flag:** Standard patterns. Forum topic API is stable (Bot API 6.1+, currently 9.4). Skip research-phase.
+### Phase 3: User Text Input + Multi-Turn Conversations
 
-### Phase 3: Approval Flow (PreToolUse Blocking)
+**Rationale:** With sessions running and approvals working, add the ability for Telegram users to send follow-up messages to active Claude sessions. This is the feature that was most fragile in v1 (tmux injection) and most improved by the SDK (structured async input). It depends on Phase 1's InputChannel but can be built incrementally on top of the one-shot+resume pattern.
 
-**Rationale:** The Promise-bridging approval queue is architecturally the most complex component. It needs the session map (Phase 1) and message formatting (Phase 2) before it can work. Building it as its own phase keeps the scope focused. Timeout handling (exit code 2 deny, button expiry editing) is critical correctness, not polish.
+**Delivers:** Telegram text messages in session topics routed to `sessionManager.sendInput()`; new `query()` call with `resume: sessionId` per user message (one-shot+resume pattern); session resume after bot restart; `/stop` command for session interruption.
 
-**Delivers:** PreToolUse hooks posting approval requests with inline Approve/Deny keyboard; Promise-based approval queue holding HTTP response open; timeout handling that denies via exit code 2 and edits buttons to "Expired"; callback_data validation (session_id + nonce).
+**Addresses features:** TS-05 (user text input), DF-03 (session interruption)
 
-**Addresses:** Permission request forwarding (P1 table stakes), timeout handling (P1 table stakes), inline keyboard system
+**Avoids pitfalls:** Double-turn bug (2) continues to be avoided via one-shot+resume; session resume requires stored session IDs (8)
 
-**Avoids:** Hook timeout auto-approve (Pitfall 1), stale callback buttons after timeout (UX pitfall), callback_data forgery (security pitfall)
+### Phase 4: Monitoring + Status + Cleanup
 
-**Research flag:** May benefit from research-phase. The exact `hookSpecificOutput.permissionDecision` JSON schema and how Claude Code handles HTTP response latency vs. its own hook timeout need empirical verification.
+**Rationale:** With core functionality proven (sessions, approvals, text I/O), adapt the monitoring components to pull data from SDK messages instead of transcript files and hook payloads. Remove dead code (Fastify, hook installer, transcript watcher) in this phase -- only after the SDK path is fully verified.
 
-### Phase 4: Text Output (Log Watcher)
+**Delivers:** Status message updates from `SDKAssistantMessage.message.usage`; context percentage tracking from token usage; summary timer adapted to SDK data source; `SDKCompactBoundaryMessage` handling; Fastify and Pino removed from package.json; dead files deleted; settings.json cleaned of HTTP hook config.
 
-**Rationale:** Claude's reasoning text is not captured by any hook — it only appears in the JSONL transcript file. This requires the chokidar watcher and JSONL parser. It depends on Phase 2 (session map provides `transcript_path`) and Phase 2 (message formatter handles the output). The JSONL format is community-documented (MEDIUM confidence), not formally stable, so this phase needs care with error handling.
+**Addresses features:** TS-08 (status messages), TS-10 (summary timer), DF-02 (dynamic permissions via `/yolo` and `/careful`)
 
-**Delivers:** chokidar watching transcript file per session from `transcript_path`; incremental JSONL parsing from byte offset (not full file re-read); deduplication of events already forwarded via hooks; assistant text messages posted to session topic.
+**Avoids pitfalls:** Ghost hook events from old settings.json (15); streaming output overwhelming Telegram (7) by using complete messages not partial streams
 
-**Addresses:** Text output capture (P2 feature), periodic summary updates (P2 feature)
+### Phase 5: Polish + Operational Hardening
 
-**Avoids:** Re-reading entire JSONL on each poll (performance trap), partial line reads from concurrent writes (integration gotcha), sync file I/O blocking event loop (performance trap)
+**Rationale:** Edge cases, error handling, and operational concerns. This phase addresses the "looks done but isn't" checklist from PITFALLS.md.
 
-**Research flag:** Needs research-phase. JSONL format is MEDIUM confidence (community-documented, not stable API). Verify exact schema fields and whether `transcript_path` in hook input reliably points to the correct file.
+**Delivers:** Graceful shutdown (abort all sessions, wait for processing loops); memory monitoring for child processes; configurable verbosity preserved; formatter adapted for SDK tool_use block shape differences; comprehensive error isolation (Telegram errors never crash SDK sessions); event loop lag monitoring.
 
-### Phase 5: Bidirectional Text Input
+**Addresses features:** TS-07 (rate limiting preserved), TS-09 (verbosity preserved)
 
-**Rationale:** Sending arbitrary text from Telegram to Claude is the hardest unsolved problem. Architecture research rates this LOW confidence because the hook system is designed as an event listener, not a bidirectional channel. The Stop hook's `decision: "block"` approach provides limited feedback injection when Claude pauses but does not support mid-session text injection. This phase needs dedicated research before implementation.
-
-**Delivers:** Telegram text messages in a session topic routed to Claude Code; at minimum, Stop-hook-based feedback injection when Claude pauses; ideally a cleaner injection mechanism if one is discovered.
-
-**Addresses:** Custom text input from Telegram (P2 feature, highest complexity)
-
-**Research flag:** Requires research-phase. This is the only feature with LOW confidence architecture. Investigate: `UserPromptSubmit` hook's `additionalContext` mechanism, any input file/pipe mechanism added in recent Claude Code releases, whether the Stop hook `decision: "block"` approach is reliable for feedback injection.
-
-### Phase 6: Polish + Robustness
-
-**Rationale:** After core functionality is proven, add configurable verbosity, session resume/reconnect after bot restart, subagent tracking, and operational hardening (process manager setup, secret scrubbing, health check endpoint). This is the "looks done but isn't" phase where the checklist from PITFALLS.md is worked through systematically.
-
-**Delivers:** Configurable verbosity (filter event types); session map persistence to JSON/SQLite for restart recovery; SubagentStart/Stop tracking; secret scrubbing before Telegram forwarding; bot admin validation at startup (can_manage_topics check); operational setup (systemd/pm2 configuration).
-
-**Addresses:** Configurable verbosity (P2), session resume (P3), subagent tracking (P3)
-
-**Avoids:** Bot restart loses session map, orphaned topics after crash, token leakage in logs, bot lacking topic permissions (silent failure)
-
-**Research flag:** Standard patterns. Skip research-phase.
+**Avoids pitfalls:** Streaming output volume (7), extended thinking + streaming incompatibility (11), session.close() leak (13)
 
 ### Phase Ordering Rationale
 
-- **Phases 1 and 2 first** because session routing and message formatting are load-bearing for every subsequent feature. Skipping them creates expensive retrofits.
-- **Phase 3 before Phase 4** because approval flow (PreToolUse blocking) is the highest-value, highest-risk feature. It must be stable before adding more complexity.
-- **Phase 4 before Phase 5** because the log watcher uses session state from Phase 1-2, and its patterns (offset tracking, deduplication) inform how text input routing should work.
-- **Phase 5 isolated** because the architecture gap in bidirectional text input means this phase may require a research spike before any code is written. Isolating it prevents it from blocking Phases 1-4.
-- **Phase 6 last** because operational hardening and polish should not precede feature completeness.
+- **Phase 1 first** because it resolves the three most critical architectural decisions: session interaction pattern (one-shot+resume vs streaming), process lifecycle management, and event loop coexistence. Every subsequent phase depends on these being correct.
+- **Phase 2 before Phase 3** because the approval flow is higher-value and higher-risk than text input. Approvals involve the `canUseTool` blocking behavior (Pitfall 4) which must be stable before adding more async complexity.
+- **Phase 3 before Phase 4** because user text input is core functionality, while monitoring is polish. Users need to interact with sessions before they need status dashboards.
+- **Phase 4 before Phase 5** because dead code removal (Fastify, transcript watcher) should happen only after the SDK replacement is fully verified. Removing infrastructure before verification creates rollback risk.
+- **Phase 5 last** because operational hardening and polish should not precede feature completeness. The "looks done but isn't" checklist is explicitly a final-phase activity.
 
 ### Research Flags
 
-Phases requiring `/gsd:research-phase` during planning:
-- **Phase 3:** Verify exact `permissionDecision` JSON schema, HTTP hook timeout interaction with slow responses, exit code 2 behavior edge cases
-- **Phase 4:** Verify JSONL transcript format field names and stability; confirm `transcript_path` in hook input is reliable
-- **Phase 5:** Critical — architecture for Telegram-to-Claude text injection is LOW confidence; research before planning this phase
+Phases likely needing `/gsd:research-phase` during planning:
+- **Phase 1:** The one-shot+resume vs streaming input decision needs empirical validation. The double-turn bug (#207) workaround must be tested with actual SDK sessions to confirm resume works seamlessly for multi-turn flows. Also verify `settingSources` behavior and SDK settings isolation.
+- **Phase 2:** Verify exact `canUseTool` callback signature, `PermissionResult` shape, and interaction with AbortSignal. Confirm that auto-approve in `canUseTool` (returning `allow` without posting to Telegram) does not interfere with the SDK's internal permission pipeline.
 
 Phases with standard patterns (skip research-phase):
-- **Phase 1:** HTTP hooks, grammY initialization, session maps are well-documented
-- **Phase 2:** Forum topic API (Bot API 6.1+ stable), HTML parse mode, rate limit plugins documented
-- **Phase 6:** Session persistence, process management, secret scrubbing are standard patterns
+- **Phase 3:** AsyncIterable input and `query.interrupt()` are well-documented with examples. The InputChannel pattern is standard producer-consumer.
+- **Phase 4:** Monitoring data extraction from SDK messages is straightforward field mapping. Dead code removal is mechanical.
+- **Phase 5:** Error handling, graceful shutdown, and operational hardening are standard patterns.
 
 ## Confidence Assessment
 
 | Area | Confidence | Notes |
 |------|------------|-------|
-| Stack | HIGH | All libraries verified against official docs; Node 25 native TypeScript tested on-machine; grammY v1.40.1 confirmed via npm. Only gap: `node:sqlite` built-in not yet stable enough to replace better-sqlite3. |
-| Features | HIGH | Competitive analysis from 3 existing projects; table stakes confirmed by competitor implementations; differentiators validated against Claude Code hook event schema. Rate limit numbers verified from official Telegram FAQ. |
-| Architecture | HIGH (with one LOW exception) | HTTP hook pattern verified in official Claude Code docs and by claude-code-hooks-multi-agent-observability project. Promise-bridging approval queue is a standard Node.js async pattern. EXCEPTION: bidirectional text input (Telegram → Claude) is LOW confidence — the hook system has no clean mechanism for this. |
-| Pitfalls | HIGH | Critical pitfalls (hook timeout, rate limits, message formatting, session isolation) verified against official docs. IPC gotchas verified from Node.js docs and Telegram API docs. Empirical limits (editMessage rate) verified from community projects. |
+| Stack | HIGH | SDK package verified on npm (v0.2.63), all API surface confirmed against official TypeScript reference docs. Zod peer dependency verified. Fastify/Pino removal justified. |
+| Features | HIGH | All table-stakes features have direct SDK equivalents with documented patterns. Feature dependency tree clearly maps to SDK capabilities. Differentiators are straightforward SDK method calls. |
+| Architecture | HIGH | SessionManager + MessageRouter + InputChannel pattern is well-supported by SDK docs. Concurrent session handling via per-session event loops is standard Node.js async. The only MEDIUM area is the one-shot+resume workaround for the double-turn bug. |
+| Pitfalls | HIGH | Critical pitfalls verified against GitHub issues with reproduction steps. Three unfixed SDK bugs (#207, #142, #176) are well-documented with workarounds. Phase-specific warnings are concrete and actionable. |
 
 **Overall confidence:** HIGH
 
 ### Gaps to Address
 
-- **Bidirectional text input mechanism** — the architecture research section explicitly rates this LOW confidence. Before Phase 5 planning, a focused research spike should examine: `UserPromptSubmit` hook `additionalContext` field behavior, whether recent Claude Code versions added any input injection mechanism, and whether the Stop hook `decision: "block"` with reason text is a viable workaround for the MVP.
+- **One-shot+resume latency:** The recommended workaround for the double-turn bug (#207) uses one-shot `query()` + `resume` per user message. This adds 3-12 seconds of latency per message (process spawn overhead from Pitfall 1). Need to empirically measure whether the 12s cold start applies to resume calls or only initial session creation. If resume is fast (~2-3s), the workaround is viable. If resume has the same 12s overhead, streaming input with output filtering (Workaround B) may be preferable despite token waste.
 
-- **JSONL transcript format stability** — community-documented, not a stable API. The exact field names (`parentUuid`, `uuid`, `message.content[]`) are used by multiple tools but could change with Claude Code updates. Add defensive parsing with explicit error handling for unknown formats.
+- **Zod version conflict:** STACK.md says the SDK requires `zod ^4.0.0` as a peer dependency. PITFALLS.md (Pitfall 14) says the SDK requires `zod ^3.24.1` and warns about Zod 4 conflicts. This is a contradiction between researchers. The `npm view` verification in STACK.md (HIGH confidence) says `^4.0.0`, so that is authoritative. Resolve by installing `zod@4` and testing.
 
-- **HTTP hook timeout behavior under slow responses** — the docs confirm the timeout field is configurable, but the interaction between Claude Code's timeout and a slow HTTP server response (waiting 4+ minutes for Telegram approval) needs empirical testing. Specifically: does Claude Code use a connection timeout (fails immediately if HTTP handshake is slow) or a response timeout (waits for full response)?
+- **API key billing model change:** v1.0 used the user's Claude.ai subscription (free for Pro users). v2.0 SDK requires `ANTHROPIC_API_KEY` which bills per-token via the Anthropic API. This is a significant cost model change for users. Must be documented clearly. No technical mitigation available.
 
-- **Bot admin permission requirement** — the bot requires `can_manage_topics` admin permission in the Telegram supergroup. This is an installation prerequisite that must be validated at startup with a clear error message (not a silent failure on first SessionStart).
+- **SDK 0.x versioning:** The SDK is pre-1.0 (v0.2.63) with very frequent releases (every 1-3 days). While the V1 API appears stable across recent releases, there is no formal stability guarantee. Pin to `^0.2.63` and test after each update.
+
+- **Bot restart session resume:** Architecture research recommends using `resume: sessionId` to reconnect after bot restart. This has not been empirically validated. Need to confirm: (a) does the SDK persist enough state to disk for resume to work after the parent process dies? (b) does resume restore the `canUseTool` callback correctly? (c) does the resumed session pick up from where it left off or restart from the beginning?
 
 ## Sources
 
 ### Primary (HIGH confidence)
-- [Claude Code Hooks Reference](https://code.claude.com/docs/en/hooks) — hook events, HTTP hook type, JSON schemas, PreToolUse decision control, exit code semantics
-- [Telegram Bot API](https://core.telegram.org/bots/api) — Bot API 9.4, forum topic methods (createForumTopic, closeForumTopic, etc.)
-- [Telegram Bot FAQ](https://core.telegram.org/bots/faq) — rate limits: 30 msg/s global, 20 msg/min per group, 1 msg/s per chat
-- [grammY official docs](https://grammy.dev/) — framework overview, plugin list, flood control
-- [npm registry](https://www.npmjs.com/package/grammy) — grammY v1.40.1 current version confirmed
-- [Node.js TypeScript docs](https://nodejs.org/en/learn/typescript/run-natively) — native type stripping, erasable-only syntax constraint
+- [Agent SDK TypeScript Reference](https://platform.claude.com/docs/en/agent-sdk/typescript) -- complete V1 API: `query()`, `Options`, `SDKMessage` types, `CanUseTool`, `PermissionResult`
+- [Agent SDK Overview](https://platform.claude.com/docs/en/agent-sdk/overview) -- capabilities, architecture, built-in tools, hooks, permissions
+- [Streaming Input Modes](https://platform.claude.com/docs/en/agent-sdk/streaming-vs-single-mode) -- AsyncIterable pattern, streaming vs single message
+- [Streaming Output](https://platform.claude.com/docs/en/agent-sdk/streaming-output) -- `includePartialMessages`, `SDKPartialAssistantMessage`, thinking incompatibility
+- [Handle Approvals and User Input](https://platform.claude.com/docs/en/agent-sdk/user-input) -- `canUseTool` callback, `PermissionResult`, `AskUserQuestion`
+- [Session Management](https://platform.claude.com/docs/en/agent-sdk/sessions) -- session IDs, resume, fork, persistence
+- [SDK Hooks System](https://platform.claude.com/docs/en/agent-sdk/hooks) -- PostToolUse, Notification, SessionStart/End callbacks
+- [Configure Permissions](https://platform.claude.com/docs/en/agent-sdk/permissions) -- permission modes, canUseTool execution order
+- [Hosting the Agent SDK](https://platform.claude.com/docs/en/agent-sdk/hosting) -- resource requirements, process management
+- [Migration Guide](https://platform.claude.com/docs/en/agent-sdk/migration-guide) -- breaking changes, settingSources default
+- [npm: @anthropic-ai/claude-agent-sdk](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk) -- v0.2.63, peer deps, engines
+- [SDK Changelog](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md) -- release history
 
 ### Secondary (MEDIUM confidence)
-- [ccbot (six-ddc)](https://github.com/six-ddc/ccbot) — closest competitor; validates 1-topic-per-session pattern and JSONL polling approach
-- [claude-o-gram (RichardAtCT)](https://github.com/RichardAtCT/claude-o-gram) — SDK-wrapper approach; validates approval flow UX patterns
-- [Claude-Code-Remote (JessyTsui)](https://github.com/JessyTsui/Claude-Code-Remote) — multi-platform; validates hook-based architecture
-- [claude-code-hooks-multi-agent-observability (disler)](https://github.com/disler/claude-code-hooks-multi-agent-observability) — validates HTTP POST to localhost hook pattern
-- [grammY Flood Control docs](https://grammy.dev/advanced/flood) — empirical editMessage rate limit (~5 edits/min/message)
-- [Claude Code JSONL format community analysis](https://kentgigger.com/posts/claude-code-conversation-history) — transcript file path, JSONL structure
+- [GitHub Issue #207: AsyncIterable double turn](https://github.com/anthropics/claude-agent-sdk-typescript/issues/207) -- double token cost bug, reproduction, workarounds
+- [GitHub Issue #176: V2 ignores options](https://github.com/anthropics/claude-agent-sdk-typescript/issues/176) -- V2 preview silently broken
+- [GitHub Issue #142: Orphaned processes](https://github.com/anthropics/claude-agent-sdk-typescript/issues/142) -- process leak after crash
+- [GitHub Issue #34: 12-second overhead](https://github.com/anthropics/claude-agent-sdk-typescript/issues/34) -- cold start benchmarks
+- [TypeScript V2 Preview](https://platform.claude.com/docs/en/agent-sdk/typescript-v2-preview) -- unstable API, feature gaps
+- [Claudegram (grammY + SDK)](https://github.com/NachoSEO/claudegram) -- real-world integration patterns
 
 ### Tertiary (LOW confidence)
-- [Claude Code Session Isolation Blog Post](https://jonroosevelt.com/blog/claude-code-session-isolation-hooks) — concurrent session bugs; validates session_id scoping requirement
-- Community JSONL schema inference from multiple tools (claude-code-log, claude-JSONL-browser) — field names not formally documented by Anthropic
+- [GitHub Issue #184: SDKRateLimitEvent missing export](https://github.com/anthropics/claude-agent-sdk-typescript/issues/184) -- minor type export gap
+- [GitHub Issue #333 (Python): Multi-instance performance](https://github.com/anthropics/claude-agent-sdk-python/issues/333) -- 20-30s startup (Python-specific but directionally relevant)
 
 ---
-*Research completed: 2026-02-28*
+*Research completed: 2026-03-01*
 *Ready for roadmap: yes*

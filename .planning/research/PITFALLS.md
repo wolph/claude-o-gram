@@ -1,282 +1,438 @@
-# Pitfalls Research
+# Domain Pitfalls: Claude Agent SDK Migration
 
-**Domain:** Telegram bot bridging Claude Code CLI sessions (hooks, log monitoring, IPC, Telegram API)
-**Researched:** 2026-02-28
-**Confidence:** HIGH (verified against official Claude Code docs and Telegram Bot API docs)
+**Domain:** Migrating Telegram bot from hook-based architecture to Claude Agent SDK
+**Researched:** 2026-03-01
+**Confidence:** HIGH (verified against official SDK docs, GitHub issues, and changelog)
 
 ## Critical Pitfalls
 
-### Pitfall 1: Hook Timeout Kills the Blocking Bridge
-
-**What goes wrong:**
-A PreToolUse hook script blocks while waiting for a Telegram user to tap Approve/Deny. The user is AFK or distracted. Claude Code's default command hook timeout (600 seconds / 10 minutes) fires, the hook process is killed, and Claude Code treats it as a non-blocking error -- meaning the tool call **proceeds without permission**. The user thinks they have veto power, but in reality anything Claude wants to do just happens after 10 minutes of silence.
-
-**Why it happens:**
-The official docs state: command hooks default to 600s timeout. Any exit code other than 0 or 2 is a "non-blocking error" where "stderr is shown in verbose mode and execution continues." A killed process exits with signal-based codes (137/143), which fall into the "any other exit code" bucket, so execution continues. Developers assume a timeout means "block" but it actually means "allow."
-
-**How to avoid:**
-- Set the hook `timeout` to a very large value (e.g., 3600 seconds or more) in the hook configuration -- the field is configurable per handler.
-- Implement an internal timeout in the hook script itself that returns exit code 2 (blocking error) with a stderr message like "Timed out waiting for Telegram approval" so Claude gets useful feedback instead of proceeding.
-- Never rely on Claude Code's process-kill timeout as your safety net. Always have the hook script manage its own timeout and exit with code 2 to deny.
-
-**Warning signs:**
-- Tool calls executing without Approve buttons ever being shown in Telegram.
-- Hook scripts being killed by SIGTERM during testing.
-- Claude proceeding with operations while Telegram still shows a pending approval button.
-
-**Phase to address:**
-Phase 1 (core hook + IPC). This is the most architecturally critical decision -- get the timeout/exit-code contract right from day one.
+Mistakes that cause rewrites, data loss, or architectural dead ends.
 
 ---
 
-### Pitfall 2: Bot Crash Leaves Hook Scripts Hanging Forever
+### Pitfall 1: Each SDK Session Spawns a Separate OS Process (~12s Cold Start, ~50-100MB RAM)
 
 **What goes wrong:**
-The bot process crashes (unhandled exception, OOM, restart) while a PreToolUse hook script is blocking and waiting for a response over IPC (Unix domain socket, named pipe, or temp file). The hook script never receives a response. If the hook has no internal timeout, it blocks Claude Code indefinitely. If Claude Code eventually kills it via its timeout, the tool call proceeds without approval (see Pitfall 1).
+The Claude Agent SDK does not run as a library in your Node.js process. Each `query()` call spawns a new Claude Code CLI child process. This process takes ~12 seconds to initialize (loading CLI, connecting to API, setting up tools). With 2-3 concurrent sessions, that is 2-3 child processes consuming 50-100MB RAM each, plus the ~12-second startup delay every time a new session begins. Your bot process (grammY + Fastify) is the parent of all these children.
 
 **Why it happens:**
-The IPC channel (Unix domain socket, FIFO, etc.) has no heartbeat or keepalive. The hook script opens a connection, sends the approval request, and calls a blocking read. When the bot crashes, the socket may or may not emit an error depending on implementation: Unix domain sockets will get an EOF/error on the read side if the server closes, but named pipes (FIFOs) will block indefinitely if no writer has the pipe open. Even with sockets, if the bot crashes mid-restart, there is a window where the hook reconnects to nothing.
+The SDK is a wrapper around the Claude Code CLI, not a native library. It communicates with child processes via stdin/stdout JSON messages. There is no "daemon mode" or process pooling -- each session is a fresh process spawn. This is a fundamental architectural choice documented in GitHub issue #34 and confirmed by Anthropic's response recommending streaming input mode as the workaround for single-session latency.
 
-**How to avoid:**
-- Use Unix domain sockets (not FIFOs) for the IPC channel. Sockets deliver connection-refused or EOF on crash, making failure detectable.
-- Implement a poll/timeout loop in the hook script: try to connect, send request, wait for response with a timeout. If connection fails or times out, exit 2 to deny.
-- The bot should clean up stale socket files on startup. Check for and remove leftover `/tmp/claude-telegram-*.sock` files before binding.
-- Design the hook script to be resilient: if the bot is unreachable, always deny (exit 2), never allow by default.
+**Consequences:**
+- 12-second delay before a new Claude Code session can respond in Telegram
+- 2-3 concurrent sessions = 150-300MB additional RAM on top of the bot process
+- Orphaned child processes if the bot crashes (issue #142 -- NOT FIXED as of March 2026)
+- Node.js parent process must manage child process lifecycle (SIGTERM, SIGKILL)
+
+**Prevention:**
+- Use streaming input mode (AsyncIterable prompt) for long-lived sessions -- keeps the process alive between messages, reducing subsequent message latency to 2-3 seconds
+- Budget for the 12-second cold start in UX: show "Starting session..." in Telegram immediately, update when ready
+- Implement periodic orphan process cleanup: scan for Claude CLI processes whose parent PID no longer exists
+- Set `maxTurns` to prevent runaway sessions consuming memory indefinitely
+- Monitor RSS of child processes and implement a hard kill if any exceeds a threshold (e.g., 200MB)
 
 **Warning signs:**
-- Claude Code sessions hanging indefinitely with no terminal output.
-- Stale socket files in `/tmp` after bot restarts.
-- `ps aux | grep hook` showing zombie hook processes.
+- Increasing memory usage over time with active sessions
+- `ps aux | grep claude` showing more processes than expected active sessions
+- 12-second gaps between session start and first Telegram message
 
 **Phase to address:**
-Phase 1 (IPC design). The IPC protocol and crash recovery must be designed before any feature code.
+Phase 1 (SDK integration foundation). The process lifecycle management must be designed before any feature work. This is the single most impactful architectural difference from the v1.0 hook-based approach.
 
 ---
 
-### Pitfall 3: Telegram Rate Limits Silently Drop Messages During Streaming
+### Pitfall 2: AsyncIterable Prompt Mode Doubles Token Costs (Issue #207 -- NOT FIXED)
 
 **What goes wrong:**
-Claude Code makes rapid tool calls (e.g., reading 10 files in sequence, running multiple bash commands). Each triggers a PostToolUse hook that sends a message to the Telegram topic. Telegram's rate limit of ~20 messages per minute per group kicks in, returns HTTP 429 with a `retry_after` value of 30-60 seconds. During that window, **all** bot API calls fail -- not just for that topic, but for the entire bot across all groups and topics. Approval buttons from other sessions are also blocked. If you naively retry without respecting `retry_after`, the ban escalates.
+When using streaming input mode (the recommended approach for multi-turn conversations), every user message triggers TWO complete AI turns instead of one. The SDK sends the user message, Claude responds (turn 1), then the CLI interprets the still-open stdin as "more input may come" and runs a redundant second turn (turn 2). This doubles your Anthropic API costs and doubles the messages you need to process for Telegram output.
 
 **Why it happens:**
-Telegram enforces ~1 message/second per chat and ~20 messages/minute per group. Claude Code can easily generate 20+ tool calls in under a minute. Additionally, `editMessageText` is rate-limited at ~5 edits per message per minute (empirically observed, not officially documented). Developers often use message editing for "streaming" updates, which hits this limit fast.
+The `streamInput()` function immediately loops back to await the next message from the AsyncIterable after writing a message. Because the stdin stays open (it is a persistent stream), the CLI runs another agentic turn before the next user message arrives. String prompts close stdin after the first result, which is why single-shot mode does not have this problem.
 
-**How to avoid:**
-- Implement a per-group message queue with rate limiting. Target 1 message per 3 seconds as a safe baseline.
-- Batch rapid tool calls into a single message update instead of one message per tool call. Accumulate events for 2-3 seconds, then send one combined message.
-- For streaming output, use a single message that gets edited at most once every 12 seconds (staying well under the 5-edits/minute empirical limit).
-- Always parse and respect the `retry_after` field from 429 responses. Add 10% jitter to avoid thundering herd on retry.
-- Use a circuit breaker: if you get a 429, pause ALL outbound messages (not just the one that failed) for the `retry_after` duration.
-- Consider sending large outputs as document attachments instead of messages (file uploads have separate, more generous limits).
+**Consequences:**
+- 2x token consumption per user interaction
+- 2x the streaming output to process and forward to Telegram
+- Duplicate `result` messages that must be filtered
+- With 7+ agents handling ~1000 messages/month: $140-$700/month in wasted tokens (per reporter's estimate)
+
+**Prevention:**
+- **Workaround A (recommended for our use case):** Use one-shot `query()` with `resume: sessionId` for each user message. This avoids the double-turn bug entirely. Downside: 3-12 second cold start per message (the 12-second overhead from Pitfall 1 applies).
+- **Workaround B:** Use streaming input but filter output to only process the FIRST `result` message per user turn. Tokens are still wasted but UX is correct.
+- **Workaround C:** Set `maxTurns: 1` per query. This prevents the second turn but also prevents Claude from using tools and then responding (Claude needs at least 2 turns for tool-use workflows). UNSUITABLE for our use case.
+- Track this issue (#207) and switch to streaming input once fixed.
 
 **Warning signs:**
-- Messages appearing out of order in Telegram topics.
-- Gaps in the tool call log visible in Telegram.
-- HTTP 429 errors in bot logs.
-- Approval buttons failing to appear while the bot is sending status updates.
+- Telegram topics showing duplicate Claude responses per user message
+- API cost bills doubling compared to v1.0 hook-based approach
+- Two `result` messages per query in SDK output logs
 
 **Phase to address:**
-Phase 2 (Telegram integration). Must be in place before any real output streaming is implemented.
+Phase 1 (SDK session management). The session interaction pattern (one-shot+resume vs streaming) must be decided early and consistently applied.
 
 ---
 
-### Pitfall 4: MarkdownV2 Parsing Failures Crash Message Delivery
+### Pitfall 3: V2 Preview API Silently Ignores Critical Options (Issue #176 -- NOT FIXED)
 
 **What goes wrong:**
-Tool output contains special characters (`_`, `*`, `[`, `]`, `(`, `)`, `~`, `` ` ``, `>`, `#`, `+`, `-`, `=`, `|`, `{`, `}`, `.`, `!`). You send it via `sendMessage` with `parse_mode: "MarkdownV2"`. Telegram returns "Bad Request: can't parse entities" and the message is never delivered. The user sees nothing. If this happens on an approval request message, the hook blocks indefinitely waiting for a button press that was never shown.
+The new V2 interface (`unstable_v2_createSession`) silently ignores `permissionMode`, `cwd`, `allowedTools`, `disallowedTools`, `mcpServers`, and `settingSources`. These are hardcoded in the internal `SessionImpl` constructor. Your bot creates a session with `permissionMode: 'default'` and `canUseTool` callback, but the session actually runs with hardcoded defaults, bypassing your permission logic entirely.
 
 **Why it happens:**
-MarkdownV2 requires escaping 18+ special characters. Code output, file paths, error messages, and bash output are full of these characters. A single unescaped `.` or `-` in normal text breaks the entire message. Nested code blocks with backticks inside backticks are especially treacherous.
+The V2 API is an **unstable preview** (all exports prefixed with `unstable_v2_`). The `ProcessTransport` initialization hardcodes values instead of reading from the options object. This is explicitly documented as a preview limitation.
 
-**How to avoid:**
-- Use `parse_mode: "HTML"` instead of MarkdownV2. HTML only requires escaping `<`, `>`, and `&` -- far simpler and more robust for arbitrary code output.
-- Build a robust escaping function and unit test it against real Claude Code output (file paths with dots, bash errors with brackets, stack traces with parentheses).
-- Always wrap the `sendMessage` call in error handling. If parsing fails, retry with the message stripped of all formatting (plain text fallback).
-- For code output, always wrap in `<pre>` tags (HTML) which provides a code block that does not require entity escaping of the content.
+**Consequences:**
+- `canUseTool` callback never fires (or fires with wrong context)
+- Sessions run in wrong directory, reading wrong project files
+- No tool restrictions applied -- Claude can use any tool
+- Silent failure: no error thrown, just wrong behavior
+- Session forking is not available in V2 at all
+
+**Prevention:**
+- **Do NOT use the V2 preview API for production.** Use the V1 `query()` API exclusively.
+- If you prototype with V2, verify every option takes effect by checking the `system` init message (`message.type === "system" && message.subtype === "init"`)
+- The V2 API is appealing because `send()`/`stream()` is simpler than AsyncIterable generators. But the V1 API is the only one that actually works correctly for our use case.
+- Track issues #176, #154, #160, #171 for when options passthrough is fixed.
 
 **Warning signs:**
-- Telegram API returning 400 errors with "can't parse entities" in bot logs.
-- Messages silently disappearing -- sent but never visible.
-- Approval buttons not appearing for certain tool calls (ones with special chars in their description).
+- Session init message showing unexpected `permissionMode`, `cwd`, or `tools`
+- `canUseTool` callback never being invoked
+- Sessions accessing files outside the expected project directory
 
 **Phase to address:**
-Phase 2 (message formatting). Decide on HTML parse mode early and build the escaping/formatting layer before any feature messages.
+Phase 1 (technology decision). Decide V1 vs V2 on day one. Use V1.
 
 ---
 
-### Pitfall 5: Session Isolation Failure with Concurrent Claude Code Sessions
+### Pitfall 4: canUseTool Callback Blocks the Entire Agent Loop
 
 **What goes wrong:**
-Two Claude Code sessions run simultaneously in the same project directory. Both trigger PreToolUse hooks. The hook script uses a single shared IPC endpoint (one socket path, one temp file). An approval response meant for Session A gets routed to Session B, approving the wrong tool call. Or worse: Session B's approval request overwrites Session A's pending request, and Session A blocks forever.
+The `canUseTool` callback is invoked every time Claude wants to use a tool that requires permission. Your bot must send a Telegram message with Approve/Deny buttons, then WAIT for the user to respond. During this wait, the entire Claude agent loop is blocked -- no other tools execute, no text streams, no progress happens. If you have a 5-minute approval timeout, Claude sits idle for 5 minutes per tool call.
 
 **Why it happens:**
-Hooks fire for **every** session in the project. The official docs confirm: "Direct edits to hooks... Claude Code captures a snapshot of hooks at startup." All sessions sharing the same `.claude/settings.json` get the same hooks. If the hook script uses a fixed IPC path (e.g., `/tmp/claude-telegram.sock`), both sessions talk to the same bot endpoint with no session discrimination.
+This is by design. The `canUseTool` callback returns a Promise that the SDK awaits before proceeding. Unlike the v1.0 HTTP hook approach where the HTTP response was the blocking mechanism, the SDK callback blocks the internal agent loop directly. The async nature means the Node.js event loop is NOT blocked (grammY still processes updates), but the specific Claude session is paused.
 
-**How to avoid:**
-- The hook JSON input includes `session_id` on every event. Extract it and use it to namespace ALL IPC communication.
-- Use session-scoped IPC paths: `/tmp/claude-telegram-${session_id}.sock` or include session_id in every IPC message as a routing key.
-- The bot must maintain a map of `session_id -> Telegram topic`. When an approval request arrives, it must be routed to the correct topic and the response must be routed back to the correct session's hook process.
-- Store NO session state in shared files. Every state file must include the session_id in its filename.
-- Test with 2+ concurrent sessions from day one.
+**Consequences:**
+- User sees "Using Bash..." in Telegram, waits for approval, but no other session activity happens during the wait
+- If approval timeout is long, Claude may hit API timeouts or internal session timeouts
+- Multiple pending approvals in the same session are impossible -- they are sequential
+- The `signal: AbortSignal` in the callback options can fire if the query is interrupted, but this is easy to miss
+
+**Prevention:**
+- Keep approval timeouts short (60-120 seconds, not 5+ minutes)
+- Use `permissionMode: 'acceptEdits'` for low-risk operations so only dangerous tools (Bash with destructive commands) need approval
+- Implement a "fast-track" in `canUseTool`: auto-approve Read, Glob, Grep without sending to Telegram
+- Show a "Waiting for approval..." status in the Telegram topic so the user knows Claude is blocked
+- Handle the AbortSignal: if it fires while waiting for Telegram approval, resolve with deny immediately
+- Consider using the `PermissionRequest` hook (fires before `canUseTool`) to send notifications while still allowing programmatic decisions
 
 **Warning signs:**
-- Approval buttons appearing in the wrong Telegram topic.
-- One session completing while another hangs.
-- Wrong tool call being approved/denied.
+- Claude sessions appearing "stuck" for long periods
+- Telegram approval buttons that expire frequently because Claude's internal timeout fires before the user responds
+- High latency between tool calls in sessions with approval enabled
 
 **Phase to address:**
-Phase 1 (IPC protocol design). The session_id routing must be baked into the IPC protocol from the start. Retrofitting session isolation is a rewrite.
+Phase 2 (approval integration). The approval UX must be redesigned for the SDK's blocking callback model, which is fundamentally different from v1.0's HTTP request/response model.
 
 ---
 
-### Pitfall 6: 4096-Character Message Limit Truncates Critical Output
+### Pitfall 5: Bot Crash Orphans Claude CLI Child Processes (Issue #142 -- NOT FIXED)
 
 **What goes wrong:**
-A tool call produces output longer than 4096 characters (common for: file reads, bash output, diff output, error stack traces). The message is silently rejected by Telegram, or the bot's splitting logic breaks a code block in half, producing malformed formatting that triggers a parse error (see Pitfall 4). The user sees a partial message or nothing at all, missing context needed to make approval decisions.
+If the bot process (Node.js parent) crashes or is killed with SIGKILL, all spawned Claude CLI child processes become orphans. These orphaned processes continue running indefinitely, each consuming 50-100MB RAM. Over 24 hours of normal usage with occasional crashes, 47 orphaned processes were observed consuming ~3GB RAM (per issue #142 reporter).
 
 **Why it happens:**
-Telegram enforces a hard 4096-character limit per message (after entity parsing). This is the post-parsing limit -- formatting entities count toward it. A `<pre>` code block with 4000 characters of content plus the tags themselves may exceed the limit.
+The SDK relies on the parent process being alive to send abort signals to children. There is no `PR_SET_PDEATHSIG` (Linux) or equivalent mechanism to auto-terminate children when the parent dies. The child processes have no heartbeat to the parent. When the parent vanishes, children just keep running.
 
-**How to avoid:**
-- Build a message-splitting utility from the start. It must be formatting-aware: if splitting inside a `<pre>` block, close the tag before the split and reopen it after.
-- Count characters after formatting/entity expansion, not before.
-- For very long output (>12000 chars), send as a file attachment (`.txt` document) instead of multiple messages. This avoids rate limit pressure and provides a better UX.
-- Set a maximum of 3-4 split messages. Beyond that, always fall back to file attachment.
-- For approval messages, keep the message short (tool name, truncated command preview) with a "Full details" expandable or file attachment for the full input.
+**Consequences:**
+- Memory leak proportional to crash frequency times active sessions
+- Orphaned processes may hold file locks or API connections
+- Multiple bot restarts compound the problem (each restart leaves a generation of orphans)
+- Eventually triggers OOM on the host machine
+
+**Prevention:**
+- On bot startup, scan for orphaned Claude CLI processes and kill them:
+  ```bash
+  # Kill Claude CLI processes whose parent is init (PID 1 = orphaned)
+  pgrep -P 1 -f "claude" | xargs kill -9
+  ```
+- Implement a watchdog that periodically checks for processes spawned by this bot's PID tree
+- Use systemd or a process manager that kills the entire cgroup on restart (ensures children die with parent)
+- On Linux, set `PR_SET_PDEATHSIG` on child processes via the `spawnClaudeCodeProcess` option:
+  ```typescript
+  options: {
+    spawnClaudeCodeProcess: (spawnOpts) => {
+      // Custom spawn that sets death signal
+    }
+  }
+  ```
+- Store PIDs of all spawned SDK processes in a file; on startup, kill any still-running PIDs from the file
 
 **Warning signs:**
-- Empty or missing messages in Telegram topics after tool calls with large output.
-- Messages with broken formatting (unclosed code blocks).
-- "Message is too long" errors in bot logs.
+- `ps aux | grep claude` showing processes with PPID=1 (orphans)
+- Gradually increasing memory usage even when no sessions are active
+- Host machine running out of memory after extended bot operation
 
 **Phase to address:**
-Phase 2 (message formatting layer). Build the splitter/file-fallback before implementing any output forwarding.
+Phase 1 (process lifecycle). Orphan cleanup must be implemented from day one, before multi-session support.
 
 ---
 
-## Technical Debt Patterns
+### Pitfall 6: grammY Event Loop and SDK Async Generator Interference
 
-Shortcuts that seem reasonable but create long-term problems.
+**What goes wrong:**
+grammY runs on the Node.js event loop processing Telegram updates via long polling. The SDK's streaming output is consumed via `for await...of` on an AsyncGenerator. If the streaming loop does not yield control frequently, grammY's update processing stalls -- approval button presses are not received, text input from Telegram is delayed, and the bot appears unresponsive.
 
-| Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
-|----------|-------------------|----------------|-----------------|
-| Polling temp files instead of Unix sockets for IPC | Simpler implementation, no socket management | Race conditions on read/write, no connection state awareness, no crash detection | Never -- sockets are only marginally harder and much more robust |
-| Single `sendMessage` per tool call (no batching) | Simpler code, real-time feel | Hits rate limits after 20 tool calls/min, blocks approval buttons | MVP only with <5 tool calls per session expected |
-| Parsing JSONL log files by reading entire file each poll | Works for small files | O(n) on every poll, memory spikes on large sessions, slow for 10K+ line transcripts | Never -- use file offset tracking with `fs.read` at last position |
-| Hardcoded 4096-char message split without formatting awareness | Quick to implement | Breaks code blocks, triggers MarkdownV2/HTML parse errors, confusing partial messages | Never -- the formatting-aware splitter is not much harder |
-| Using `getUpdates` (polling) for Telegram instead of webhooks | No public URL needed, simpler dev setup | Higher latency, can not scale, 409 conflict if accidentally run two instances | Acceptable for this project's scale (2-3 machines, single bot per machine) |
-| Storing session-topic mapping only in memory | No database dependency | Lost on bot restart, orphaned topics | MVP only -- persist to a JSON file at minimum |
+**Why it happens:**
+Both grammY and the SDK compete for the same Node.js event loop. The `for await` loop over SDK messages is async but may process many messages in a tight loop (especially during tool streaming with `includePartialMessages: true`). If the loop body does synchronous work (formatting, string manipulation) without yielding, grammY's middleware cannot run until the current microtask completes.
 
-## Integration Gotchas
+**Consequences:**
+- User taps "Approve" but the bot does not process the callback query for seconds
+- Telegram shows the spinning loader on buttons for 10+ seconds
+- Multiple sessions interfere with each other -- one session's streaming output delays another session's approval processing
+- Under heavy streaming, the bot may fail to answer callback queries within Telegram's timeout, causing permanent spinners
 
-Common mistakes when connecting to external services.
+**Prevention:**
+- Process SDK messages asynchronously: do NOT do heavy synchronous work in the `for await` loop body. Enqueue messages to a buffer and process them in a separate async task.
+- Use `setImmediate()` or `setTimeout(fn, 0)` periodically in the streaming loop to yield to the event loop
+- Consider running each SDK session's message consumer in a separate "micro-task chain" that explicitly yields between messages
+- Keep grammY's callback query handler (`bot.callbackQuery(...)`) as lightweight as possible -- just resolve the deferred promise, do not await Telegram API calls
+- Monitor event loop lag (e.g., `perf_hooks.monitorEventLoopDelay()`) and log warnings if lag exceeds 100ms
 
-| Integration | Common Mistake | Correct Approach |
-|-------------|----------------|------------------|
-| Telegram Forum Topics | Sending `message_thread_id=1` for the General topic -- Telegram returns "Message thread not found" | The General topic (ID 1) is implicit. Set `message_thread_id` to `null`/omit it when targeting General. Only pass the thread ID for non-General topics |
-| Telegram Forum Topics | Bot cannot create topics because it lacks `can_manage_topics` permission | Ensure the bot is added as admin with "Manage Topics" permission before any topic creation code runs. Fail loudly if permission is missing at startup |
-| Telegram Forum Topics | Trying to send a message to a closed/deleted topic | Always handle 400 "TOPIC_CLOSED" or "TOPIC_DELETED" errors. Recreate the topic or fall back to General |
-| Claude Code Hooks | Assuming hook JSON arrives as command-line arguments | Hook input is delivered via **stdin** as JSON, not as CLI args. Read from stdin, pipe to `jq`, or parse in your script |
-| Claude Code Hooks | Using `async: true` on PreToolUse hooks expecting to block | Async hooks run in the background and cannot block. PreToolUse hooks that need to approve/deny MUST be synchronous (default). The `async` field must be `false` or omitted |
-| Claude Code Hooks | Printing debug output to stdout alongside JSON | Claude Code parses stdout for JSON on exit 0. Any non-JSON text (debug prints, shell profile banners) corrupts the output. Use stderr for debug output |
-| Claude Code JSONL Logs | Reading the transcript file listed in `transcript_path` while Claude Code is writing to it | Partial line reads are possible. Always handle incomplete JSON lines at the end of the file. Read up to the last complete newline and buffer any trailing partial line |
-| Telegram Callback Queries | Not calling `answerCallbackQuery` after handling a button press | Telegram shows a perpetual loading spinner on the button for ~30 seconds. Always answer callback queries, even if you have nothing to display |
+**Warning signs:**
+- Callback queries timing out (Telegram shows spinning button)
+- Approval responses taking 5+ seconds to register
+- One session's activity visibly delaying another session's Telegram messages
 
-## Performance Traps
+**Phase to address:**
+Phase 1 (architecture). The SDK message consumption pattern must be designed to coexist with grammY from the start. Retrofitting event loop management is extremely difficult.
 
-Patterns that work at small scale but fail as usage grows.
+---
 
-| Trap | Symptoms | Prevention | When It Breaks |
-|------|----------|------------|----------------|
-| Re-reading entire JSONL transcript on every poll cycle | Increasing CPU/memory, lag in posting updates | Track file byte offset with `fs.stat()` and `fs.read()` from last position. Only parse new bytes | Transcript exceeds ~5MB (typical after 30-60 min intensive session) |
-| Creating a new Telegram message for every tool call instead of editing | Hits 20 msg/min group rate limit, topics become unreadable walls of text | Batch tool calls into periodic summary edits (every 3-5 seconds) | More than 20 tool calls per minute (very common with file reads) |
-| Synchronous file I/O in the bot's main event loop | Bot becomes unresponsive to Telegram updates while reading large files | Use async `fs.promises` or `fs.createReadStream` for all file operations | Log files exceed ~1MB |
-| Opening a new IPC connection per hook invocation | Connection overhead, stale sockets accumulate | Use persistent connections with reconnection logic, or use a single socket per session with message framing | More than 10 hook invocations per minute (routine in active sessions) |
-| Storing full tool output in memory for all active sessions | Memory grows unbounded during long sessions | Stream output to Telegram with a bounded buffer (keep only last N KB), discard after sending | 3+ concurrent sessions with verbose output |
+## Moderate Pitfalls
 
-## Security Mistakes
+Mistakes that cause significant rework or degraded UX but are recoverable.
 
-Domain-specific security issues beyond general web security.
+---
 
-| Mistake | Risk | Prevention |
-|---------|------|------------|
-| Logging or forwarding Telegram bot token in error messages | Token leak allows anyone to control the bot | Scrub tokens from all log output. Store in env vars, never in hook scripts or config files |
-| Forwarding raw tool output to Telegram without sanitization | Secrets in environment variables, `.env` files, or credentials shown in file reads can be posted to the Telegram group | Implement a secret scrubber that redacts patterns matching API keys, tokens, passwords before sending to Telegram |
-| Using the bot token in the IPC socket path | Exposes the token in `ps` output and `/tmp` directory listings | Use a hash of the token or a random identifier for socket naming |
-| Not validating `callback_query` data before acting on it | Other bots/users in the group could craft callback data to approve malicious tool calls | Encode the session_id and a nonce in callback_data. Verify both before processing any approval |
-| Running hook scripts as root or with elevated privileges | Hook scripts inherit the Claude Code process's permissions -- if running as a privileged user, IPC bugs could allow command injection | Run Claude Code and the bot as an unprivileged user. Validate all data received over IPC before acting on it |
+### Pitfall 7: Streaming Output Volume Overwhelms Telegram Rate Limits
 
-## UX Pitfalls
+**What goes wrong:**
+With `includePartialMessages: true`, the SDK emits dozens of `stream_event` messages per second (one per text chunk, one per tool input chunk). If you naively forward each chunk to Telegram via `editMessageText`, you hit Telegram's ~5 edits/minute/message limit and the ~20 messages/minute/group limit within seconds. All bot API calls fail with 429 for 30-60 seconds, blocking approval messages for ALL sessions.
 
-Common user experience mistakes in this domain.
+**Why it happens:**
+The SDK streams at API token speed. Telegram rate limits are designed for human-speed interaction. The mismatch is 100x or more. The v1.0 architecture had a natural throttle because hooks only fired on tool completion (not mid-stream). The SDK gives you everything, and you must filter aggressively.
 
-| Pitfall | User Impact | Better Approach |
-|---------|-------------|-----------------|
-| Flooding the topic with one message per tool call | The topic becomes an unreadable firehose of messages. User cannot find the approval request among dozens of status messages | Batch non-interactive updates into periodic summaries (every 5-10 seconds). Only send individual messages for things requiring user action (approvals) |
-| Showing full tool input/output for file reads | Massive walls of code in Telegram. User has to scroll endlessly on mobile | Show a 1-line summary (tool name, file path, first/last 3 lines of output). Provide "Full output" as a file attachment |
-| No visual distinction between status messages and approval requests | User misses critical approval buttons buried among status updates | Use distinct formatting: approval messages get inline keyboard buttons AND a different message format (e.g., bold header, warning emoji). Regular updates are plain text |
-| Approval buttons that stay active after the hook times out | User taps "Approve" 15 minutes later, nothing happens but they think it worked | Edit the message to show "Expired -- auto-denied" when the hook times out. Remove or disable the inline keyboard |
-| No indication of what Claude is currently doing between messages | User sees the last update from 2 minutes ago and wonders if Claude is stuck | Send periodic heartbeat messages or edit the session's pinned status message with a "Last active: X seconds ago, currently: [thinking/executing tool/waiting for approval]" |
-| Topic names that do not identify the session purpose | Topics named "Session abc123" are meaningless | Use the initial prompt or task summary as the topic name, truncated to Telegram's limit. E.g., "Fix auth bug in login.ts" |
+**Prevention:**
+- Do NOT use `includePartialMessages` for Telegram output. Use the default mode where you receive complete `SDKAssistantMessage` objects after each turn.
+- If you want progress indicators, track `content_block_start` events (tool starts) and `content_block_stop` events (tool ends) only -- these are low-frequency.
+- Reuse the v1.0 MessageBatcher pattern: accumulate messages for 2-3 seconds, then send one combined update.
+- Separate approval messages from informational messages -- approval messages bypass the queue and send immediately.
+- Consider a dedicated "status message" per session that gets edited at most once every 10 seconds with a summary of current activity.
+
+**Phase to address:**
+Phase 2 (Telegram output forwarding). The v1.0 batching infrastructure should be preserved and adapted.
+
+---
+
+### Pitfall 8: Session Resume After Bot Restart Requires Stored Session IDs
+
+**What goes wrong:**
+In v1.0, the bot auto-discovered sessions via hook events. With the SDK, the bot CREATES sessions via `query()`. If the bot restarts, it has no SDK session handles -- it must `resume` each active session using the stored `sessionId`. If the session ID was not persisted (only held in memory), the bot cannot reconnect to any active Claude Code sessions. The sessions keep running as orphaned child processes (Pitfall 5) while the bot creates new, disconnected sessions.
+
+**Why it happens:**
+SDK sessions are stateful processes. The session ID is returned in the `system` init message and must be captured and stored. The v1.0 hook architecture was stateless -- hooks fired for any active session, and the bot just had to be listening. The SDK requires explicit session ownership.
+
+**Prevention:**
+- Capture `session_id` from the first `SDKSystemMessage` (type: "system", subtype: "init") and persist it to the SessionStore immediately
+- On bot restart, iterate all active sessions from the store and call `query({ prompt: "continue", options: { resume: sessionId } })` for each
+- Consider `persistSession: true` (the default) so the SDK saves session state to disk, enabling resume even after process crashes
+- The `listSessions({ dir: cwd })` function can discover sessions that were persisted -- use it as a fallback if the session store is corrupted
+
+**Phase to address:**
+Phase 1 (session management). Session persistence must be designed before multi-session support.
+
+---
+
+### Pitfall 9: canUseTool and Hooks Have Different Execution Order
+
+**What goes wrong:**
+You implement approval logic in both `canUseTool` callback AND `PreToolUse` hooks, expecting them to work together. In reality, hooks execute BEFORE `canUseTool`. If a `PreToolUse` hook returns `{ decision: "approve" }`, the `canUseTool` callback is never called. If the hook returns `{ continue: true }` (pass-through), then `canUseTool` fires. If you put logging in hooks and approval in `canUseTool`, your logs say "approved" (from the hook) but the user was never asked.
+
+**Why it happens:**
+The SDK has two permission layers: hooks (inherited from CLI architecture) and `canUseTool` (SDK-specific callback). The hook system short-circuits if it returns a decision. The `canUseTool` is the fallback. This is documented but easy to misconfigure.
+
+**Prevention:**
+- Use `canUseTool` for ALL interactive approval logic (sending to Telegram, waiting for user response)
+- Use hooks ONLY for logging, metrics, and non-blocking side effects (PostToolUse, Notification, etc.)
+- Do NOT return `{ decision: "approve" }` from PreToolUse hooks unless you intentionally want to bypass user approval
+- In Python, `canUseTool` requires a dummy PreToolUse hook that returns `{ continue: true }` to keep the stream open (documented quirk). In TypeScript, this is not required.
+- Test by checking: does the `canUseTool` callback fire for every tool call that should require approval?
+
+**Phase to address:**
+Phase 2 (approval flow). Decide hook vs canUseTool responsibilities before implementing approval.
+
+---
+
+### Pitfall 10: SDK Settings Isolation Breaks Existing Claude Code Configuration
+
+**What goes wrong:**
+By default, the SDK does NOT load filesystem settings (`CLAUDE.md`, `.claude/settings.json`, user settings). This means your existing v1.0 hooks configuration, allowed tools, and project instructions are silently ignored. Claude Code sessions started by the SDK behave differently from sessions started via the CLI in the same project.
+
+**Why it happens:**
+This is an intentional breaking change in Agent SDK v0.1.0 (documented in migration guide). The `settingSources` option defaults to `[]` (empty array) instead of loading all sources. This provides isolation for SDK applications but is a trap for developers migrating from hook-based setups.
+
+**Prevention:**
+- Explicitly set `settingSources: ['user', 'project', 'local']` if you want Claude Code CLI-equivalent behavior
+- Or better: programmatically configure everything via SDK options (cleaner, no filesystem dependency):
+  - `systemPrompt: { type: 'preset', preset: 'claude_code' }` for Claude Code system prompt
+  - `allowedTools: [...]` instead of settings.json allowed tools
+  - `hooks: {...}` instead of filesystem hook definitions
+- Do NOT mix filesystem hooks and SDK hooks -- the SDK hooks take precedence when `settingSources` includes 'project'
+- Test by comparing: start a session via CLI, start another via SDK, verify they behave identically for the same prompt
+
+**Phase to address:**
+Phase 1 (SDK configuration). Must decide the configuration strategy (programmatic vs filesystem) early.
+
+---
+
+### Pitfall 11: Streaming Output Incompatible with Extended Thinking
+
+**What goes wrong:**
+You enable `includePartialMessages: true` for real-time output, then also set `maxThinkingTokens` (or use a model that defaults to extended thinking). The SDK silently stops emitting `stream_event` messages. You only receive complete `AssistantMessage` objects after each turn -- effectively losing the streaming benefit. Your Telegram output goes from real-time to delayed, with no error or warning.
+
+**Why it happens:**
+This is a documented limitation: "When you explicitly set `max_thinking_tokens`, `StreamEvent` messages are not emitted." The Claude API's extended thinking feature is incompatible with content streaming. The SDK degrades silently to non-streaming mode.
+
+**Prevention:**
+- Do not set `maxThinkingTokens` if you need streaming events
+- Use the default `thinking: { type: 'adaptive' }` which does NOT trigger this incompatibility
+- If you need extended thinking for complex tasks, accept non-streaming output and use a polling-style update pattern for Telegram
+- Test: enable `includePartialMessages`, run a query, verify `stream_event` messages appear. Then enable thinking and verify the behavior change.
+
+**Phase to address:**
+Phase 2 (output streaming). Document the constraint and ensure configuration does not accidentally enable both.
+
+---
+
+## Minor Pitfalls
+
+Issues that cause confusion or minor bugs but are quickly fixable.
+
+---
+
+### Pitfall 12: SDKRateLimitEvent Type Missing from Exports (Issue #184)
+
+**What goes wrong:**
+You try to handle `SDKRateLimitEvent` messages in TypeScript with proper type checking. The type resolves to `any` because it is referenced in the `SDKMessage` union but not exported from the package.
+
+**Prevention:**
+- Use string literal checks (`message.type === "rate_limit"`) instead of type guards until the export is fixed
+- Track issue #184 for the fix
+
+---
+
+### Pitfall 13: session.close() Must Be Called Explicitly
+
+**What goes wrong:**
+You let a `query()` AsyncGenerator go out of scope without calling `.close()` or consuming all messages. The child process keeps running indefinitely because the generator's `return()` method is never called. This is a subtle memory/process leak.
+
+**Prevention:**
+- Always use `try/finally` around `for await` loops with `query.close()` in the `finally` block
+- Or use the V2 `await using session = ...` pattern (TypeScript 5.2+) for automatic cleanup (but see Pitfall 3 about V2 limitations)
+- Or consume the generator to completion (iterate until `ResultMessage`)
+
+---
+
+### Pitfall 14: Zod Version Conflict
+
+**What goes wrong:**
+The SDK requires `zod ^3.24.1` for tool schema definitions. If your project uses Zod 4 (released in 2025), the SDK's internal Zod validation may conflict with your project's Zod imports. The `tool()` helper claims to support "Zod 3 and Zod 4" but edge cases in schema coercion differ between versions.
+
+**Prevention:**
+- Pin Zod 3.x in your project for now: `npm install zod@3`
+- If you need Zod 4 features, keep SDK tools on Zod 3 schemas and use Zod 4 elsewhere
+- Test tool schema validation after any Zod version change
+
+---
+
+### Pitfall 15: Fastify HTTP Server Becomes Unnecessary (But Must Be Removed Carefully)
+
+**What goes wrong:**
+After migrating to the SDK, the Fastify HTTP hook server is no longer needed (the SDK handles hooks via callbacks, not HTTP POST). Developers leave the Fastify server running "just in case" or because removing it feels risky. The unused server consumes a port, adds dependencies, and confuses the architecture. Worse: if the old hook configuration in `~/.claude/settings.json` still points to the HTTP server, externally-launched Claude Code sessions (not managed by the SDK) will post to it, creating ghost events.
+
+**Prevention:**
+- Remove Fastify and its hook routes after the SDK migration is complete, not during
+- Remove the hook installation code (`installHooks()`) that writes HTTP hook config to settings.json
+- Clean up `~/.claude/settings.json` to remove any HTTP hook entries
+- Phase the removal: first add SDK, verify it works, THEN remove Fastify in a separate phase
+
+**Phase to address:**
+Final migration phase (cleanup). Only after SDK integration is fully verified.
+
+---
+
+## Phase-Specific Warnings
+
+| Phase Topic | Likely Pitfall | Mitigation |
+|-------------|---------------|------------|
+| SDK session creation | 12s cold start (Pitfall 1) | Show "Starting..." in Telegram, use streaming input for subsequent messages |
+| Streaming input mode | Double token cost (Pitfall 2) | Use one-shot + resume pattern until #207 is fixed |
+| V1 vs V2 API choice | V2 ignores options (Pitfall 3) | Use V1 API only |
+| Tool approval flow | canUseTool blocks agent (Pitfall 4) | Short timeouts, auto-approve safe tools |
+| Process management | Orphaned processes (Pitfall 5) | Startup cleanup, systemd cgroup, PID tracking |
+| Event loop integration | grammY stalls during streaming (Pitfall 6) | Yield control, async message queue |
+| Telegram output | Rate limit overwhelm (Pitfall 7) | Reuse v1.0 batching, avoid partial messages |
+| Bot restart | Lost session IDs (Pitfall 8) | Persist session IDs immediately on capture |
+| Hook vs canUseTool | Wrong execution order (Pitfall 9) | canUseTool for approvals, hooks for logging |
+| Settings loading | Silent config ignore (Pitfall 10) | Explicit settingSources or programmatic config |
+| Thinking + streaming | Silent degradation (Pitfall 11) | Do not combine maxThinkingTokens with streaming |
+| Migration cleanup | Ghost hook events (Pitfall 15) | Remove Fastify and hook config only after full verification |
 
 ## "Looks Done But Isn't" Checklist
 
-Things that appear complete but are missing critical pieces.
-
-- [ ] **PreToolUse blocking:** Works in testing but does not handle the case where the bot is not running. Verify: start a Claude Code session without the bot running. The hook should time out and deny (not hang forever, not auto-approve).
-- [ ] **Message delivery:** Messages send successfully but were you checking for 429 responses? Verify: send 30 messages in 60 seconds and confirm all 30 eventually arrive (with proper queuing/retry).
-- [ ] **Session tracking:** New sessions get topics created, but do ended sessions get cleaned up? Verify: start and stop 5 sessions, confirm topics are closed/archived and the session map is cleaned up.
-- [ ] **Bot restart recovery:** Bot restarts cleanly, but does it recover in-flight approval requests? Verify: start a hook blocking on approval, kill the bot, restart it, confirm the hook gets denied (not approved, not stuck forever).
-- [ ] **Concurrent sessions:** Works with one session, but have you tested two? Verify: run two Claude Code sessions simultaneously, trigger approvals in both, confirm responses route to the correct session.
-- [ ] **Message splitting:** Short messages send fine, but does a 10,000-character bash output render correctly? Verify: trigger a tool call that produces 10K+ chars of output, confirm it arrives as properly formatted split messages or a file attachment.
-- [ ] **Log file monitoring:** Works with fresh log files, but what about a resumed session with an existing 5MB transcript? Verify: resume a long session and confirm the monitor does not re-process the entire file.
-- [ ] **Callback query handling:** Approve/Deny buttons work, but do expired buttons get disabled? Verify: let a hook timeout, then tap the button -- it should show "expired" not trigger an action.
-- [ ] **Topic creation:** Topics are created on session start, but what if the bot lacks `can_manage_topics` permission? Verify: remove the permission, start a session, confirm a clear error message (not a silent failure).
+- [ ] **Session cold start:** Sessions create successfully, but did you measure the 12-second startup? Users will report the bot as "slow to start."
+- [ ] **canUseTool fires:** Approval buttons appear, but does `canUseTool` actually fire for EVERY tool that needs approval? Check that no PreToolUse hook is short-circuiting it.
+- [ ] **Session resume works:** Bot restarts and resumes sessions, but are the session IDs persisted to disk? Kill the bot process and verify it resumes.
+- [ ] **Orphan cleanup:** Sessions start and stop cleanly, but crash the bot mid-session. Are child processes cleaned up on restart?
+- [ ] **Double-turn filtered:** Streaming mode works, but are you seeing duplicate AI responses? Check token costs against expected single-turn costs.
+- [ ] **Event loop yields:** One session streams output correctly, but start two sessions simultaneously. Does the approval button in session A still respond instantly while session B streams?
+- [ ] **Telegram batching:** Tool calls post to Telegram, but trigger 30 rapid tool calls in one session. Does the bot hit 429 rate limits?
+- [ ] **Settings loaded:** Claude behaves correctly in SDK sessions, but compare with CLI sessions. Are project CLAUDE.md instructions applied in both?
+- [ ] **Graceful shutdown:** Bot stops cleanly with SIGTERM, but all child SDK processes also terminate? Check `ps aux | grep claude` after shutdown.
+- [ ] **Memory stable:** Bot runs for 4+ hours with active sessions. Is RSS stable or growing?
 
 ## Recovery Strategies
 
-When pitfalls occur despite prevention, how to recover.
-
 | Pitfall | Recovery Cost | Recovery Steps |
 |---------|---------------|----------------|
-| Hook timeout auto-approves dangerous operation | HIGH | No automatic recovery possible. The tool call already executed. Add logging of all auto-approved operations for audit. Implement the internal timeout + exit 2 pattern to prevent recurrence |
-| Bot crash with hanging hooks | MEDIUM | Restart bot. All pending hooks will eventually timeout. With proper exit-2-on-timeout, they will deny. Fix: add health check endpoint and process monitor (systemd, pm2) |
-| Rate limit ban from Telegram | LOW | Wait for `retry_after` duration (typically 30-60s). Queue messages during ban. Fix: implement proper message batching/queuing |
-| Message formatting failure | LOW | Re-send as plain text (no parse_mode). Fix: switch to HTML mode with proper escaping, add plain-text fallback |
-| Session isolation breach (wrong approval) | HIGH | Cannot undo an incorrect approval after execution. Add session_id validation to IPC protocol. Log all approval decisions with session context for audit |
-| Orphaned topics after crash | LOW | On bot startup, scan for topics with no active session. Archive/close them. Persist session-topic mapping to disk |
-| JSONL partial line read | LOW | Buffer the partial line, re-read on next poll cycle. Ensure the buffer is per-file and persisted across poll cycles |
-
-## Pitfall-to-Phase Mapping
-
-How roadmap phases should address these pitfalls.
-
-| Pitfall | Prevention Phase | Verification |
-|---------|------------------|--------------|
-| Hook timeout auto-approves (Pitfall 1) | Phase 1: Core IPC + Hook Design | Unit test: hook with no bot running exits 2 within configured timeout. Integration test: hook timeout sends deny, not allow |
-| Bot crash leaves hooks hanging (Pitfall 2) | Phase 1: Core IPC + Hook Design | Kill bot during active approval, verify hook exits 2 within 30s. Restart bot, verify socket cleanup |
-| Telegram rate limits (Pitfall 3) | Phase 2: Telegram Integration | Load test: trigger 50 tool calls in 60 seconds, verify no 429 errors reach the user and all messages eventually deliver |
-| MarkdownV2 parse failures (Pitfall 4) | Phase 2: Message Formatting | Test with output containing all 18+ special characters. Verify zero parse errors across 100 random tool outputs |
-| Session isolation failure (Pitfall 5) | Phase 1: IPC Protocol Design | Run 2 concurrent sessions, trigger simultaneous approvals, verify correct routing. Run 3 sessions, stop one, verify others unaffected |
-| 4096-char message truncation (Pitfall 6) | Phase 2: Message Formatting | Send 10K, 50K, and 100K character outputs. Verify all arrive intact (split or as file) with correct formatting |
-| General topic message_thread_id=1 bug | Phase 2: Topic Management | Create a topic, send to it, then try General. Verify no "thread not found" errors |
-| Stdout JSON corruption from debug prints | Phase 1: Hook Script Design | Hook scripts must use stderr for all debug output. CI lint: grep for echo/console.log that writes to stdout outside JSON |
-| Stale callback buttons after timeout | Phase 3: UX Polish | Let approval timeout, tap button, verify "expired" response and no action taken |
-| Bot restart loses session map | Phase 2: State Persistence | Kill bot, restart, verify all active sessions are re-associated with their topics |
+| Orphaned processes (5) | LOW | Kill orphans on restart. Add PID tracking. No data loss. |
+| Double token cost (2) | MEDIUM | Switch to one-shot+resume pattern. Refund not possible for wasted tokens. |
+| V2 options ignored (3) | LOW | Switch to V1 API. Minimal code change if caught early. |
+| canUseTool not firing (9) | MEDIUM | Restructure hook/canUseTool boundary. May need to rewrite approval flow. |
+| Lost session IDs (8) | HIGH | Sessions cannot be resumed. Must restart all active Claude Code work. Prevent by persisting immediately. |
+| Event loop blocking (6) | HIGH | Requires architectural refactor of message consumption pattern. Must be right from the start. |
+| Settings not loaded (10) | LOW | Add settingSources option. One-line fix once diagnosed. |
+| Fastify ghost events (15) | LOW | Remove old hook config. One-time cleanup. |
 
 ## Sources
 
-- [Claude Code Hooks Reference (Official)](https://code.claude.com/docs/en/hooks) -- HIGH confidence. Exit code behavior, timeout defaults, JSON input/output format, event lifecycle.
-- [Telegram Bot API (Official)](https://core.telegram.org/bots/api) -- HIGH confidence. Rate limits, message limits, forum topic API.
-- [Telegram Bot API FAQ (Official)](https://core.telegram.org/bots/faq) -- HIGH confidence. Rate limit numbers (30 msg/s global, 20 msg/min per group).
-- [grammY Flood Limits Guide](https://grammy.dev/advanced/flood) -- MEDIUM confidence. Empirical editMessage limit (~5/min/msg), retry_after behavior.
-- [GramIO Rate Limits Guide](https://gramio.dev/rate-limits) -- MEDIUM confidence. 429 handling patterns, retry strategies.
-- [Claude Code Session Isolation Blog Post](https://jonroosevelt.com/blog/claude-code-session-isolation-hooks) -- MEDIUM confidence. Real-world concurrent session bugs, session_id scoping pattern.
-- [python-telegram-bot Issue #4739](https://github.com/python-telegram-bot/python-telegram-bot/issues/4739) -- HIGH confidence. General topic message_thread_id=1 bug confirmed by maintainers.
-- [Node.js net module docs](https://nodejs.org/api/net.html) -- HIGH confidence. Unix domain socket IPC, connection error handling.
-- [Chokidar GitHub Issue #1112](https://github.com/paulmillr/chokidar/issues/1112) -- MEDIUM confidence. Race conditions in directory watching.
-- [Claude Code Bug #24327](https://github.com/anthropics/claude-code/issues/24327) -- MEDIUM confidence. Exit code 2 causing Claude to stop instead of processing feedback.
+- [Claude Agent SDK TypeScript Reference](https://platform.claude.com/docs/en/agent-sdk/typescript) -- HIGH confidence. Official V1 API documentation.
+- [Claude Agent SDK Overview](https://platform.claude.com/docs/en/agent-sdk/overview) -- HIGH confidence. Architecture and capabilities.
+- [Streaming Input Documentation](https://platform.claude.com/docs/en/agent-sdk/streaming-vs-single-mode) -- HIGH confidence. Streaming vs single mode, AsyncIterable usage.
+- [Streaming Output Documentation](https://platform.claude.com/docs/en/agent-sdk/streaming-output) -- HIGH confidence. includePartialMessages, event types, thinking incompatibility.
+- [Handle Approvals and User Input](https://platform.claude.com/docs/en/agent-sdk/user-input) -- HIGH confidence. canUseTool callback, PermissionResult types, AskUserQuestion.
+- [Session Management](https://platform.claude.com/docs/en/agent-sdk/sessions) -- HIGH confidence. Session IDs, resume, fork, persistence.
+- [Hosting the Agent SDK](https://platform.claude.com/docs/en/agent-sdk/hosting) -- HIGH confidence. Resource requirements, deployment patterns, process management.
+- [Migration Guide](https://platform.claude.com/docs/en/agent-sdk/migration-guide) -- HIGH confidence. Breaking changes from claude-code-sdk to claude-agent-sdk.
+- [V2 Preview Documentation](https://platform.claude.com/docs/en/agent-sdk/typescript-v2-preview) -- HIGH confidence. Unstable API warnings, feature gaps.
+- [GitHub Issue #207: AsyncIterable double turn](https://github.com/anthropics/claude-agent-sdk-typescript/issues/207) -- HIGH confidence. Detailed analysis, reproducible, workarounds documented.
+- [GitHub Issue #176: V2 ignores options](https://github.com/anthropics/claude-agent-sdk-typescript/issues/176) -- HIGH confidence. Root cause identified, workaround provided.
+- [GitHub Issue #142: Orphaned processes](https://github.com/anthropics/claude-agent-sdk-typescript/issues/142) -- HIGH confidence. Production impact documented, multiple workarounds.
+- [GitHub Issue #34: 12-second overhead](https://github.com/anthropics/claude-agent-sdk-typescript/issues/34) -- HIGH confidence. Benchmarks provided, Anthropic acknowledged.
+- [GitHub Issue #173: SIGTERM during cleanup](https://github.com/anthropics/claude-agent-sdk-typescript/issues/173) -- MEDIUM confidence. Python-specific but SIGTERM handling applies to TypeScript too.
+- [SDK Changelog](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md) -- HIGH confidence. Version history, bug fixes, breaking changes. Latest: v0.2.63.
+- [Claudegram (Grammy + SDK integration)](https://github.com/NachoSEO/claudegram) -- MEDIUM confidence. Real-world integration patterns, request queuing, session isolation.
+- [GitHub Issue #333 (Python): Multi-instance performance](https://github.com/anthropics/claude-agent-sdk-python/issues/333) -- MEDIUM confidence. Python-specific but documents the 20-30s startup issue.
 
 ---
-*Pitfalls research for: Claude Code Telegram Bridge*
-*Researched: 2026-02-28*
+*Pitfalls research for: Claude Agent SDK Migration (v2.0)*
+*Researched: 2026-03-01*
