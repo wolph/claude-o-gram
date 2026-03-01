@@ -45,12 +45,12 @@
   3. Expanded content is retrievable via LRU cache for the lifetime of the session
   4. Running /clear in Claude Code reuses the existing Telegram topic -- a visual separator appears, a new status message is pinned (old one unpinned), and session counters reset to zero
   5. SessionEnd with reason=clear keeps the topic open instead of closing/archiving it
-**Plans**: TBD
+**Plans:** 3 plans
 
 Plans:
-- [ ] 06-01: TBD
-- [ ] 06-02: TBD
-- [ ] 06-03: TBD
+- [ ] 06-01-PLAN.md -- Compact formatter, expand cache module, batcher upgrade
+- [ ] 06-02-PLAN.md -- Expand/collapse wiring, bot commentary cleanup, compact status
+- [ ] 06-03-PLAN.md -- /clear session lifecycle with topic reuse
 
 ### Phase 7: Permission Modes
 **Goal**: Users control how aggressively permissions are auto-approved, eliminating button-tap fatigue for trusted workflows
@@ -95,6 +95,6 @@ Phases execute in numeric order: 6 -> 7 -> 8
 | 3. Control | v1.0 | 2/2 | Complete | 2026-03-01 |
 | 4. SDK Resume Input | v2.0 | 2/2 | Complete | 2026-03-01 |
 | 5. tmux Cleanup | v2.0 | 1/1 | Complete | 2026-03-01 |
-| 6. Compact Output & Session UX | v3.0 | 0/? | Not started | - |
+| 6. Compact Output & Session UX | v3.0 | 0/3 | Planned | - |
 | 7. Permission Modes | v3.0 | 0/? | Not started | - |
 | 8. Subagent Visibility | v3.0 | 0/? | Not started | - |
