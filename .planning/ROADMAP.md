@@ -1,79 +1,61 @@
 # Roadmap: Claude Code Telegram Bridge
 
-## Overview
+## Milestones
 
-This roadmap delivers a per-machine Telegram bot that bridges Claude Code sessions to a shared Telegram group. Phase 1 builds the entire plumbing layer: HTTP server receiving hook POSTs, Telegram bot with forum topic lifecycle, session routing, message formatting, and rate limit handling. Phase 2 layers on monitoring -- forwarding tool calls, capturing Claude's text output from JSONL transcripts, posting notifications, status updates, and periodic summaries, with configurable verbosity. Phase 3 adds bidirectional control: the blocking approval flow (PreToolUse with inline Approve/Deny buttons and timeout handling) and text input from Telegram back to Claude Code.
+- [x] **v1.0 MVP** - Phases 1-3 (shipped 2026-03-01)
+- [ ] **v2.0 SDK Input Migration** - Phases 4-5 (in progress)
 
 ## Phases
 
+<details>
+<summary>v1.0 MVP (Phases 1-3) - SHIPPED 2026-03-01</summary>
+
+- [x] **Phase 1: Foundation** - HTTP server, Telegram bot, session-to-topic lifecycle, message formatting, and rate limiting
+- [x] **Phase 2: Monitoring** - Tool call forwarding, text output capture, notifications, status dashboard, summaries, and verbosity filtering
+- [x] **Phase 3: Control** - Blocking approval flow with inline buttons, timeout handling, and bidirectional text input from Telegram
+
+</details>
+
 **Phase Numbering:**
-- Integer phases (1, 2, 3): Planned milestone work
-- Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
+- Integer phases (4, 5): Planned milestone work
+- Decimal phases (4.1, 4.2): Urgent insertions (marked with INSERTED)
 
-Decimal phases appear between their surrounding integers in numeric order.
-
-- [x] **Phase 1: Foundation** - HTTP server, Telegram bot, session-to-topic lifecycle, message formatting, and rate limiting (completed 2026-02-28)
-- [ ] **Phase 2: Monitoring** - Tool call forwarding, text output capture, notifications, status dashboard, summaries, and verbosity filtering
-- [ ] **Phase 3: Control** - Blocking approval flow with inline buttons, timeout handling, and bidirectional text input from Telegram
+- [ ] **Phase 4: SDK Resume Input** - Replace tmux text injection with SDK `query({ resume })` for reliable cross-platform input
+- [ ] **Phase 5: tmux Cleanup** - Remove all tmux injection code, pane capture hook, and session type fields
 
 ## Phase Details
 
-### Phase 1: Foundation
-**Goal**: Users can start and stop Claude Code sessions and see them appear and disappear as dedicated Telegram forum topics, with properly formatted messages and rate limit protection
-**Depends on**: Nothing (first phase)
-**Requirements**: SESS-01, SESS-02, SESS-03, SESS-04, SESS-05, MNTR-04, UX-01, UX-02
+### Phase 4: SDK Resume Input
+**Goal**: Users can send text input to Claude Code sessions via Telegram using the SDK resume API instead of tmux injection
+**Depends on**: Phase 3 (v1.0 complete)
+**Requirements**: SDK-01, SDK-02, SDK-03, REL-01, REL-02
 **Success Criteria** (what must be TRUE):
-  1. Starting a Claude Code session on any configured machine auto-creates a named forum topic in the Telegram group
-  2. Ending a Claude Code session auto-closes its forum topic
-  3. Multiple concurrent sessions on the same machine each get their own isolated topic with no message cross-talk
-  4. Messages posted to Telegram use HTML formatting with code blocks and bold tool names, and outputs over 4096 characters arrive as .txt file attachments
-  5. Rapid message bursts are batched and queued so the bot never hits Telegram's 20 msg/min rate limit
-**Plans:** 4/4 plans complete
+  1. User sends a text message in a session topic and it arrives in Claude Code as a user prompt (via SDK resume, not tmux)
+  2. User replies to a specific bot message and the quoted context is included in the input delivered to Claude Code
+  3. Bot reacts to the user's message with a checkmark after input is successfully delivered
+  4. Input works on any OS where Node.js runs (no tmux or terminal emulator dependency)
+**Plans**: TBD
 
-Plans:
-- [x] 01-01-PLAN.md -- Project scaffolding, type contracts, and config loader
-- [x] 01-02-PLAN.md -- Session store and Fastify hook server
-- [x] 01-03-PLAN.md -- Telegram bot, topic lifecycle, message formatting, and rate limiting
-- [x] 01-04-PLAN.md -- Integration wiring, hook auto-install, and end-to-end verification
-
-### Phase 2: Monitoring
-**Goal**: Users can passively observe everything Claude Code is doing from Telegram -- every tool call, every text response, every notification, with a live status indicator and periodic summaries
-**Depends on**: Phase 1
-**Requirements**: MNTR-01, MNTR-02, MNTR-03, MNTR-05, MNTR-06, UX-03
+### Phase 5: tmux Cleanup
+**Goal**: All tmux-related code is removed so the codebase has no dead paths or unused dependencies
+**Depends on**: Phase 4
+**Requirements**: CLN-01, CLN-02, CLN-03
 **Success Criteria** (what must be TRUE):
-  1. Every tool call (file read, edit, bash command) appears in the session topic as it happens, with tool name and relevant details
-  2. Claude's text output (reasoning, explanations) is captured from JSONL transcript files and posted to the topic
-  3. Notification events (permission prompts, idle alerts) are forwarded to the session topic
-  4. A live-updating status message in each topic shows context window and quota usage
-  5. Users can configure verbosity to suppress noisy events (e.g., hide Read/Glob/Grep tool calls)
-**Plans:** 3 plans
-
-Plans:
-- [ ] 02-01-PLAN.md -- Types, verbosity filter, notification handler, server route, hook auto-install
-- [ ] 02-02-PLAN.md -- TranscriptWatcher, StatusMessage, and SummaryTimer monitoring modules
-- [ ] 02-03-PLAN.md -- Bot commands, full monitoring wiring into index.ts, integration
-
-### Phase 3: Control
-**Goal**: Users can approve or deny Claude Code's tool calls from Telegram and send text input back to Claude Code, making the Telegram group a full remote control interface
-**Depends on**: Phase 2
-**Requirements**: CTRL-01, CTRL-02, CTRL-03
-**Success Criteria** (what must be TRUE):
-  1. When Claude Code requests a blocked tool call, an approval message with inline Approve/Deny buttons appears in the session topic, and tapping a button unblocks Claude Code with the chosen decision
-  2. If no response is received within the configured timeout, the tool call is auto-denied (not auto-approved) and the approval buttons are replaced with an "Expired" indicator
-  3. User can reply with text in the session topic and that text is fed back into the Claude Code session as input
-**Plans**: 2 plans
-
-Plans:
-- [ ] 03-01-PLAN.md -- Types, config, ApprovalManager, TextInputManager, approval formatter
-- [ ] 03-02-PLAN.md -- PreToolUse route, callback handlers, text input handler, hook install, full wiring
+  1. The hook installer no longer references `capture-tmux-pane.sh` or installs any tmux-related hooks
+  2. TextInputManager contains no tmux `send-keys` or `paste-buffer` code paths
+  3. Session types and session store have no `tmuxPane` field
+  4. The project builds cleanly and all existing functionality (topics, output, approvals, input) works after removal
+**Plans**: TBD
 
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3
+Phases execute in numeric order: 4 -> 5
 
-| Phase | Plans Complete | Status | Completed |
-|-------|----------------|--------|-----------|
-| 1. Foundation | 4/4 | Complete   | 2026-02-28 |
-| 2. Monitoring | 0/3 | Planning complete | - |
-| 3. Control | 0/2 | Planning complete | - |
+| Phase | Milestone | Plans Complete | Status | Completed |
+|-------|-----------|----------------|--------|-----------|
+| 1. Foundation | v1.0 | 4/4 | Complete | 2026-02-28 |
+| 2. Monitoring | v1.0 | 3/3 | Complete | 2026-03-01 |
+| 3. Control | v1.0 | 2/2 | Complete | 2026-03-01 |
+| 4. SDK Resume Input | v2.0 | 0/? | Not started | - |
+| 5. tmux Cleanup | v2.0 | 0/? | Not started | - |

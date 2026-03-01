@@ -45,7 +45,7 @@ Deferred to v2.1+.
 
 | Feature | Reason |
 |---------|--------|
-| Full SDK session management | Deferred to v2.1 — keep external session model for now |
+| Full SDK session management | Deferred to v2.1 -- keep external session model for now |
 | Removing Fastify hook server | Still needed for session discovery and tool call events |
 | Removing transcript watcher | Still needed for Claude text output capture |
 | V2 preview API (`unstable_v2_*`) | Unstable, silently ignores critical options (#176) |
@@ -55,20 +55,20 @@ Deferred to v2.1+.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SDK-01 | TBD | Pending |
-| SDK-02 | TBD | Pending |
-| SDK-03 | TBD | Pending |
-| REL-01 | TBD | Pending |
-| REL-02 | TBD | Pending |
-| CLN-01 | TBD | Pending |
-| CLN-02 | TBD | Pending |
-| CLN-03 | TBD | Pending |
+| SDK-01 | Phase 4 | Pending |
+| SDK-02 | Phase 4 | Pending |
+| SDK-03 | Phase 4 | Pending |
+| REL-01 | Phase 4 | Pending |
+| REL-02 | Phase 4 | Pending |
+| CLN-01 | Phase 5 | Pending |
+| CLN-02 | Phase 5 | Pending |
+| CLN-03 | Phase 5 | Pending |
 
 **Coverage:**
 - v2.0 requirements: 8 total
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 8
+- Mapped to phases: 8
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-01*
-*Last updated: 2026-03-01 after initial definition*
+*Last updated: 2026-03-01 after roadmap creation*
