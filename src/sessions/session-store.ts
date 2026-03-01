@@ -168,15 +168,6 @@ export class SessionStore {
     return counts;
   }
 
-  /** Update the tmux pane ID for a session */
-  updateTmuxPane(sessionId: string, tmuxPane: string | null): void {
-    const session = this.sessions.get(sessionId);
-    if (session) {
-      session.tmuxPane = tmuxPane;
-      this.save();
-    }
-  }
-
   /** Get all sessions (active and closed) */
   getAllSessions(): SessionInfo[] {
     return Array.from(this.sessions.values());
@@ -222,13 +213,11 @@ export class SessionStore {
 
       for (const [id, session] of Object.entries(data)) {
         // Convert filesChanged from array (JSON) to Set (in-memory)
-        // Ensure Phase 3 fields have defaults for sessions saved before Phase 3
         this.sessions.set(id, {
           ...session,
           filesChanged: new Set(
             Array.isArray(session.filesChanged) ? session.filesChanged : []
           ),
-          tmuxPane: session.tmuxPane ?? null,
         });
       }
     } catch (err) {

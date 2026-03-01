@@ -1,6 +1,8 @@
 import { basename } from 'node:path';
+import { readFileSync } from 'node:fs';
 import type { SessionInfo } from '../types/sessions.js';
 import type {
+  HookPayload,
   SessionStartPayload,
   SessionEndPayload,
   PostToolUsePayload,
@@ -8,7 +10,9 @@ import type {
   PreToolUsePayload,
 } from '../types/hooks.js';
 import type { SessionStore } from '../sessions/session-store.js';
+import type { TranscriptEntry, ContentBlock } from '../types/monitoring.js';
 import { shouldPostToolCall } from '../monitoring/verbosity.js';
+import { escapeHtml } from '../utils/text.js';
 
 /**
  * Callback interface for delegating Telegram actions.
@@ -21,6 +25,7 @@ export interface HookCallbacks {
   onToolUse(session: SessionInfo, payload: PostToolUsePayload): Promise<void>;
   onNotification(session: SessionInfo, payload: NotificationPayload): Promise<void>;
   onPreToolUse(session: SessionInfo, payload: PreToolUsePayload): Promise<Record<string, unknown>>;
+  onBackfillSummary(session: SessionInfo, summary: string): Promise<void>;
 }
 
 /** Tool names that modify files (used to track changed files) */
@@ -38,6 +43,156 @@ export class HookHandlers {
   constructor(sessionStore: SessionStore, callbacks: HookCallbacks) {
     this.sessionStore = sessionStore;
     this.callbacks = callbacks;
+  }
+
+  /**
+   * Ensure a session exists for the given payload.
+   * If the session is unknown (e.g. bot restarted while Claude Code was running),
+   * auto-registers it, creates a Telegram topic, and backfills transcript history.
+   */
+  private async ensureSession(payload: HookPayload): Promise<SessionInfo | null> {
+    const existing = this.sessionStore.get(payload.session_id);
+    if (existing) return existing;
+
+    console.log(`Auto-registering late session: ${payload.session_id}`);
+    const now = new Date().toISOString();
+    const session: SessionInfo = {
+      sessionId: payload.session_id,
+      threadId: 0,
+      cwd: payload.cwd,
+      topicName: basename(payload.cwd),
+      startedAt: now,
+      status: 'active',
+      transcriptPath: payload.transcript_path,
+      toolCallCount: 0,
+      filesChanged: new Set<string>(),
+      verbosity: 'normal',
+      statusMessageId: 0,
+      suppressedCounts: {},
+      contextPercent: 0,
+      lastActivityAt: now,
+    };
+
+    this.sessionStore.set(payload.session_id, session);
+    await this.callbacks.onSessionStart(session, false);
+
+    // Re-fetch to get updated threadId set by onSessionStart
+    const registered = this.sessionStore.get(payload.session_id);
+    if (registered) {
+      await this.backfillFromTranscript(registered);
+    }
+    return registered ?? null;
+  }
+
+  /**
+   * Read the transcript JSONL file and send a compact backfill summary
+   * to the Telegram topic. Updates session metadata (toolCallCount, filesChanged).
+   */
+  private async backfillFromTranscript(session: SessionInfo): Promise<void> {
+    let lines: string[];
+    try {
+      const raw = readFileSync(session.transcriptPath, 'utf-8');
+      lines = raw.split('\n').filter((l) => l.trim().length > 0);
+    } catch (err) {
+      console.warn(
+        'Backfill: failed to read transcript:',
+        err instanceof Error ? err.message : err,
+      );
+      return;
+    }
+
+    const toolCalls: { name: string; detail: string }[] = [];
+    const filesChanged = new Set<string>();
+    let totalToolCalls = 0;
+
+    for (const line of lines) {
+      let entry: TranscriptEntry;
+      try {
+        entry = JSON.parse(line) as TranscriptEntry;
+      } catch {
+        continue;
+      }
+
+      if (entry.isSidechain) continue;
+      if (entry.type !== 'assistant') continue;
+      if (entry.message.role !== 'assistant') continue;
+
+      const content = entry.message.content;
+      if (!Array.isArray(content)) continue;
+
+      for (const block of content as ContentBlock[]) {
+        if (block.type !== 'tool_use') continue;
+        totalToolCalls++;
+
+        // Track file changes
+        const input = block.input as Record<string, unknown>;
+        if (FILE_MODIFYING_TOOLS.has(block.name)) {
+          const filePath = extractFilePath(input);
+          if (filePath) filesChanged.add(filePath);
+        }
+
+        // Build detail string for recent activity display
+        let detail = '';
+        if (block.name === 'Bash' && typeof input.command === 'string') {
+          const cmd = input.command.length > 60
+            ? input.command.slice(0, 60) + '...'
+            : input.command;
+          detail = cmd;
+        } else if (typeof input.file_path === 'string') {
+          detail = input.file_path;
+        } else if (typeof input.path === 'string') {
+          detail = input.path;
+        } else if (typeof input.pattern === 'string') {
+          detail = input.pattern;
+        } else if (typeof input.query === 'string') {
+          detail = input.query.length > 60
+            ? input.query.slice(0, 60) + '...'
+            : input.query;
+        }
+
+        toolCalls.push({ name: block.name, detail });
+      }
+    }
+
+    // Update session store with backfilled metadata
+    for (let i = 0; i < totalToolCalls; i++) {
+      this.sessionStore.incrementToolCount(session.sessionId);
+    }
+    for (const file of filesChanged) {
+      this.sessionStore.addChangedFile(session.sessionId, file);
+    }
+
+    // Build summary message
+    const parts: string[] = [
+      `\u{1F504} <b>Late join</b> \u2014 backfilling from transcript`,
+      '',
+      `\u{1F4CA} <b>Session so far:</b>`,
+      `\u2022 Tool calls: ${totalToolCalls}`,
+    ];
+
+    if (filesChanged.size > 0) {
+      parts.push(`\u2022 Files changed: ${filesChanged.size}`);
+      for (const file of filesChanged) {
+        parts.push(`  \u2022 <code>${escapeHtml(file)}</code>`);
+      }
+    }
+
+    // Show last ~10 tool calls as recent activity
+    const recentCalls = toolCalls.slice(-10);
+    if (recentCalls.length > 0) {
+      parts.push('');
+      parts.push(`\u{1F527} <b>Recent activity:</b>`);
+      for (const call of recentCalls) {
+        if (call.detail) {
+          parts.push(`\u2022 ${escapeHtml(call.name)}: <code>${escapeHtml(call.detail)}</code>`);
+        } else {
+          parts.push(`\u2022 ${escapeHtml(call.name)}`);
+        }
+      }
+    }
+
+    const summary = parts.join('\n');
+    await this.callbacks.onBackfillSummary(session, summary);
   }
 
   /**
@@ -94,7 +249,6 @@ export class HookHandlers {
       suppressedCounts: {},
       contextPercent: 0,
       lastActivityAt: now,
-      tmuxPane: null,
     };
 
     this.sessionStore.set(payload.session_id, session);
@@ -123,13 +277,8 @@ export class HookHandlers {
    * Checks verbosity filter before posting. Tracks tool usage and file changes.
    */
   async handlePostToolUse(payload: PostToolUsePayload): Promise<void> {
-    const session = this.sessionStore.get(payload.session_id);
-    if (!session) {
-      console.warn(
-        `PostToolUse received for unknown session: ${payload.session_id}`
-      );
-      return;
-    }
+    const session = await this.ensureSession(payload);
+    if (!session) return;
 
     // Update activity timestamp for idle detection
     this.sessionStore.updateLastActivity(payload.session_id);
@@ -159,11 +308,8 @@ export class HookHandlers {
    * Delegates to the onNotification callback for Telegram posting.
    */
   async handleNotification(payload: NotificationPayload): Promise<void> {
-    const session = this.sessionStore.get(payload.session_id);
-    if (!session) {
-      console.warn(`Notification received for unknown session: ${payload.session_id}`);
-      return;
-    }
+    const session = await this.ensureSession(payload);
+    if (!session) return;
     this.sessionStore.updateLastActivity(payload.session_id);
     await this.callbacks.onNotification(session, payload);
   }
@@ -174,15 +320,14 @@ export class HookHandlers {
    * The connection stays open until the user decides or timeout fires.
    */
   async handlePreToolUse(payload: PreToolUsePayload): Promise<Record<string, unknown>> {
-    const session = this.sessionStore.get(payload.session_id);
+    const session = await this.ensureSession(payload);
     if (!session) {
-      console.warn(`PreToolUse received for unknown session: ${payload.session_id}`);
-      // Unknown session -- allow the tool call
+      // ensureSession failed (e.g. onSessionStart threw) -- allow the tool call
       return {
         hookSpecificOutput: {
           hookEventName: 'PreToolUse',
           permissionDecision: 'allow',
-          permissionDecisionReason: 'Auto-approved (unknown session)',
+          permissionDecisionReason: 'Auto-approved (session registration failed)',
         },
       };
     }
