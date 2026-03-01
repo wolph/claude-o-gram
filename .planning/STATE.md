@@ -4,16 +4,16 @@ milestone: v3.0
 milestone_name: UX Overhaul
 current_phase: 6
 current_phase_name: Compact Output & Session UX
-current_plan: n/a
-status: ready_to_plan
+current_plan: 2
+status: executing
 last_updated: "2026-03-01"
 last_activity: 2026-03-01
 progress:
   total_phases: 3
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_plans: 3
+  completed_plans: 1
+  percent: 33
 ---
 
 # Project State
@@ -23,16 +23,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-01)
 
 **Core value:** See what Claude Code is doing and respond to its questions from anywhere, without needing to be at the terminal.
-**Current focus:** v3.0 UX Overhaul -- Phase 6: Compact Output & Session UX (ready to plan)
+**Current focus:** v3.0 UX Overhaul -- Phase 6: Compact Output & Session UX (executing Plan 2)
 
 ## Current Position
 
 Phase: 6 of 8 (Compact Output & Session UX) -- first phase of v3.0
-Plan: -- (not yet planned)
-Status: Ready to plan
-Last activity: 2026-03-01 -- Roadmap rebuilt for v3.0 (3 phases, consolidated from 4)
+Plan: 2 of 3
+Status: Executing
+Last activity: 2026-03-01 -- Completed Plan 1 (compact formatter + infrastructure)
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [###.......] 33%
 
 ## Performance Metrics
 
@@ -45,8 +45,12 @@ Progress: [░░░░░░░░░░] 0%
 - Phases: 2
 
 **Velocity (v3.0):**
-- Total plans completed: 0
+- Total plans completed: 1
 - Phases: 0 of 3
+
+| Phase | Plan | Duration | Tasks | Files |
+|-------|------|----------|-------|-------|
+| 06    | 01   | 5min     | 2     | 6     |
 
 ## Accumulated Context
 
@@ -55,6 +59,8 @@ Progress: [░░░░░░░░░░] 0%
 See PROJECT.md Key Decisions table for full log.
 
 Recent: Consolidated 4-phase v3.0 roadmap into 3 phases -- merged /clear topic reuse (SESS-*) into Phase 6 alongside compact output (OUT-*). Permission modes and subagent visibility remain separate phases.
+
+06-01: Formatter is pure function returning data; caching done by caller. Batcher uses onFlush callback pattern (keeps batcher generic). Wired batcher to sendMessageRaw for message_id tracking.
 
 ### Pending Todos
 
@@ -67,5 +73,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-01
-Stopped at: Roadmap rebuilt, Phase 6 ready to plan
+Stopped at: Completed 06-01-PLAN.md (compact formatter + infrastructure)
 Resume file: None

@@ -9,10 +9,10 @@ Requirements for v3.0 UX Overhaul. Each maps to roadmap phases.
 
 ### Output Formatting
 
-- [ ] **OUT-01**: Tool calls displayed as `Tool(args...)` single-line, max 250 chars
-- [ ] **OUT-02**: Tool calls exceeding 250 chars truncated with expand button
+- [x] **OUT-01**: Tool calls displayed as `Tool(args...)` single-line, max 250 chars
+- [x] **OUT-02**: Tool calls exceeding 250 chars truncated with expand button
 - [ ] **OUT-03**: Expand button edits message in-place showing full content with collapse button
-- [ ] **OUT-04**: Expand content stored in LRU cache (evicted after session end or size limit)
+- [x] **OUT-04**: Expand content stored in LRU cache (evicted after session end or size limit)
 - [ ] **OUT-05**: Bot commentary removed (no "waiting for input", no emoji status labels)
 - [ ] **OUT-06**: Claude's text output posted directly without extra formatting
 - [ ] **OUT-07**: Pinned status message uses compact format (no emoji)
@@ -83,10 +83,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| OUT-01 | Phase 6 | Pending |
-| OUT-02 | Phase 6 | Pending |
+| OUT-01 | Phase 6 | Complete |
+| OUT-02 | Phase 6 | Complete |
 | OUT-03 | Phase 6 | Pending |
-| OUT-04 | Phase 6 | Pending |
+| OUT-04 | Phase 6 | Complete |
 | OUT-05 | Phase 6 | Pending |
 | OUT-06 | Phase 6 | Pending |
 | OUT-07 | Phase 6 | Pending |
