@@ -5,7 +5,6 @@ import type { AppConfig } from '../types/config.js';
 import type { SessionStore } from '../sessions/session-store.js';
 import type { VerbosityTier } from '../types/monitoring.js';
 import type { ApprovalManager } from '../control/approval-manager.js';
-import type { TextInputManager } from '../control/input-manager.js';
 import type { SdkInputManager } from '../sdk/input-manager.js';
 import {
   formatApprovalResult,
@@ -29,7 +28,6 @@ export async function createBot(
   config: AppConfig,
   sessionStore: SessionStore,
   approvalManager: ApprovalManager,
-  inputManager: TextInputManager,
   sdkInputManager: SdkInputManager,
 ): Promise<Bot<BotContext>> {
   const bot = new Bot<BotContext>(config.telegramBotToken);
@@ -174,11 +172,10 @@ export async function createBot(
     }
   });
 
-  // --- Phase 4: Text input handler (SDK-first with tmux fallback) ---
+  // --- Phase 4: Text input handler (SDK-only) ---
 
   // Listen for text messages in forum topics.
-  // When user replies in a session topic, feed text to Claude Code via SDK resume first,
-  // falling back to tmux-based TextInputManager if SDK delivery fails.
+  // When user replies in a session topic, feed text to Claude Code via SDK resume.
   bot.on('message:text', async (ctx) => {
     const threadId = ctx.message.message_thread_id;
     if (!threadId) return; // Not in a forum topic
@@ -198,7 +195,6 @@ export async function createBot(
       text = `[Quoting: "${replied.text}"]\n\n${text}`;
     }
 
-    // Try SDK input first (Phase 4), fall back to tmux (legacy)
     const result = await sdkInputManager.send(
       session.sessionId,
       text,
@@ -206,44 +202,16 @@ export async function createBot(
     );
 
     if (result.status === 'sent') {
-      // SDK delivery succeeded -- zap reaction to distinguish from tmux thumbs-up (REL-02)
       try {
         await ctx.react('\u26A1');
       } catch {
         // Reaction not supported -- ignore
       }
-      return;
-    }
-
-    // SDK failed -- log and fall back to tmux
-    console.warn(
-      `SDK input failed for session ${session.sessionId}, falling back to tmux: ${result.error}`,
-    );
-
-    const tmuxResult = inputManager.send(session.tmuxPane, session.sessionId, text);
-    switch (tmuxResult) {
-      case 'sent':
-        try {
-          await ctx.react('\u{1F44D}');
-        } catch {
-          // Reaction not supported -- ignore
-        }
-        break;
-      case 'queued': {
-        const queueSize = inputManager.queueSize(session.sessionId);
-        await ctx.reply(
-          '\u{1F4E5} SDK delivery failed, input queued for tmux fallback'
-            + ` (${queueSize} pending)`,
-          { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
-        );
-        break;
-      }
-      case 'failed':
-        await ctx.reply(
-          `\u274C Failed to send input via both SDK and tmux: ${result.error}`,
-          { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
-        );
-        break;
+    } else {
+      await ctx.reply(
+        `\u274C Failed to send input: ${result.error}`,
+        { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
+      );
     }
   });
 

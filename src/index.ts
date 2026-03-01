@@ -1,5 +1,4 @@
 import { join } from 'node:path';
-import { readFileSync, unlinkSync, existsSync } from 'node:fs';
 import { loadConfig } from './config.js';
 import { SessionStore } from './sessions/session-store.js';
 import { createHookHandlers, type HookCallbacks } from './hooks/handlers.js';
@@ -21,7 +20,6 @@ import { StatusMessage } from './monitoring/status-message.js';
 import { SummaryTimer } from './monitoring/summary-timer.js';
 import { escapeHtml, markdownToHtml } from './utils/text.js';
 import { ApprovalManager } from './control/approval-manager.js';
-import { TextInputManager } from './control/input-manager.js';
 import { SdkInputManager } from './sdk/input-manager.js';
 import type { SessionInfo } from './types/sessions.js';
 import type { StatusData } from './types/monitoring.js';
@@ -59,24 +57,6 @@ function buildStatusData(session: SessionInfo, currentTool: string): StatusData 
 }
 
 /**
- * Try to read the tmux pane ID from the temp file written by the command hook.
- * Returns the pane ID if found, null otherwise. Cleans up the file after reading.
- */
-function tryReadTmuxPane(sessionId: string): string | null {
-  try {
-    const tmuxFile = `/tmp/claude-tmux-pane-${sessionId}.txt`;
-    if (existsSync(tmuxFile)) {
-      const paneId = readFileSync(tmuxFile, 'utf-8').trim();
-      if (paneId) {
-        try { unlinkSync(tmuxFile); } catch { /* ignore */ }
-        return paneId;
-      }
-    }
-  } catch { /* ignore */ }
-  return null;
-}
-
-/**
  * Main entry point for the Claude Code Telegram Bridge.
  *
  * Single-process daemon (per research Pattern 1) that:
@@ -102,11 +82,10 @@ export async function main(): Promise<void> {
 
   // 4. Phase 3/4: Create control managers
   const approvalManager = new ApprovalManager(config.approvalTimeoutMs);
-  const inputManager = new TextInputManager();
   const sdkInputManager = new SdkInputManager();
 
   // 5. Create bot instance (with plugins, not yet started)
-  const bot = await createBot(config, sessionStore, approvalManager, inputManager, sdkInputManager);
+  const bot = await createBot(config, sessionStore, approvalManager, sdkInputManager);
 
   // 6. Create topic manager wired to bot
   const topicManager = new TopicManager(bot, config.telegramChatId);
@@ -263,13 +242,6 @@ export async function main(): Promise<void> {
 
       // Initialize monitoring components for this session
       initMonitoring(session);
-
-      // Phase 3: Try to capture tmux pane ID from the temp file written by the command hook
-      const paneId = tryReadTmuxPane(session.sessionId);
-      if (paneId) {
-        sessionStore.updateTmuxPane(session.sessionId, paneId);
-        session.tmuxPane = paneId;
-      }
     },
 
     onSessionEnd: async (session) => {
@@ -294,10 +266,7 @@ export async function main(): Promise<void> {
 
       // Phase 3/4: Clean up control state
       approvalManager.cleanupSession(session.sessionId);
-      inputManager.cleanup(session.sessionId);
       sdkInputManager.cleanup(session.sessionId);
-      // Clean up tmux pane file if it still exists
-      try { unlinkSync(`/tmp/claude-tmux-pane-${session.sessionId}.txt`); } catch { /* ignore */ }
 
       const summary = formatSessionEnd(latest, 'completed');
       // Send immediately (not batched) -- this is a lifecycle event
@@ -342,15 +311,6 @@ export async function main(): Promise<void> {
 
     // Phase 3: PreToolUse approval handler
     onPreToolUse: async (session, payload: PreToolUsePayload) => {
-      // Lazy tmux pane capture: if not yet captured, try again
-      if (!session.tmuxPane) {
-        const paneId = tryReadTmuxPane(session.sessionId);
-        if (paneId) {
-          sessionStore.updateTmuxPane(session.sessionId, paneId);
-          session.tmuxPane = paneId;
-        }
-      }
-
       // Format the approval request message
       const approvalHtml = formatApprovalRequest(payload);
       const keyboard = makeApprovalKeyboard(payload.tool_use_id);

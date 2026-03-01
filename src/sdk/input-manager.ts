@@ -4,8 +4,8 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
  * SDK-based input manager that delivers text to Claude Code sessions
  * via the `query({ prompt, options: { resume } })` pattern.
  *
- * Replaces tmux-based text injection with a cross-platform, reliable
- * mechanism. Each `send()` call spawns a one-shot query that resumes
+ * Cross-platform, reliable input delivery mechanism.
+ * Each `send()` call spawns a one-shot query that resumes
  * the target session, delivers the text, and drains the response stream
  * (output is captured by the existing hook server + transcript watcher).
  *
