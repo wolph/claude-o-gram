@@ -144,6 +144,12 @@ export async function main(): Promise<void> {
   // 8. Per-session monitoring instances
   const monitors = new Map<string, SessionMonitor>();
 
+  /**
+   * Bridge between SessionEnd(reason=clear) and SessionStart(source=clear).
+   * Stores threadId and statusMessageId so the clear flow can reuse the topic.
+   */
+  const clearPending = new Map<string, { threadId: number; statusMessageId: number }>();
+
   // Phase 3: Track original message text for approval expiry edits
   const approvalMessageTexts = new Map<string, string>();
   // Track whether denials were caused by timeout (vs user button press)
@@ -270,6 +276,42 @@ export async function main(): Promise<void> {
   //    This connects session lifecycle events to Telegram forum topic actions.
   const callbacks: HookCallbacks = {
     onSessionStart: async (session, source) => {
+      if (source === 'clear') {
+        // /clear transition: reuse existing topic
+        const pending = clearPending.get(session.cwd);
+        if (pending) {
+          clearPending.delete(session.cwd);
+
+          // Post timestamped separator (SESS-02)
+          const now = new Date();
+          const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+          const separator = `\u2500\u2500\u2500 context cleared at ${timeStr} \u2500\u2500\u2500`;
+          await batcher.enqueueImmediate(session.threadId, separator);
+
+          // Unpin old status message (SESS-04)
+          if (pending.statusMessageId > 0) {
+            await topicManager.unpinMessage(pending.statusMessageId);
+          }
+
+          // Reset session counters (SESS-05) -- already reset in handlers.ts set()
+          // but call resetCounters to be safe
+          sessionStore.resetCounters(session.sessionId);
+        }
+
+        // Initialize monitoring (creates new StatusMessage, pins it) (SESS-03)
+        initMonitoring(session);
+
+        // Re-detect input method
+        void inputRouter.register(session.sessionId, session.cwd, session.permissionMode).then(() => {
+          const method = inputRouter.getMethod(session.sessionId);
+          if (method) {
+            sessionStore.updateInputMethod(session.sessionId, method);
+          }
+        });
+
+        return;
+      }
+
       if (source === 'resume' && session.threadId > 0) {
         // Resume: reopen existing topic and post resume message
         await topicManager.reopenTopic(session.threadId, session.topicName);
@@ -277,8 +319,6 @@ export async function main(): Promise<void> {
           session.threadId,
           formatSessionStart(session, true),
         );
-      } else if (source === 'clear') {
-        // /clear transition: handled in Task 2
       } else {
         // New session: create topic, update store, post start message
         const threadId = await topicManager.createTopic(session.topicName);
@@ -307,7 +347,31 @@ export async function main(): Promise<void> {
       // Re-fetch session from store to get latest toolCallCount/filesChanged
       const latest = sessionStore.get(session.sessionId) || session;
 
-      // Clean up monitoring components
+      if (reason === 'clear') {
+        // /clear transition: keep topic open, clean up monitoring but preserve threadId
+        const monitor = monitors.get(session.sessionId);
+        if (monitor) {
+          monitor.transcriptWatcher.stop();
+          monitor.summaryTimer.stop();
+          monitor.statusMessage.destroy();
+          monitors.delete(session.sessionId);
+        }
+
+        // Clean up control state
+        approvalManager.cleanupSession(session.sessionId);
+        inputRouter.cleanup(session.sessionId);
+
+        // Store threadId for the upcoming SessionStart(source=clear)
+        clearPending.set(latest.cwd, {
+          threadId: latest.threadId,
+          statusMessageId: latest.statusMessageId,
+        });
+
+        // Do NOT close the topic, do NOT post session end summary (SESS-06)
+        return;
+      }
+
+      // Normal session end: clean up monitoring
       const monitor = monitors.get(session.sessionId);
       if (monitor) {
         monitor.transcriptWatcher.stop();
@@ -509,6 +573,7 @@ export async function main(): Promise<void> {
       monitor.statusMessage.destroy();
     }
     monitors.clear();
+    clearPending.clear();
     // Phase 3: Clean up control managers
     approvalManager.shutdown();
     batcher.shutdown();
