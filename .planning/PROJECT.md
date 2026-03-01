@@ -8,9 +8,17 @@ A per-machine Telegram bot that bridges Claude Code sessions to a shared Telegra
 
 See what Claude Code is doing and respond to its questions from anywhere, without needing to be at the terminal.
 
-## Current State: v2.0 Shipped
+## Current Milestone: v3.0 UX Overhaul
 
-Shipped v2.0 SDK Input Migration on 2026-03-01. Replaced tmux text injection with Claude Agent SDK `query({ resume })` for cross-platform input delivery, then removed all tmux code from the codebase.
+**Goal:** Make Telegram output match Claude Code's terminal experience — compact, clean, and controllable.
+
+**Target features:**
+- Compact tool call format with expand/collapse buttons
+- Terminal-fidelity output (remove bot commentary)
+- /clear reuses topic with new pinned status
+- Local permission visibility (stdout)
+- Permission modes: Accept All, Same Tool, Safe Only, Until Done
+- Full subagent visibility with agent identity
 
 **Tech stack:** TypeScript, grammY, Fastify, @anthropic-ai/claude-agent-sdk
 **Codebase:** ~3,500 LOC TypeScript
@@ -38,14 +46,20 @@ Shipped v2.0 SDK Input Migration on 2026-03-01. Replaced tmux text injection wit
 
 ### Active
 
-(None — next milestone not started)
+- [ ] Tool calls displayed as compact `Tool(args...)` with 250-char limit and expand/collapse
+- [ ] Output matches Claude Code terminal — no bot commentary
+- [ ] /clear reuses topic, posts separator, re-pins status
+- [ ] Permissions visible locally via stdout
+- [ ] No permission timeout — wait forever
+- [ ] Permission modes: Accept All, Same Tool, Safe Only, Until Done
+- [ ] Subagent output visible with agent name/type/status labels
 
 ### Out of Scope
 
 - Starting new Claude Code sessions from Telegram — deferred to v2.1
 - Central server or serverless architecture — each machine runs its own bot directly
 - Multi-machine dashboard — deferred to v2.1
-- Subagent tracking — deferred to v2.1
+- Subagent tracking — moved to v3.0 Active
 - Multi-user access control — single-user system, the bot owner controls everything
 - Full SDK session management (bot-controlled sessions) — deferred to v2.1
 - Removing Fastify hook server — still needed for session discovery and tool call events
@@ -69,7 +83,7 @@ Shipped v2.0 SDK Input Migration on 2026-03-01. Replaced tmux text injection wit
 - **Agent SDK**: Must use `@anthropic-ai/claude-agent-sdk` V1 API — V2 preview is unstable (#176)
 - **Telegram API**: Must respect Telegram's rate limits (especially for streaming tool calls and text output)
 - **Bot per machine**: Architecture is decentralized — no shared state between machines beyond the Telegram group itself
-- **Backward compatibility**: All existing Telegram UX must be preserved (topics, formatting, reactions, verbosity)
+- **Backward compatibility**: Session lifecycle and input mechanisms preserved; output formatting intentionally changed for v3.0
 
 ## Key Decisions
 
@@ -84,5 +98,9 @@ Shipped v2.0 SDK Input Migration on 2026-03-01. Replaced tmux text injection wit
 | One-shot+resume (not streaming input) (v2.0) | Double-turn bug #207 doubles token costs with streaming input | ✓ Good — workaround endorsed by Anthropic |
 | Keep hook server + transcript watcher (v2.0) | Only replace tmux injection in v2.0, keep working output infrastructure | ✓ Good — incremental migration reduces risk |
 
+| Compact tool format with expand/collapse (v3.0) | Terminal-fidelity output, reduce noise, inline expand for long content | — Pending |
+| Permission modes with tiered auto-accept (v3.0) | Replace binary approve/deny with flexible acceptance modes | — Pending |
+| Full subagent visibility (v3.0) | Users need to see what subagents are doing, not just main chain | — Pending |
+
 ---
-*Last updated: 2026-03-01 after v2.0 milestone completion*
+*Last updated: 2026-03-01 after v3.0 milestone start*
