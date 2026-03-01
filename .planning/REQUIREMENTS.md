@@ -19,20 +19,20 @@ Requirements for v3.0 UX Overhaul. Each maps to roadmap phases.
 
 ### Permissions
 
-- [ ] **PERM-01**: No permission timeout — wait indefinitely for user decision
-- [ ] **PERM-02**: Accept All mode — auto-approve everything until manually stopped
-- [ ] **PERM-03**: Same Tool mode — auto-approve only matching tool name until stopped
-- [ ] **PERM-04**: Safe Only mode — auto-approve green-risk tools, prompt for yellow/red
-- [ ] **PERM-05**: Until Done mode — auto-approve everything until Claude's turn ends
+- [ ] **PERM-01**: No permission timeout -- wait indefinitely for user decision
+- [ ] **PERM-02**: Accept All mode -- auto-approve everything until manually stopped
+- [ ] **PERM-03**: Same Tool mode -- auto-approve only matching tool name until stopped
+- [ ] **PERM-04**: Safe Only mode -- auto-approve green-risk tools, prompt for yellow/red
+- [ ] **PERM-05**: Until Done mode -- auto-approve everything until Claude's turn ends
 - [ ] **PERM-06**: Sticky control message with Stop button when any auto-accept mode is active
-- [ ] **PERM-07**: Auto-approved permissions shown as compact `⚡ Tool(args...)` line
+- [ ] **PERM-07**: Auto-approved permissions shown as compact `lightning Tool(args...)` line
 - [ ] **PERM-08**: Permissions visible locally via stdout before and after decision
 - [ ] **PERM-09**: Dangerous command blocklist prevents auto-accept of destructive patterns (rm -rf, sudo, curl|bash)
 
 ### Session Management
 
 - [ ] **SESS-01**: /clear reuses existing topic instead of creating new one
-- [ ] **SESS-02**: Visual separator posted on /clear: `─── context cleared ───`
+- [ ] **SESS-02**: Visual separator posted on /clear: `--- context cleared ---`
 - [ ] **SESS-03**: New pinned status message posted after /clear
 - [ ] **SESS-04**: Old status message unpinned on /clear
 - [ ] **SESS-05**: Session counters (tools, files, duration) reset on /clear
@@ -41,11 +41,11 @@ Requirements for v3.0 UX Overhaul. Each maps to roadmap phases.
 ### Subagent Visibility
 
 - [ ] **AGENT-01**: SubagentStart/SubagentStop hooks registered in hook installer
-- [ ] **AGENT-02**: Subagent spawn shown: `▶ Agent(name) spawned — "description"` with type
-- [ ] **AGENT-03**: Subagent completion shown: `✓ Agent(name) done`
-- [ ] **AGENT-04**: Subagent tool calls tagged with agent prefix: `▸ [name] Tool(args...)`
-- [ ] **AGENT-05**: Subagent text output tagged with agent prefix: `▸ [name] text...`
-- [ ] **AGENT-06**: Nested subagents use stacked prefix: `▸▸ [inner]` (max 2 levels)
+- [ ] **AGENT-02**: Subagent spawn shown: `> Agent(name) spawned -- "description"` with type
+- [ ] **AGENT-03**: Subagent completion shown: `checkmark Agent(name) done`
+- [ ] **AGENT-04**: Subagent tool calls tagged with agent prefix: `> [name] Tool(args...)`
+- [ ] **AGENT-05**: Subagent text output tagged with agent prefix: `> [name] text...`
+- [ ] **AGENT-06**: Nested subagents use stacked prefix: `>> [inner]` (max 2 levels)
 
 ## Future Requirements
 
@@ -90,6 +90,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OUT-05 | Phase 6 | Pending |
 | OUT-06 | Phase 6 | Pending |
 | OUT-07 | Phase 6 | Pending |
+| SESS-01 | Phase 6 | Pending |
+| SESS-02 | Phase 6 | Pending |
+| SESS-03 | Phase 6 | Pending |
+| SESS-04 | Phase 6 | Pending |
+| SESS-05 | Phase 6 | Pending |
+| SESS-06 | Phase 6 | Pending |
 | PERM-01 | Phase 7 | Pending |
 | PERM-02 | Phase 7 | Pending |
 | PERM-03 | Phase 7 | Pending |
@@ -99,18 +105,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PERM-07 | Phase 7 | Pending |
 | PERM-08 | Phase 7 | Pending |
 | PERM-09 | Phase 7 | Pending |
-| SESS-01 | Phase 8 | Pending |
-| SESS-02 | Phase 8 | Pending |
-| SESS-03 | Phase 8 | Pending |
-| SESS-04 | Phase 8 | Pending |
-| SESS-05 | Phase 8 | Pending |
-| SESS-06 | Phase 8 | Pending |
-| AGENT-01 | Phase 9 | Pending |
-| AGENT-02 | Phase 9 | Pending |
-| AGENT-03 | Phase 9 | Pending |
-| AGENT-04 | Phase 9 | Pending |
-| AGENT-05 | Phase 9 | Pending |
-| AGENT-06 | Phase 9 | Pending |
+| AGENT-01 | Phase 8 | Pending |
+| AGENT-02 | Phase 8 | Pending |
+| AGENT-03 | Phase 8 | Pending |
+| AGENT-04 | Phase 8 | Pending |
+| AGENT-05 | Phase 8 | Pending |
+| AGENT-06 | Phase 8 | Pending |
 
 **Coverage:**
 - v3.0 requirements: 28 total
@@ -119,4 +119,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-03-01*
-*Last updated: 2026-03-01 after roadmap creation*
+*Last updated: 2026-03-01 after roadmap rebuild (3-phase consolidation)*
