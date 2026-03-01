@@ -5,15 +5,15 @@ milestone_name: UX Overhaul
 current_phase: 6
 current_phase_name: Compact Output & Session UX
 current_plan: 3
-status: executing
+status: phase-complete
 last_updated: "2026-03-01"
 last_activity: 2026-03-01
 progress:
   total_phases: 3
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 3
-  completed_plans: 2
-  percent: 67
+  completed_plans: 3
+  percent: 100
 ---
 
 # Project State
@@ -23,16 +23,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-01)
 
 **Core value:** See what Claude Code is doing and respond to its questions from anywhere, without needing to be at the terminal.
-**Current focus:** v3.0 UX Overhaul -- Phase 6: Compact Output & Session UX (executing Plan 3)
+**Current focus:** v3.0 UX Overhaul -- Phase 6: Compact Output & Session UX (COMPLETE)
 
 ## Current Position
 
-Phase: 6 of 8 (Compact Output & Session UX) -- first phase of v3.0
-Plan: 3 of 3
-Status: Executing
-Last activity: 2026-03-01 -- Completed Plan 2 (compact output wiring + expand/collapse + clean status)
+Phase: 6 of 8 (Compact Output & Session UX) -- COMPLETE
+Plan: 3 of 3 (all complete)
+Status: Phase Complete
+Last activity: 2026-03-01 -- Completed Plan 3 (/clear session lifecycle)
 
-Progress: [######....] 67%
+Progress: [##########] 100%
 
 ## Performance Metrics
 
@@ -45,13 +45,14 @@ Progress: [######....] 67%
 - Phases: 2
 
 **Velocity (v3.0):**
-- Total plans completed: 2
-- Phases: 0 of 3
+- Total plans completed: 3
+- Phases: 1 of 3
 
 | Phase | Plan | Duration | Tasks | Files |
 |-------|------|----------|-------|-------|
 | 06    | 01   | 5min     | 2     | 6     |
 | 06    | 02   | 2min     | 3     | 3     |
+| 06    | 03   | 2min     | 2     | 3     |
 
 ## Accumulated Context
 
@@ -65,6 +66,8 @@ Recent: Consolidated 4-phase v3.0 roadmap into 3 phases -- merged /clear topic r
 
 06-02: Expand button added post-flush via editMessageText (message ID not known until after send). pendingExpandData per-thread map cleared on flush. Status format uses plain "claude-o-gram" branding, no emoji.
 
+06-03: clearPending Map bridges SessionEnd(reason=clear) and SessionStart(source=clear) -- keyed by cwd to handle timing between two HTTP requests. onSessionStart uses source union type ('new' | 'resume' | 'clear') instead of boolean. Separator uses Unicode box-drawing chars.
+
 ### Pending Todos
 
 None.
@@ -76,5 +79,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-01
-Stopped at: Completed 06-02-PLAN.md (compact output wiring + expand/collapse + clean status)
+Stopped at: Completed 06-03-PLAN.md (/clear session lifecycle -- Phase 6 complete)
 Resume file: None

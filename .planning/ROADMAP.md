@@ -29,7 +29,7 @@
 
 **Milestone Goal:** Make Telegram output match Claude Code's terminal experience -- compact, clean, and controllable.
 
-- [ ] **Phase 6: Compact Output & Session UX** - Terminal-fidelity tool display with expand/collapse, content store, clean status, and /clear topic reuse
+- [x] **Phase 6: Compact Output & Session UX** - Terminal-fidelity tool display with expand/collapse, content store, clean status, and /clear topic reuse
 - [ ] **Phase 7: Permission Modes** - Tiered auto-accept modes replacing binary approve/deny
 - [ ] **Phase 8: Subagent Visibility** - Subagent lifecycle messages and agent-prefixed output
 
@@ -48,9 +48,9 @@
 **Plans:** 3 plans
 
 Plans:
-- [ ] 06-01-PLAN.md -- Compact formatter, expand cache module, batcher upgrade
-- [ ] 06-02-PLAN.md -- Expand/collapse wiring, bot commentary cleanup, compact status
-- [ ] 06-03-PLAN.md -- /clear session lifecycle with topic reuse
+- [x] 06-01-PLAN.md -- Compact formatter, expand cache module, batcher upgrade
+- [x] 06-02-PLAN.md -- Expand/collapse wiring, bot commentary cleanup, compact status
+- [x] 06-03-PLAN.md -- /clear session lifecycle with topic reuse
 
 ### Phase 7: Permission Modes
 **Goal**: Users control how aggressively permissions are auto-approved, eliminating button-tap fatigue for trusted workflows
@@ -95,6 +95,6 @@ Phases execute in numeric order: 6 -> 7 -> 8
 | 3. Control | v1.0 | 2/2 | Complete | 2026-03-01 |
 | 4. SDK Resume Input | v2.0 | 2/2 | Complete | 2026-03-01 |
 | 5. tmux Cleanup | v2.0 | 1/1 | Complete | 2026-03-01 |
-| 6. Compact Output & Session UX | v3.0 | 0/3 | Planned | - |
+| 6. Compact Output & Session UX | v3.0 | 3/3 | Complete | 2026-03-01 |
 | 7. Permission Modes | v3.0 | 0/? | Not started | - |
 | 8. Subagent Visibility | v3.0 | 0/? | Not started | - |

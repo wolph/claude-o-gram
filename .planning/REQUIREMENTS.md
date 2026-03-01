@@ -31,12 +31,12 @@ Requirements for v3.0 UX Overhaul. Each maps to roadmap phases.
 
 ### Session Management
 
-- [ ] **SESS-01**: /clear reuses existing topic instead of creating new one
-- [ ] **SESS-02**: Visual separator posted on /clear: `--- context cleared ---`
-- [ ] **SESS-03**: New pinned status message posted after /clear
-- [ ] **SESS-04**: Old status message unpinned on /clear
-- [ ] **SESS-05**: Session counters (tools, files, duration) reset on /clear
-- [ ] **SESS-06**: SessionEnd with reason=clear keeps topic open (no close/archive)
+- [x] **SESS-01**: /clear reuses existing topic instead of creating new one
+- [x] **SESS-02**: Visual separator posted on /clear: `--- context cleared ---`
+- [x] **SESS-03**: New pinned status message posted after /clear
+- [x] **SESS-04**: Old status message unpinned on /clear
+- [x] **SESS-05**: Session counters (tools, files, duration) reset on /clear
+- [x] **SESS-06**: SessionEnd with reason=clear keeps topic open (no close/archive)
 
 ### Subagent Visibility
 
@@ -90,12 +90,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OUT-05 | Phase 6 | Complete |
 | OUT-06 | Phase 6 | Complete |
 | OUT-07 | Phase 6 | Complete |
-| SESS-01 | Phase 6 | Pending |
-| SESS-02 | Phase 6 | Pending |
-| SESS-03 | Phase 6 | Pending |
-| SESS-04 | Phase 6 | Pending |
-| SESS-05 | Phase 6 | Pending |
-| SESS-06 | Phase 6 | Pending |
+| SESS-01 | Phase 6 | Complete |
+| SESS-02 | Phase 6 | Complete |
+| SESS-03 | Phase 6 | Complete |
+| SESS-04 | Phase 6 | Complete |
+| SESS-05 | Phase 6 | Complete |
+| SESS-06 | Phase 6 | Complete |
 | PERM-01 | Phase 7 | Pending |
 | PERM-02 | Phase 7 | Pending |
 | PERM-03 | Phase 7 | Pending |
