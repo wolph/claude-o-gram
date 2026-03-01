@@ -1,61 +1,53 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: milestone
-current_phase: 03
-current_phase_name: Control
+milestone: v2.0
+milestone_name: SDK Migration
+current_phase: Not started
+current_phase_name: Defining requirements
 current_plan: Not started
-status: completed
-last_updated: "2026-02-28T23:06:17.923Z"
-last_activity: 2026-02-28
+status: defining_requirements
+last_updated: "2026-03-01"
+last_activity: 2026-03-01
 progress:
-  total_phases: 3
-  completed_phases: 3
-  total_plans: 9
-  completed_plans: 9
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-02-28)
+See: .planning/PROJECT.md (updated 2026-03-01)
 
 **Core value:** See what Claude Code is doing and respond to its questions from anywhere, without needing to be at the terminal.
-**Current focus:** Phase 3: Control
+**Current focus:** v2.0 SDK Migration — defining requirements
 
 ## Current Position
 
-**Current Phase:** 03
-**Current Phase Name:** Control
-**Total Phases:** 3
-**Current Plan:** Not started
-**Total Plans in Phase:** 2
-**Status:** Milestone complete
-**Last Activity:** 2026-02-28
-**Last Activity Description:** Phase 03 complete
+**Current Phase:** Not started (defining requirements)
+**Current Phase Name:** Defining requirements
+**Total Phases:** 0 (roadmap pending)
+**Current Plan:** —
+**Total Plans in Phase:** —
+**Status:** Defining requirements
+**Last Activity:** 2026-03-01
+**Last Activity Description:** Milestone v2.0 started
 
-**Progress:** [██████████] 100%
+**Progress:** [░░░░░░░░░░] 0%
 
 ## Performance Metrics
 
-**Velocity:**
-- Total plans completed: 0
-- Average duration: -
-- Total execution time: 0 hours
+**Velocity (v1.0):**
+- Total plans completed: 9
+- Phases: 3
 
-**By Phase:**
+**By Phase (v1.0):**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
-
-**Recent Trend:**
-- Last 5 plans: -
-- Trend: -
-
-*Updated after each plan completion*
 | Phase 01 P01 | 2min | 2 tasks | 8 files |
 | Phase 01 P02 | 2min | 2 tasks | 3 files |
 | Phase 01 P03 | 4min | 2 tasks | 5 files |
@@ -73,36 +65,8 @@ See: .planning/PROJECT.md (updated 2026-02-28)
 Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
 
-- [Roadmap]: 3-phase structure (Foundation -> Monitoring -> Control) derived from 17 requirements at quick depth
-- [Roadmap]: Text input (CTRL-02) grouped with approval flow in Phase 3 despite LOW confidence architecture -- research spike needed during Phase 3 planning
-- [Roadmap]: Rate limiting (MNTR-04) and message formatting (UX-01, UX-02) placed in Phase 1 as foundational infrastructure that all later phases depend on
-- [Phase 01]: Used ESM (type: module) with Node16 module resolution for modern import/export
-- [Phase 01]: Set<string> for in-memory filesChanged with string[] serialization for JSON persistence
-- [Phase 01]: HookCallbacks interface decouples session logic from Telegram API -- handlers manage state, callbacks handle messaging
-- [Phase 01]: PostToolUse route fires and forgets (no await) to avoid slowing Claude Code
-- [Phase 01]: Resume detection uses cwd matching to handle session ID instability on --resume
-- [Phase 01]: Custom HTML parse_mode transformer instead of @grammyjs/parse-mode plugin (v2 removed transformer API)
-- [Phase 01]: splitForTelegram uses 4000 char threshold (not 4096) to leave room for message template wrapping
-- [Phase 01]: MessageBatcher uses fire-and-forget flush during shutdown to avoid blocking process exit
-- [Phase 01]: Auto-install hooks on every startup (idempotent merge) -- no stale URLs if port changes, no flag to maintain
-- [Phase 01]: Reconnect-on-restart sends bot restart notice to open topics rather than reopening (topic was never closed)
-- [Phase 02]: Verbosity filter runs before callback dispatch -- suppressed tool calls never reach Telegram
-- [Phase 02]: Notification messages sent via enqueueImmediate (not batched) since they are urgent
-- [Phase 02]: New SessionInfo monitoring fields initialized with sensible defaults in handleSessionStart
-- [Phase 02]: Used openSync/readSync/closeSync for incremental file reads instead of createReadStream for simpler byte-offset control
-- [Phase 02]: StatusMessage sends final session-ended update on destroy using fire-and-forget pattern
-- [Phase 02]: SummaryTimer tracks lastSummaryToolCount to skip summaries when no new activity occurred
-- [Phase 02]: initMonitoring shared helper for DRY between onSessionStart and restart reconnect
-- [Phase 02]: Context warnings use per-session warned80/warned95 booleans to avoid duplicate warnings
-- [Phase 02]: StatusMessage initialization is fire-and-forget to not block session start flow
-- [Phase 02]: Session end sends final closed status update with 500ms delay before destroy
-- [Phase 03]: ApprovalManager uses deferred promise pattern: waitForDecision returns promise, decide/timeout resolves it
-- [Phase 03]: Risk classification: Bash/BashBackground=danger, Write/Edit/MultiEdit/NotebookEdit=caution, all others=safe
-- [Phase 03]: TextInputManager uses tmux set-buffer + paste-buffer -p (bracketed paste) + send-keys Enter
-- [Phase 03]: tmuxPane defaults to null for backward compatibility with pre-Phase-3 persisted sessions
-- [Phase 03]: Timeout vs user deny tracked via timeoutDenials Set -- simple flag pattern avoids changing ApprovalManager API
-- [Phase 03]: Lazy tmux pane capture in onPreToolUse retries reading pane file if onSessionStart missed it
-- [Phase 03]: Late button taps show alert via answerCallbackQuery with show_alert flag
+- [v2.0]: Migrate from tmux/hook architecture to Claude Agent SDK for cross-platform reliability
+- [v2.0]: SDK migration only — new features (start sessions, subagent tracking, multi-machine) deferred to v2.1
 
 ### Pending Todos
 
@@ -110,11 +74,11 @@ None yet.
 
 ### Blockers/Concerns
 
-- Phase 3 (CTRL-02): Bidirectional text input mechanism is LOW confidence per research. Architecture may need a research spike before implementation.
-- Phase 2 (MNTR-02): JSONL transcript format is MEDIUM confidence (community-documented, not stable API). Defensive parsing required.
+- Agent SDK V2 interface is "unstable preview" — may need to use V1 streaming input API instead
+- Need to understand how SDK handles concurrent sessions (multiple Claude Code instances per machine)
 
 ## Session Continuity
 
-Last session: 2026-02-28
-Stopped at: Completed 03-01-PLAN.md
+Last session: 2026-03-01
+Stopped at: Milestone v2.0 started, defining requirements
 Resume file: None
