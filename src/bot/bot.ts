@@ -6,6 +6,7 @@ import type { SessionStore } from '../sessions/session-store.js';
 import type { VerbosityTier } from '../types/monitoring.js';
 import type { ApprovalManager } from '../control/approval-manager.js';
 import type { TextInputManager } from '../control/input-manager.js';
+import type { SdkInputManager } from '../sdk/input-manager.js';
 import {
   formatApprovalResult,
   formatApprovalExpired,
@@ -29,6 +30,7 @@ export async function createBot(
   sessionStore: SessionStore,
   approvalManager: ApprovalManager,
   inputManager: TextInputManager,
+  sdkInputManager: SdkInputManager,
 ): Promise<Bot<BotContext>> {
   const bot = new Bot<BotContext>(config.telegramBotToken);
 
@@ -172,10 +174,11 @@ export async function createBot(
     }
   });
 
-  // --- Phase 3: Text input handler ---
+  // --- Phase 4: Text input handler (SDK-first with tmux fallback) ---
 
   // Listen for text messages in forum topics.
-  // When user replies in a session topic, feed text to Claude Code via TextInputManager.
+  // When user replies in a session topic, feed text to Claude Code via SDK resume first,
+  // falling back to tmux-based TextInputManager if SDK delivery fails.
   bot.on('message:text', async (ctx) => {
     const threadId = ctx.message.message_thread_id;
     if (!threadId) return; // Not in a forum topic
@@ -188,34 +191,56 @@ export async function createBot(
     // Skip bot commands (handled by command handlers above)
     if (ctx.message.text.startsWith('/')) return;
 
-    const text = ctx.message.text;
-    const result = inputManager.send(session.tmuxPane, session.sessionId, text);
+    // Build input text, including quoted message context if replying to a specific message
+    let text = ctx.message.text;
+    const replied = ctx.message.reply_to_message;
+    if (replied && 'text' in replied && replied.text) {
+      text = `[Quoting: "${replied.text}"]\n\n${text}`;
+    }
 
-    switch (result) {
+    // Try SDK input first (Phase 4), fall back to tmux (legacy)
+    const result = await sdkInputManager.send(
+      session.sessionId,
+      text,
+      session.cwd,
+    );
+
+    if (result.status === 'sent') {
+      // SDK delivery succeeded -- zap reaction to distinguish from tmux thumbs-up (REL-02)
+      try {
+        await ctx.react('\u26A1');
+      } catch {
+        // Reaction not supported -- ignore
+      }
+      return;
+    }
+
+    // SDK failed -- log and fall back to tmux
+    console.warn(
+      `SDK input failed for session ${session.sessionId}, falling back to tmux: ${result.error}`,
+    );
+
+    const tmuxResult = inputManager.send(session.tmuxPane, session.sessionId, text);
+    switch (tmuxResult) {
       case 'sent':
-        await ctx.reply('\u2705 Input sent', {
-          message_thread_id: threadId,
-          reply_to_message_id: ctx.message.message_id,
-        });
+        try {
+          await ctx.react('\u{1F44D}');
+        } catch {
+          // Reaction not supported -- ignore
+        }
         break;
       case 'queued': {
         const queueSize = inputManager.queueSize(session.sessionId);
-        if (!session.tmuxPane) {
-          await ctx.reply(
-            `\u{1F4E5} Input queued (${queueSize} pending) \u2014 delivery requires Claude Code to be running in tmux`,
-            { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
-          );
-        } else {
-          await ctx.reply(
-            `\u{1F4E5} Input queued (${queueSize} pending) \u2014 will deliver when possible`,
-            { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
-          );
-        }
+        await ctx.reply(
+          '\u{1F4E5} SDK delivery failed, input queued for tmux fallback'
+            + ` (${queueSize} pending)`,
+          { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
+        );
         break;
       }
       case 'failed':
         await ctx.reply(
-          '\u274C Failed to send input. Check bot logs for details.',
+          `\u274C Failed to send input via both SDK and tmux: ${result.error}`,
           { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
         );
         break;
