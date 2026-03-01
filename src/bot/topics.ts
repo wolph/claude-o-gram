@@ -1,4 +1,4 @@
-import { Bot, InputFile } from 'grammy';
+import { Bot, InputFile, InlineKeyboard } from 'grammy';
 import type { BotContext } from './bot.js';
 
 /**
@@ -75,13 +75,14 @@ export class TopicManager {
    * If the message exceeds 4096 chars, it is truncated to 4000 with a suffix.
    * parse_mode is set globally by the parseMode plugin.
    */
-  async sendMessage(threadId: number, html: string): Promise<void> {
+  async sendMessage(threadId: number, html: string, notify = false): Promise<void> {
     let text = html;
     if (text.length > 4096) {
       text = text.slice(0, 4000) + '\n... (truncated)';
     }
     await this.bot.api.sendMessage(this.chatId, text, {
       message_thread_id: threadId,
+      disable_notification: !notify,
     });
   }
 
@@ -103,6 +104,7 @@ export class TopicManager {
         message_thread_id: threadId,
         caption: caption || '',
         parse_mode: 'HTML',
+        disable_notification: true,
       },
     );
   }
@@ -119,8 +121,42 @@ export class TopicManager {
     }
     const msg = await this.bot.api.sendMessage(this.chatId, text, {
       message_thread_id: threadId,
+      disable_notification: true,
     });
     return msg.message_id;
+  }
+
+  /**
+   * Send an HTML message with an InlineKeyboard to a specific topic.
+   * Returns the message_id for cache keying (e.g., expand/collapse buttons).
+   */
+  async sendMessageWithKeyboard(
+    threadId: number,
+    html: string,
+    keyboard: InlineKeyboard,
+  ): Promise<number> {
+    let text = html;
+    if (text.length > 4096) {
+      text = text.slice(0, 4000) + '\n... (truncated)';
+    }
+    const msg = await this.bot.api.sendMessage(this.chatId, text, {
+      message_thread_id: threadId,
+      disable_notification: true,
+      reply_markup: keyboard,
+    });
+    return msg.message_id;
+  }
+
+  /**
+   * Unpin a specific message in the chat.
+   * Non-fatal: logs warning on failure.
+   */
+  async unpinMessage(messageId: number): Promise<void> {
+    try {
+      await this.bot.api.unpinChatMessage(this.chatId, messageId);
+    } catch (err) {
+      console.warn('Failed to unpin message:', err instanceof Error ? err.message : err);
+    }
   }
 
   /**

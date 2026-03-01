@@ -97,8 +97,9 @@ export async function main(): Promise<void> {
   const topicManager = new TopicManager(bot, config.telegramChatId);
 
   // 7. Create message batcher wired to topic manager
+  //    sendFn uses sendMessageRaw (returns message_id) for expand cache support
   const batcher = new MessageBatcher(
-    (threadId, html, notify) => topicManager.sendMessage(threadId, html, notify),
+    (threadId, html, _notify) => topicManager.sendMessageRaw(threadId, html),
     (threadId, content, filename, caption) =>
       topicManager.sendDocument(threadId, content, filename, caption),
   );

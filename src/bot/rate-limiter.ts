@@ -20,9 +20,16 @@ interface QueueEntry {
   timer: ReturnType<typeof setTimeout> | null;
 }
 
+/** Callback fired after a flush sends one or more messages to Telegram. */
+type OnFlushCallback = (
+  threadId: number,
+  messageIds: number[],
+  originalMessages: string[],
+) => void;
+
 export class MessageBatcher {
   private queues: Map<number, QueueEntry> = new Map();
-  private sendFn: (threadId: number, html: string) => Promise<void>;
+  private sendFn: (threadId: number, html: string, notify?: boolean) => Promise<number>;
   private sendDocFn: (
     threadId: number,
     content: string,
@@ -30,14 +37,15 @@ export class MessageBatcher {
     caption?: string,
   ) => Promise<void>;
   private batchWindowMs: number;
+  private onFlush?: OnFlushCallback;
 
   /**
-   * @param sendFn Function to send HTML text to a topic (TopicManager.sendMessage)
+   * @param sendFn Function to send HTML text to a topic. Returns the Telegram message_id.
    * @param sendDocFn Function to send a file attachment (TopicManager.sendDocument)
    * @param batchWindowMs Debounce window in milliseconds (default: 2000ms)
    */
   constructor(
-    sendFn: (threadId: number, html: string) => Promise<void>,
+    sendFn: (threadId: number, html: string, notify?: boolean) => Promise<number>,
     sendDocFn: (
       threadId: number,
       content: string,
@@ -49,6 +57,15 @@ export class MessageBatcher {
     this.sendFn = sendFn;
     this.sendDocFn = sendDocFn;
     this.batchWindowMs = batchWindowMs;
+  }
+
+  /**
+   * Register a callback that fires after each flush.
+   * Provides the threadId, array of Telegram message IDs, and original individual messages.
+   * Used by the expand cache to associate expand content with sent messages.
+   */
+  setOnFlush(callback: OnFlushCallback): void {
+    this.onFlush = callback;
   }
 
   /**
@@ -87,18 +104,20 @@ export class MessageBatcher {
    * that should not be delayed or combined with tool use messages.
    *
    * Flushes any pending messages for this threadId first, then sends immediately.
+   * Returns the Telegram message_id of the sent message.
    */
-  async enqueueImmediate(threadId: number, message: string): Promise<void> {
+  async enqueueImmediate(threadId: number, message: string, notify = false): Promise<number> {
     // Flush any pending messages first so ordering is preserved
     await this.flush(threadId);
     // Send immediately
-    await this.sendFn(threadId, message);
+    return this.sendFn(threadId, message, notify);
   }
 
   /**
    * Flush all pending messages for a specific threadId.
    * Combines queued messages with double newline separators.
    * If combined text exceeds 4096 chars, splits on message boundaries.
+   * Captures message IDs from sendFn and fires onFlush callback.
    */
   async flush(threadId: number): Promise<void> {
     const queue = this.queues.get(threadId);
@@ -128,8 +147,15 @@ export class MessageBatcher {
 
     // Combine messages, splitting into chunks that fit within 4096 chars
     const chunks = combineMessages(messages);
+    const messageIds: number[] = [];
     for (const chunk of chunks) {
-      await this.sendFn(threadId, chunk);
+      const msgId = await this.sendFn(threadId, chunk);
+      messageIds.push(msgId);
+    }
+
+    // Fire onFlush callback with message IDs and original messages
+    if (this.onFlush && messageIds.length > 0) {
+      this.onFlush(threadId, messageIds, messages);
     }
 
     // Send file attachments
