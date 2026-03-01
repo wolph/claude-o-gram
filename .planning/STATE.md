@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase_name: SDK Resume Input
-current_plan: Not started
+current_phase_name: tmux Cleanup
+current_plan: 1 of 1
 status: completed
-last_updated: "2026-03-01T09:08:49.335Z"
+last_updated: "2026-03-01T09:25:00.244Z"
 last_activity: 2026-03-01
 progress:
   total_phases: 2
-  completed_phases: 4
-  total_plans: 11
-  completed_plans: 11
+  completed_phases: 5
+  total_plans: 12
+  completed_plans: 12
   percent: 100
 ---
 
@@ -22,18 +22,18 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-01)
 
 **Core value:** See what Claude Code is doing and respond to its questions from anywhere, without needing to be at the terminal.
-**Current focus:** v2.0 SDK Input Migration -- Phase 4: SDK Resume Input (plan 1 of 2 complete)
+**Current focus:** v2.0 SDK Input Migration -- Phase 5: tmux Cleanup complete
 
 ## Current Position
 
-**Phase:** 4 of 5 (SDK Resume Input)
-**Current Phase Name:** SDK Resume Input
+**Phase:** 5 of 5 (tmux Cleanup)
+**Current Phase Name:** tmux Cleanup
 **Total Phases:** 2 (v2.0 milestone)
-**Current Plan:** Not started
-**Total Plans in Phase:** 2
+**Current Plan:** 1 of 1
+**Total Plans in Phase:** 1
 **Status:** Milestone complete
 **Last Activity:** 2026-03-01
-**Last Activity Description:** Phase 04 complete
+**Last Activity Description:** Phase 05 complete -- all tmux code removed
 
 **Progress:** [██████████] 100%
 
@@ -63,6 +63,7 @@ See: .planning/PROJECT.md (updated 2026-03-01)
 |-------|-------|-------|----------|
 | Phase 04 P01 | 2min | 2 tasks | 5 files |
 | Phase 04 P02 | 2min | 2 tasks | 2 files |
+| Phase 05 P01 | 3min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -80,6 +81,8 @@ Recent decisions affecting current work:
 - [04-01]: 5-minute AbortController timeout per query to prevent orphaned processes
 - [Phase 04]: Used zap emoji for SDK success reaction (Telegram API rejects green checkmark)
 - [Phase 04]: No shutdown cleanup for SdkInputManager -- AbortController timeout handles orphaned queries
+- [Phase 05]: Deleted TextInputManager entirely rather than deprecating -- no consumers remain
+- [Phase 05]: SDK failure reports error directly to user rather than queueing for later
 
 ### Pending Todos
 
@@ -93,5 +96,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-01
-Stopped at: Completed 04-01-PLAN.md (SDK deps, config, SdkInputManager)
+Stopped at: Completed 05-01-PLAN.md (tmux cleanup -- all tmux code removed)
 Resume file: None

@@ -20,9 +20,9 @@ Replace tmux text injection with Claude Agent SDK for reliable, cross-platform i
 
 ### Cleanup
 
-- [ ] **CLN-01**: tmux pane capture hook (`capture-tmux-pane.sh`) removed from hook installer
-- [ ] **CLN-02**: TextInputManager tmux injection code removed
-- [ ] **CLN-03**: tmuxPane field removed from session types and store
+- [x] **CLN-01**: tmux pane capture hook (`capture-tmux-pane.sh`) removed from hook installer
+- [x] **CLN-02**: TextInputManager tmux injection code removed
+- [x] **CLN-03**: tmuxPane field removed from session types and store
 
 ## Future Requirements
 
@@ -60,9 +60,9 @@ Deferred to v2.1+.
 | SDK-03 | Phase 4 | Complete |
 | REL-01 | Phase 4 | Complete |
 | REL-02 | Phase 4 | Complete |
-| CLN-01 | Phase 5 | Pending |
-| CLN-02 | Phase 5 | Pending |
-| CLN-03 | Phase 5 | Pending |
+| CLN-01 | Phase 5 | Complete |
+| CLN-02 | Phase 5 | Complete |
+| CLN-03 | Phase 5 | Complete |
 
 **Coverage:**
 - v2.0 requirements: 8 total
