@@ -19,9 +19,10 @@ import { installHooks } from './utils/install-hooks.js';
 import { TranscriptWatcher, calculateContextPercentage } from './monitoring/transcript-watcher.js';
 import { StatusMessage } from './monitoring/status-message.js';
 import { SummaryTimer } from './monitoring/summary-timer.js';
-import { escapeHtml } from './utils/text.js';
+import { escapeHtml, markdownToHtml } from './utils/text.js';
 import { ApprovalManager } from './control/approval-manager.js';
 import { TextInputManager } from './control/input-manager.js';
+import { SdkInputManager } from './sdk/input-manager.js';
 import type { SessionInfo } from './types/sessions.js';
 import type { StatusData } from './types/monitoring.js';
 import type { PreToolUsePayload } from './types/hooks.js';
@@ -99,19 +100,20 @@ export async function main(): Promise<void> {
     join(config.dataDir, 'sessions.json'),
   );
 
-  // 4. Phase 3: Create control managers
+  // 4. Phase 3/4: Create control managers
   const approvalManager = new ApprovalManager(config.approvalTimeoutMs);
   const inputManager = new TextInputManager();
+  const sdkInputManager = new SdkInputManager();
 
   // 5. Create bot instance (with plugins, not yet started)
-  const bot = await createBot(config, sessionStore, approvalManager, inputManager);
+  const bot = await createBot(config, sessionStore, approvalManager, inputManager, sdkInputManager);
 
   // 6. Create topic manager wired to bot
   const topicManager = new TopicManager(bot, config.telegramChatId);
 
   // 7. Create message batcher wired to topic manager
   const batcher = new MessageBatcher(
-    (threadId, html) => topicManager.sendMessage(threadId, html),
+    (threadId, html, notify) => topicManager.sendMessage(threadId, html, notify),
     (threadId, content, filename, caption) =>
       topicManager.sendDocument(threadId, content, filename, caption),
   );
@@ -158,13 +160,13 @@ export async function main(): Promise<void> {
         // Truncate to 500 chars inline, full as .txt attachment if longer
         if (text.length > 500) {
           const truncated = text.slice(0, 500) + '... (truncated)';
-          batcher.enqueue(session.threadId, `<b>Claude:</b>\n${escapeHtml(truncated)}`, {
+          batcher.enqueue(session.threadId, `<b>Claude:</b>\n${markdownToHtml(truncated)}`, {
             content: text,
             filename: 'claude-output.txt',
             caption: 'Full Claude output',
           });
         } else {
-          batcher.enqueue(session.threadId, `<b>Claude:</b>\n${escapeHtml(text)}`);
+          batcher.enqueue(session.threadId, `<b>Claude:</b>\n${markdownToHtml(text)}`);
         }
       },
       // onUsageUpdate: update context percentage and status message
@@ -290,9 +292,10 @@ export async function main(): Promise<void> {
         monitors.delete(session.sessionId);
       }
 
-      // Phase 3: Clean up control state
+      // Phase 3/4: Clean up control state
       approvalManager.cleanupSession(session.sessionId);
       inputManager.cleanup(session.sessionId);
+      sdkInputManager.cleanup(session.sessionId);
       // Clean up tmux pane file if it still exists
       try { unlinkSync(`/tmp/claude-tmux-pane-${session.sessionId}.txt`); } catch { /* ignore */ }
 
@@ -327,8 +330,14 @@ export async function main(): Promise<void> {
 
     onNotification: async (session, payload) => {
       const html = formatNotification(payload);
-      // Notifications are immediate (not batched) -- they are time-sensitive
-      await batcher.enqueueImmediate(session.threadId, html);
+      // Notify only for prompts that block Claude and need user action
+      const shouldNotify = payload.notification_type === 'permission_prompt'
+        || payload.notification_type === 'elicitation_dialog';
+      await batcher.enqueueImmediate(session.threadId, html, shouldNotify);
+    },
+
+    onBackfillSummary: async (session, summary) => {
+      await batcher.enqueueImmediate(session.threadId, summary);
     },
 
     // Phase 3: PreToolUse approval handler
@@ -409,7 +418,6 @@ export async function main(): Promise<void> {
   for (const session of activeSessions) {
     if (session.threadId > 0) {
       try {
-        await topicManager.sendBotRestartNotice(session.threadId);
         // Re-initialize monitoring for active sessions on restart
         initMonitoring(session);
       } catch (err) {
