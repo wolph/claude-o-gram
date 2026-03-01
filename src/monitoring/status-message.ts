@@ -187,31 +187,17 @@ export class StatusMessage {
 }
 
 /**
- * Format status data into an HTML string for the pinned status message.
- * Uses emoji prefixes for visual scanning and escapes dynamic values.
+ * Format status data into a compact, no-emoji string for the pinned status message.
+ * Per user decision: 2-line format with no emoji status labels.
+ *
+ * Format:
+ *   claude-o-gram | 45% ctx | 1h 30m
+ *   42 tools | 8 files
  */
 function formatStatus(data: StatusData): string {
-  const statusLabel =
-    data.status === 'active'
-      ? 'Active'
-      : data.status === 'idle'
-        ? 'Idle'
-        : 'Ended';
-
-  const statusEmoji =
-    data.status === 'active'
-      ? '\u{1F7E2}'  // green circle
-      : data.status === 'idle'
-        ? '\u{1F7E1}'  // yellow circle
-        : '\u{1F534}';  // red circle
-
-  const lines = [
-    `${statusEmoji} <b>Status:</b> ${escapeHtml(statusLabel)}`,
-    `\u{1F4CA} <b>Context:</b> ${data.contextPercent}% used`,
-    `\u{1F527} <b>Current:</b> ${escapeHtml(data.currentTool)}`,
-    `\u{23F1}\u{FE0F} <b>Duration:</b> ${escapeHtml(data.sessionDuration)}`,
-    `\u{1F4DD} <b>Tools:</b> ${data.toolCallCount} calls | ${data.filesChanged} files changed`,
-  ];
-
-  return lines.join('\n');
+  const statusSuffix = data.status === 'closed' ? ' (ended)' : '';
+  return [
+    `claude-o-gram | ${data.contextPercent}% ctx | ${escapeHtml(data.sessionDuration)}${statusSuffix}`,
+    `${data.toolCallCount} tools | ${data.filesChanged} files`,
+  ].join('\n');
 }
