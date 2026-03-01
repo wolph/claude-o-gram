@@ -1,698 +1,720 @@
-# Architecture: Claude Agent SDK Migration
+# Architecture Research: v3.0 UX Overhaul Integration
 
-**Project:** Claude Code Telegram Bridge v2.0
+**Domain:** Telegram Bot UX features integrating with existing hook/transcript architecture
 **Researched:** 2026-03-01
-**Confidence:** HIGH (official SDK docs verified, existing codebase fully analyzed)
+**Confidence:** HIGH (existing codebase fully analyzed, official Claude Code hooks docs verified, Telegram Bot API constraints verified)
 
-## Executive Summary
-
-The migration from v1 (HTTP hook server + tmux injection + JSONL transcript watching) to v2 (Claude Agent SDK) fundamentally changes the control flow. In v1, the bot is passive -- it receives events from externally-launched Claude Code sessions via HTTP hooks and JSONL file watching. In v2, the bot is active -- it spawns and owns Claude Code sessions via `query()`, receiving all events through the SDK's async generator stream.
-
-This is not a refactor. It is an inversion of control. The bot goes from "event listener" to "session orchestrator." Most existing Telegram-facing modules survive untouched, but the entire hook infrastructure (server, handlers, install-hooks) gets replaced by SDK integration code, and the control modules (ApprovalManager, TextInputManager) get substantially rewritten to use SDK-native mechanisms (`canUseTool` callback, `streamInput()` / AsyncIterable prompt).
-
-## Current Architecture (v1)
+## Current Architecture (Baseline)
 
 ```
-+------------------+     HTTP POST      +------------------+
-| Claude Code CLI  | -----------------> | Fastify Hook     |
-| (external)       |   (hook events)    | Server           |
-+------------------+                    +------------------+
-        |                                        |
-        | writes JSONL                   HookHandlers
-        v                                        |
-+------------------+                    +------------------+
-| Transcript File  | <-- fs.watch ----> | TranscriptWatcher|
-+------------------+                    +------------------+
-                                                 |
-        +------------------+             HookCallbacks
-        | tmux send-keys   | <--+                |
-        +------------------+    |       +------------------+
-                                |       | Bot (grammy)     |
-+------------------+            |       | - TopicManager   |
-| Approval via     |            |       | - MessageBatcher |
-| deferred promise | -----------+       | - StatusMessage  |
-| (HTTP blocking)  |                    | - SummaryTimer   |
-+------------------+                    +------------------+
-                                                 |
-                                        +------------------+
-                                        | Telegram API     |
-                                        +------------------+
+┌───────────────────────────────────────────────────────────────────────┐
+│                        Claude Code Process                            │
+│  Hooks: SessionStart, SessionEnd, PreToolUse, PostToolUse,            │
+│         Notification, SubagentStart, SubagentStop                     │
+│  Transcript: ~/.claude/projects/.../session.jsonl                     │
+└──────────────┬──────────────────────────────────────┬─────────────────┘
+               │ HTTP POST (hook events)              │ JSONL file writes
+               ▼                                      ▼
+┌──────────────────────────┐         ┌──────────────────────────────────┐
+│  Fastify Hook Server     │         │  TranscriptWatcher (per-session) │
+│  /hooks/session-start    │         │  fs.watch + byte-position tail   │
+│  /hooks/session-end      │         │  Filters: isSidechain === false  │
+│  /hooks/post-tool-use    │         │  Emits: onAssistantMessage,      │
+│  /hooks/notification     │         │         onUsageUpdate            │
+│  /hooks/pre-tool-use     │         └──────────────┬───────────────────┘
+│    (BLOCKING)            │                        │
+└──────────┬───────────────┘                        │
+           │                                        │
+           ▼                                        ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                         index.ts Wiring Layer                        │
+│  HookCallbacks: onSessionStart, onSessionEnd, onToolUse,             │
+│                 onNotification, onPreToolUse, onBackfillSummary       │
+│  SessionMonitor: { transcriptWatcher, statusMessage, summaryTimer }  │
+│  ApprovalManager: deferred promises keyed by tool_use_id             │
+│  InputRouter: tmux | fifo | sdk-resume per session                   │
+└──────────┬───────────────────────────────────────────────────────────┘
+           │
+           ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                          Telegram Layer                               │
+│  Bot (grammY): callback queries, text input, /commands               │
+│  TopicManager: create/close/reopen/rename topics, send messages      │
+│  MessageBatcher: debounce tool calls into combined messages          │
+│  StatusMessage: pinned msg, edit-in-place with 3s debounce           │
+│  Formatter: formatToolUse, formatApprovalRequest, etc.               │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-### v1 Data Flow Summary
+### Key Architectural Properties
 
-1. Claude Code hooks fire HTTP POST to Fastify server
-2. HookHandlers route to HookCallbacks (session start/end, tool use, notifications)
-3. HookCallbacks create Telegram topics, format messages, enqueue to MessageBatcher
-4. TranscriptWatcher tails JSONL for Claude's text output and token usage
-5. PreToolUse hook blocks HTTP response, sends Telegram approval message, awaits deferred promise
-6. User taps Approve/Deny button, promise resolves, HTTP response sent back to Claude Code
-7. Text input: user replies in topic, tmux send-keys injects into Claude Code terminal
+1. **Hook server is the event source** -- all tool calls and session lifecycle arrive as HTTP POSTs
+2. **TranscriptWatcher is the text source** -- Claude's text output comes from tailing JSONL, currently filters `isSidechain === true`
+3. **ApprovalManager blocks HTTP responses** -- PreToolUse hook connection stays open until user taps Approve/Deny or timeout
+4. **MessageBatcher debounces** -- 2s window, combines messages, respects 4096 char Telegram limit
+5. **StatusMessage edits in place** -- pinned per-topic, 3s debounce minimum
+6. **SessionStore is the truth** -- in-memory Map with atomic JSON persistence, keyed by sessionId, lookup by threadId
 
-## Target Architecture (v2)
+## Feature Integration Analysis
 
-```
-+------------------+
-| Bot (grammy)     |
-| - TopicManager   |
-| - MessageBatcher |
-| - StatusMessage  |
-| - SummaryTimer   |
-+------------------+
-        |
-        | uses
-        v
-+------------------+
-| SessionManager   | <-- NEW: orchestrates SDK sessions
-| - start/stop     |
-| - input routing   |
-| - approval bridge |
-+------------------+
-        |
-        | manages N concurrent sessions
-        v
-+------------------+     AsyncGenerator      +------------------+
-| SDK Session      | <--------------------> | Claude Agent SDK  |
-| Wrapper          |     SDKMessage stream   | (spawned process) |
-| - query()        |                         +------------------+
-| - InputChannel   |
-| - AbortController|
-+------------------+
-        |
-        | All events arrive via
-        | the async generator
-        |
-+------------------+
-| MessageRouter    | <-- NEW: routes SDKMessages to Telegram
-| (replaces hooks  |
-|  + transcript    |
-|  watcher)        |
-+------------------+
-```
+### Feature 1: Compact Tool Output with Expand/Collapse
 
-### v2 Data Flow
+**Requirement:** Tool calls displayed as `Tool(args...)` with 250-char limit. Inline "Expand" button shows full content.
 
-1. User sends prompt via Telegram (e.g., `/run Fix the auth bug`)
-2. SessionManager creates `query()` call with AsyncIterable prompt + `canUseTool` callback
-3. SDK streams `SDKMessage` objects through the async generator
-4. MessageRouter classifies messages and routes to existing Telegram formatting/sending:
-   - `SDKAssistantMessage` with text blocks -> replaces TranscriptWatcher output
-   - `SDKAssistantMessage` with tool_use blocks -> replaces PostToolUse hook
-   - `SDKResultMessage` -> replaces SessionEnd hook
-   - `SDKSystemMessage` (init) -> replaces SessionStart hook
-   - `SDKAssistantMessage.message.usage` -> replaces TranscriptWatcher onUsageUpdate
-5. `canUseTool()` callback fires for permission-required tools -> replaces PreToolUse hook blocking
-6. Follow-up user text: yield from AsyncIterable -> replaces tmux injection
+**Integration Points:**
 
-## Component Migration Map
+| Component | Change Type | Description |
+|-----------|-------------|-------------|
+| `formatter.ts` | **MODIFY** | New `formatCompactToolUse()` returning compact one-liner + full content |
+| `bot.ts` | **MODIFY** | Add `callbackQuery` handler for `expand:{id}` and `collapse:{id}` |
+| `rate-limiter.ts` | **MODIFY** | `enqueue()` must accept optional `InlineKeyboard` for expand button |
+| `topics.ts` | **MODIFY** | `sendMessage()` must accept optional `reply_markup` parameter |
+| New: `content-store.ts` | **NEW** | In-memory Map storing full tool output keyed by short ID |
 
-### Files to DELETE (fully replaced by SDK)
+**Architecture Pattern: Server-Side Content Store**
 
-| File | v1 Purpose | v2 Replacement |
-|------|-----------|----------------|
-| `src/hooks/server.ts` | Fastify HTTP server receiving hook POSTs | SDK async generator provides all events |
-| `src/hooks/handlers.ts` | Routes hook payloads, manages session state, backfill | SessionManager + MessageRouter handle all of this |
-| `src/utils/install-hooks.ts` | Writes hook config to `~/.claude/settings.json` | Not needed -- SDK runs in-process, no external hooks |
-| `src/monitoring/transcript-watcher.ts` | Tails JSONL for Claude text output + token usage | SDK streams `SDKAssistantMessage` with text + usage directly |
-| `src/types/hooks.ts` | Hook payload TypeScript types | SDK exports its own types (`SDKMessage`, `SDKAssistantMessage`, etc.) |
-
-### Files to MODIFY (keep core logic, adapt interface)
-
-| File | What Changes | What Stays |
-|------|-------------|------------|
-| `src/index.ts` | Complete rewrite of wiring. Remove Fastify, hook handlers, transcript watcher, install-hooks. Add SessionManager initialization, SDK session lifecycle. Remove `tryReadTmuxPane`. | Overall structure (config -> bot -> monitoring -> shutdown). HookCallbacks pattern adapts to SessionManager event handlers. |
-| `src/control/approval-manager.ts` | Core pattern unchanged but interface adapts: `canUseTool` callback resolves/rejects the deferred promise instead of HTTP response. Add AbortSignal awareness. | `Map<toolUseId, PendingApproval>` pattern, `waitForDecision()`, `decide()`, timeout logic, `cleanupSession()`. |
-| `src/control/input-manager.ts` | Complete rewrite. Remove all tmux code (`execSync`, `shellQuote`, `inject`). Replace with: push message to InputChannel, or call `query.streamInput()`. | Queue concept for messages waiting to be sent (adapted), `cleanup()`. |
-| `src/sessions/session-store.ts` | Remove `transcriptPath`, `tmuxPane` fields and their methods (`updateTmuxPane`). Add `sdkSessionId` field. Adjust serialization. | Core Map persistence, `get`/`set`/`getByThreadId`/`getActiveByCwd`, thread tracking, verbosity, context%, status message tracking, tool counting. |
-| `src/types/sessions.ts` | Remove `transcriptPath: string`, `tmuxPane: string | null`. Add `sdkSessionId: string`. | All other fields (threadId, cwd, topicName, toolCallCount, filesChanged, verbosity, statusMessageId, suppressedCounts, contextPercent, lastActivityAt). |
-| `src/types/config.ts` | Remove `hookServerPort`, `hookServerHost`. Add `anthropicApiKey` (or rely on env var). Consider adding `defaultModel`, `defaultPermissionMode`. | telegramBotToken, telegramChatId, dataDir, defaultVerbosity, idleTimeoutMs, summaryIntervalMs, approvalTimeoutMs, autoApprove. |
-| `src/config.ts` | Remove hook server env var parsing. Add `ANTHROPIC_API_KEY` validation (or document it as implicit SDK requirement). | Core loadConfig pattern, env var validation. |
-| `src/bot/bot.ts` | Text input handler changes: instead of `inputManager.send(tmuxPane, ...)`, call `sessionManager.sendInput(sessionId, text)`. Remove tmux-related replies ("delivery requires tmux"). Add `/run` command to start sessions. | Bot creation, command handlers (/status, /verbose, /normal, /quiet), approval callback query handlers (approve/deny buttons), auto-retry/throttler plugins. |
-| `src/bot/formatter.ts` | Adapt `formatToolUse` input: SDK tool_use blocks have slightly different structure from PostToolUsePayload. Create adapter or accept both. `formatApprovalRequest` input adapts similarly. | All formatting logic (formatSessionStart, formatSessionEnd, formatToolUse internals, formatNotification, formatApprovalRequest, formatApprovalResult, formatApprovalExpired). |
-| `src/monitoring/summary-timer.ts` | Data source changes: instead of pulling from SessionStore populated by hooks, pulls from SessionStore populated by SDK message processing. Same interface. | Timer logic, formatSummary, skip-if-no-activity check. |
-
-### Files to KEEP (unchanged or trivially adapted)
-
-| File | Why It Stays |
-|------|-------------|
-| `src/bot/topics.ts` | TopicManager is pure Telegram API. Zero coupling to hooks or SDK. |
-| `src/bot/rate-limiter.ts` | MessageBatcher is pure queue logic. Zero coupling to hooks or SDK. |
-| `src/monitoring/status-message.ts` | StatusMessage is pure Telegram edit logic. Input data shape (StatusData) unchanged. |
-| `src/monitoring/verbosity.ts` | Pure filter logic, tool-name based. Works the same regardless of event source. |
-| `src/utils/text.ts` | Pure text utilities (escapeHtml, markdownToHtml, truncateText). |
-| `src/types/monitoring.ts` | StatusData, VerbosityTier, TokenUsage types still needed. ContentBlock/TranscriptEntry types can be removed (only used by TranscriptWatcher). |
-
-### Files to CREATE (new SDK integration layer)
-
-| File | Purpose | Complexity |
-|------|---------|------------|
-| `src/sdk/session-manager.ts` | Orchestrates multiple concurrent SDK sessions. Creates `query()` calls, manages lifecycle, maps sessions to Telegram topics. Central new component. | High |
-| `src/sdk/message-router.ts` | Processes `SDKMessage` stream, classifies message types, routes to Telegram formatting and sending. Replaces HookHandlers + TranscriptWatcher. | Medium |
-| `src/sdk/input-channel.ts` | AsyncIterable wrapper that can receive messages pushed from outside. Enables multi-turn conversations via the SDK streaming input pattern. | Medium |
-| `src/sdk/types.ts` | Re-export and adapt SDK types. Bridge between SDK's type system and internal types. Adapter functions for tool_use blocks, usage data, etc. | Low |
-
-## SessionManager Design
-
-The SessionManager is the central new component. It replaces the combination of HookHandlers + Fastify server + TranscriptWatcher + tmux TextInputManager.
-
-### Interface
+Telegram's `callback_data` is limited to 64 bytes. A tool_use_id UUID is 36 chars. With prefix `expand:`, that is 43 bytes -- fits. But the FULL content to show on expand cannot be in callback_data. Solution: store full content server-side, look up on callback.
 
 ```typescript
-class SessionManager {
-  // Active SDK sessions
-  private sessions: Map<string, ActiveSession>;
-
-  // Dependencies (injected)
-  private sessionStore: SessionStore;
-  private topicManager: TopicManager;
-  private batcher: MessageBatcher;
-  private bot: Bot;
-  private config: AppConfig;
-
-  // Create a new SDK session (called from Telegram /run command)
-  async startSession(prompt: string, cwd: string): Promise<string>;
-
-  // Send follow-up input to an active session
-  async sendInput(sessionId: string, text: string): Promise<void>;
-
-  // Approve/deny a pending tool use (called from Telegram callback handler)
-  // (delegates to internal ApprovalManager)
-  decideTool(toolUseId: string, decision: 'allow' | 'deny'): PendingApproval | null;
-
-  // Abort a session (called from Telegram /abort command)
-  async abortSession(sessionId: string): Promise<void>;
-
-  // Clean up all sessions (shutdown)
-  async shutdown(): Promise<void>;
+// src/bot/content-store.ts
+interface StoredContent {
+  compactHtml: string;      // The collapsed one-liner
+  expandedHtml: string;     // The full detailed view
+  threadId: number;         // For validation
+  createdAt: number;        // For TTL cleanup
 }
 
-interface ActiveSession {
-  id: string;                          // Internal tracking ID
-  sdkSessionId: string;                // SDK's session_id from init message
-  query: Query;                        // The SDK Query instance (async generator + methods)
-  inputChannel: InputChannel;          // For streaming input to the session
-  threadId: number;                    // Telegram topic thread ID
-  abortController: AbortController;    // For cancellation
-  processingPromise: Promise<void>;    // The background event loop promise
+class ContentStore {
+  private store = new Map<string, StoredContent>();
+  private counter = 0;
+
+  // Short IDs: monotonic counter, base36 = ~4 chars for first 1M entries
+  store(content: StoredContent): string {
+    const id = (this.counter++).toString(36);
+    this.store.set(id, content);
+    return id;
+  }
+
+  get(id: string): StoredContent | undefined {
+    return this.store.get(id);
+  }
+
+  // Periodic cleanup: remove entries older than 1 hour
+  cleanup(maxAgeMs: number = 3600_000): void { ... }
 }
 ```
 
-### Session Lifecycle
+**callback_data format:** `x:{id}` for expand (3-7 bytes), `c:{id}` for collapse (3-7 bytes). Well within 64-byte limit.
+
+**Data Flow:**
 
 ```
-1. startSession(prompt, cwd) -- called from Telegram /run command
-   |
-   +--> Create AbortController
-   +--> Create InputChannel (AsyncIterable for streaming input)
-   +--> Yield initial SDKUserMessage to InputChannel
-   +--> Call query({
-   |      prompt: inputChannel.iterable(),
-   |      options: {
-   |        cwd,
-   |        canUseTool: this.handleToolApproval.bind(this, sessionId),
-   |        permissionMode: "default",
-   |        abortController,
-   |        includePartialMessages: false,
-   |      }
-   |    })
-   +--> Store ActiveSession with processingPromise
-   +--> Spawn processSession() loop (async, fire-and-forget)
-   +--> Return sessionId
-
-2. processSession(sessionId, query) -- runs per-session, concurrent
-   |
-   for await (const message of query) {
-     try {
-       await this.routeMessage(sessionId, message);
-     } catch (err) {
-       console.warn("Message routing error:", err);
-       // Do NOT let Telegram errors crash the SDK session
-     }
-   }
-   // Loop ends when SDK session completes
-   await this.cleanupSession(sessionId);
-
-3. routeMessage(sessionId, message) -- classify and dispatch
-   |
-   switch (message.type) {
-     case "system":
-       if (message.subtype === "init") {
-         // Capture sdkSessionId from message.session_id
-         // Create Telegram topic via TopicManager
-         // Initialize monitoring (StatusMessage, SummaryTimer)
-         // Post session start message
-       }
-       break;
-     case "assistant":
-       // Extract text blocks -> post Claude's text to topic
-       // Extract tool_use blocks -> format and post tool calls
-       // Extract usage -> update context %, status message
-       break;
-     case "result":
-       // Post session summary (duration, tool count, cost)
-       // Close topic
-       // Clean up monitoring
-       break;
-   }
-
-4. sendInput(sessionId, text) -- called when user replies in topic
-   |
-   +--> Find ActiveSession
-   +--> Build SDKUserMessage: { type: "user", message: { role: "user", content: text } }
-   +--> Push to InputChannel
-   +--> SDK receives it on next iteration of the async generator
-
-5. handleToolApproval(sessionId, toolName, input, options) -- canUseTool callback
-   |
-   +--> Auto-approve check (config.autoApprove, permission mode checks)
-   +--> Format approval message with tool details
-   +--> Send to Telegram topic with Approve/Deny buttons
-   +--> Create deferred promise via ApprovalManager.waitForDecision()
-   +--> Race against options.signal (AbortSignal) for cancellation
-   +--> Return PermissionResult: { behavior: "allow" } or { behavior: "deny", message }
+PostToolUse hook arrives
+    ↓
+HookHandlers.handlePostToolUse() -- unchanged
+    ↓
+callbacks.onToolUse() in index.ts
+    ↓
+formatter.formatCompactToolUse(payload) → { compact, expanded }
+    ↓
+contentStore.store({ compactHtml, expandedHtml, threadId })
+    ↓
+batcher.enqueue(threadId, compact, { keyboard: expandButton(id) })
+    ↓
+User taps [Expand ▼]
+    ↓
+bot.callbackQuery(/^x:(.+)$/) → contentStore.get(id) → editMessageText(expanded, collapseButton)
+    ↓
+User taps [Collapse ▲]
+    ↓
+bot.callbackQuery(/^c:(.+)$/) → contentStore.get(id) → editMessageText(compact, expandButton)
 ```
 
-## InputChannel Pattern
+**Critical Decision: When to show expand button?**
 
-The InputChannel wraps a controllable async generator that bridges external message pushes to the SDK's expected AsyncIterable prompt format.
+Only when content exceeds 250 chars. Short tool calls (Read, Glob) stay as bare one-liners with no button. This keeps noise low.
+
+**MessageBatcher Change:**
+
+The batcher currently concatenates messages with `\n\n` separators. Messages with inline keyboards CANNOT be batched together (each keyboard is per-message). Two options:
+
+1. **Messages with keyboards bypass batching** -- send immediately via `enqueueImmediate`. This is safe because expand buttons are informational, not time-critical.
+2. **Split batch on keyboard boundary** -- flush accumulated non-keyboard messages, then send keyboard message, continue batching.
+
+**Recommendation: Option 1** because it is simpler and the keyboard messages are already lower frequency (only for long tool outputs).
+
+However, this creates a subtlety: if a rapid sequence of tool calls all have expand buttons, they become individual messages instead of batched. This is acceptable because long-output tools (Bash with output, Write with content) are less frequent than short ones (Read, Glob, Grep).
+
+### Feature 2: Permission Modes (Accept All, Same Tool, Safe Only, Until Done)
+
+**Requirement:** Replace binary approve/deny with tiered auto-accept modes. No timeout -- wait forever.
+
+**Integration Points:**
+
+| Component | Change Type | Description |
+|-----------|-------------|-------------|
+| `approval-manager.ts` | **MODIFY** | Add mode state per-session, auto-resolve logic |
+| `bot.ts` | **MODIFY** | New callback queries for mode buttons, new /permission command |
+| `formatter.ts` | **MODIFY** | Mode selector keyboard on approval messages |
+| `hooks/server.ts` | **MODIFY** | Remove timeout for PreToolUse, respect auto-accept |
+| `types/sessions.ts` | **MODIFY** | Add `permissionAutoAccept` field to SessionInfo |
+| `session-store.ts` | **MODIFY** | Add `updatePermissionMode()` method |
+| `types/config.ts` | **MODIFY** | Remove `approvalTimeoutMs`, add default permission mode |
+
+**Architecture Pattern: Per-Session Permission State Machine**
+
+```
+                    ┌─────────────────────────┐
+                    │  Permission Mode State   │
+                    │  (per session in store)   │
+                    └────────────┬────────────┘
+                                 │
+    ┌────────────────┬───────────┼───────────┬──────────────────┐
+    ▼                ▼           ▼           ▼                  ▼
+ ┌──────┐    ┌───────────┐  ┌────────┐  ┌──────────┐    ┌──────────┐
+ │ Ask  │    │ Same Tool │  │ Safe   │  │ All      │    │ Until    │
+ │ Each │    │ Auto      │  │ Only   │  │ Auto     │    │ Done     │
+ └──────┘    └───────────┘  └────────┘  └──────────┘    └──────────┘
+  default     auto-accept    auto-accept  auto-accept    auto-accept
+  (prompt)    same tool_name  Read/Glob/   everything     everything
+              as last         Grep/safe               until session ends
+              approved        tools only
+```
+
+**Mode definitions:**
+
+| Mode | Behavior | Auto-Accept Criteria |
+|------|----------|---------------------|
+| Ask Each | Current behavior | Never auto-accept |
+| Same Tool | Auto-accept if tool_name matches a previously approved tool | `approvedTools.has(payload.tool_name)` |
+| Safe Only | Auto-accept read-only tools | `SAFE_TOOLS.has(payload.tool_name)` |
+| Accept All | Auto-accept everything for this session | Always |
+| Until Done | Auto-accept everything until session ends | Always (same as Accept All but named for clarity) |
+
+**Where auto-accept logic lives:**
+
+The PreToolUse handler in `hooks/server.ts` currently checks `config.autoApprove` and `payload.permission_mode`. The new mode logic should live in `ApprovalManager` because:
+
+1. ApprovalManager already owns the per-session approval state
+2. The mode is per-session, and ApprovalManager is already keyed by sessionId
+3. Keeps the hook server thin (just delegates)
 
 ```typescript
-class InputChannel {
-  private pending: SDKUserMessage[] = [];
-  private resolver: ((msg: SDKUserMessage) => void) | null = null;
-  private closed = false;
-
-  // Called by SessionManager when user sends text from Telegram
-  push(message: SDKUserMessage): void {
-    if (this.closed) return;
-    if (this.resolver) {
-      const resolve = this.resolver;
-      this.resolver = null;
-      resolve(message);
-    } else {
-      this.pending.push(message);
-    }
-  }
-
-  // Used as the prompt parameter for query()
-  async *iterable(): AsyncIterable<SDKUserMessage> {
-    while (!this.closed) {
-      if (this.pending.length > 0) {
-        yield this.pending.shift()!;
-      } else {
-        // Park until push() delivers a message
-        const msg = await new Promise<SDKUserMessage>((resolve) => {
-          this.resolver = resolve;
-        });
-        if (!this.closed) {
-          yield msg;
-        }
-      }
-    }
-  }
-
-  close(): void {
-    this.closed = true;
-    // Unblock any parked consumer
-    if (this.resolver) {
-      // Signal end by rejecting or resolving with a sentinel
-      this.resolver = null;
-    }
-  }
+// In ApprovalManager
+shouldAutoAccept(sessionId: string, toolName: string): boolean {
+  const mode = this.sessionModes.get(sessionId);
+  if (!mode || mode === 'ask') return false;
+  if (mode === 'all' || mode === 'until-done') return true;
+  if (mode === 'safe') return SAFE_TOOLS.has(toolName);
+  if (mode === 'same-tool') return this.approvedTools.get(sessionId)?.has(toolName) ?? false;
+  return false;
 }
 ```
 
-**V2 API alternative (when stable):** The V2 preview API (`unstable_v2_createSession`) provides `session.send()` which is simpler than managing an InputChannel. However, V2 is unstable and missing some features (session forking). **Recommendation:** Build with V1 streaming input but isolate InputChannel so switching to V2 later is a single-module change.
+**No Timeout Change:**
 
-## Concurrent Session Architecture
+Current: `approvalTimeoutMs` defaults to 300000 (5 min). Requirement says "wait forever."
 
-### The Challenge
+Options:
+1. Set timeout to `Infinity` / remove `setTimeout` entirely
+2. Set very large timeout (24 hours) as safety net
 
-Multiple Claude Code sessions run simultaneously (2-3 per machine). Each produces an independent stream of SDKMessages. Each needs its own Telegram topic. Each might be waiting for approval at the same time.
+**Recommendation: Option 2** -- use 24-hour timeout as a safety net against leaked promises. HTTP connections can also time out on the client (Claude Code) side, so "wait forever" really means "wait as long as Claude Code keeps the connection open."
 
-### The Solution: Per-Session Event Loops
+**Keyboard Layout for Approval Messages:**
 
-Each SDK session runs its own async `for await` loop as a background task. These loops are independent and concurrent within Node.js's single-threaded event loop. All async operations (Telegram API calls, message formatting) yield back to the event loop, allowing interleaving.
+```
+[Approve] [Deny]
+[Accept All] [Same Tool] [Safe Only]
+```
 
-No shared mutable state between loops except through the SessionStore, where Map operations are atomic in single-threaded JS.
+callback_data: `aa:{toolUseId}`, `st:{toolUseId}`, `so:{toolUseId}` -- all well within 64 bytes.
+
+On "Same Tool" tap: approve this tool AND add tool_name to session's approvedTools set. On "Accept All" tap: approve this tool AND set session mode to 'all'.
+
+**Stdout Visibility (Local Permission):**
+
+The requirement says "Permissions visible locally via stdout." This means when a PreToolUse arrives, ALSO print to the bot process's stdout. This is trivial -- just add `console.log()` in the PreToolUse callback. No architectural change needed.
+
+### Feature 3: Subagent Visibility
+
+**Requirement:** Subagent output visible with agent name/type/status labels.
+
+**Integration Points:**
+
+| Component | Change Type | Description |
+|-----------|-------------|-------------|
+| `transcript-watcher.ts` | **MODIFY** | Stop filtering `isSidechain === true`, instead emit with agent metadata |
+| `types/monitoring.ts` | **MODIFY** | Extend TranscriptEntry type with subagent fields |
+| `hooks/server.ts` | **MODIFY** | Add routes for SubagentStart, SubagentStop hooks |
+| `hooks/handlers.ts` | **MODIFY** | New handlers for SubagentStart/SubagentStop |
+| `types/hooks.ts` | **MODIFY** | Add SubagentStartPayload, SubagentStopPayload types |
+| `formatter.ts` | **MODIFY** | New formatSubagentStart(), formatSubagentStop() |
+| `index.ts` | **MODIFY** | Wire new hook callbacks |
+| New: `types/hooks.ts` additions | **MODIFY** | SubagentStartPayload, SubagentStopPayload |
+
+**Two Data Sources for Subagent Visibility:**
+
+1. **SubagentStart/SubagentStop hooks** -- structured events with agent_id, agent_type, agent_transcript_path
+2. **TranscriptWatcher with isSidechain entries** -- the actual text output from subagents
+
+**Architecture Decision: Use hooks for lifecycle, transcript for content.**
+
+The SubagentStart hook provides: `agent_id`, `agent_type` (e.g., "Explore", "Plan", "Bash").
+The SubagentStop hook provides: `agent_id`, `agent_type`, `agent_transcript_path`, `last_assistant_message`.
+
+The transcript entries with `isSidechain === true` contain the subagent's tool calls and text output.
+
+**Recommended approach:**
+
+```
+SubagentStart hook arrives → Post "Subagent started: [type] [agent_id]" to topic
+                           → Track agent_id in session state
+
+Transcript entries with isSidechain === true → Post with "[SubagentType]:" prefix
+                                             → Use agent_id to look up type
+
+SubagentStop hook arrives → Post "Subagent finished: [type]" with last_assistant_message summary
+                          → Clean up agent tracking
+```
+
+**TranscriptWatcher Change:**
+
+Current code at line 203-208 of transcript-watcher.ts:
+```typescript
+private processEntry(entry: TranscriptEntry): void {
+  // Skip subagent messages
+  if (entry.isSidechain) return;
+```
+
+Change to:
+```typescript
+private processEntry(entry: TranscriptEntry): void {
+  if (entry.isSidechain) {
+    // Emit subagent messages through a different callback
+    this.onSubagentMessage?.(entry);
+    return;
+  }
+```
+
+**New TranscriptWatcher constructor parameter:**
+```typescript
+constructor(
+  filePath: string,
+  onAssistantMessage: (text: string) => void,
+  onUsageUpdate: (usage: TokenUsage) => void,
+  onSubagentMessage?: (entry: TranscriptEntry) => void,  // NEW
+)
+```
+
+**Agent ID Correlation Problem:**
+
+The transcript's `isSidechain` entries do NOT contain the `agent_type` field. To label messages with the agent type, we need to correlate:
+- SubagentStart hook provides `agent_id` + `agent_type`
+- Transcript entries have `sessionId` but this is the parent session ID
+
+The transcript entries for subagents are written to a separate file: `agent_transcript_path` (e.g., `~/.claude/projects/.../abc123/subagents/agent-def456.jsonl`).
+
+**Key Insight:** Subagent transcript entries go to a SEPARATE JSONL file, not the main session transcript. The main transcript only has tool_use entries for the Agent tool itself. The subagent's actual work is in the subagent transcript file.
+
+**Revised approach:**
+
+Option A: Watch subagent transcript files (complex -- need dynamic file watchers)
+Option B: Use SubagentStop hook's `last_assistant_message` for summary (simpler, less real-time)
+Option C: Parse main transcript's Agent tool_use entries for subagent task context, then show SubagentStop summary
+
+**Recommendation: Option B + SubagentStart/Stop hooks for lifecycle.**
+
+Rationale: Watching N subagent transcript files dynamically adds significant complexity for marginal value. The main session transcript shows the Agent tool call (task description) and the subagent's tool calls still fire PostToolUse hooks. The SubagentStop hook provides the final result. This gives us:
+
+1. SubagentStart hook -> "Agent [type] started: [task description]"
+2. PostToolUse hooks from subagent -> tool calls appear (they already do, they have the same session_id)
+3. SubagentStop hook -> "Agent [type] finished: [summary]"
+
+**Wait -- do subagent PostToolUse hooks fire?** Need to verify. According to the hooks reference, PreToolUse/PostToolUse fire for subagent tool calls too. The hook payload includes the same `session_id` as the parent. So subagent tool calls are ALREADY being posted to Telegram -- they just lack the "[Subagent]" label.
+
+**Verification needed at implementation time:** Whether subagent PostToolUse hooks carry any identifier linking them to the subagent. If not, we need to use timing correlation between SubagentStart and SubagentStop to bracket which tool calls came from subagents.
+
+**Practical Subagent Tracking:**
 
 ```typescript
-// Inside SessionManager.startSession():
-const q = query({
-  prompt: inputChannel.iterable(),
-  options: {
-    cwd,
-    canUseTool: (toolName, input, opts) =>
-      this.handleToolApproval(sessionId, toolName, input, opts),
-    permissionMode: "default",
-    abortController,
-  }
-});
+// Per-session active subagent tracking
+interface ActiveSubagent {
+  agentId: string;
+  agentType: string;
+  startedAt: number;
+}
 
-// Spawn the processing loop (fire-and-forget, tracked in ActiveSession)
-const processingPromise = this.processSession(sessionId, q).catch(err => {
-  console.error(`Session ${sessionId} processing error:`, err);
-  this.cleanupSession(sessionId);
-});
-
-this.sessions.set(sessionId, {
-  id: sessionId,
-  sdkSessionId: "", // Set when init message arrives
-  query: q,
-  inputChannel,
-  threadId: 0, // Set when topic is created
-  abortController,
-  processingPromise,
-});
+// In SessionStore or a new SubagentTracker
+activeSubagents: Map<string, ActiveSubagent[]>  // sessionId -> active subagents
 ```
 
-### Important: Each query() Spawns a Child Process
+When a SubagentStart arrives: push to active list.
+When a SubagentStop arrives: remove from active list, post summary.
+When formatting PostToolUse during active subagent: prepend "[SubagentType]" label.
 
-The SDK spawns a separate Claude Code child process for each `query()` call. This is heavier than v1 (where Claude Code ran independently and the bot was lightweight). At 3 concurrent sessions, expect ~150MB extra memory from child processes. This is manageable but worth monitoring.
+**Confidence:** MEDIUM -- the exact behavior of PostToolUse hooks for subagent tool calls needs verification at implementation time. The hooks docs confirm SubagentStart/SubagentStop exist with the documented fields.
 
-## Approval Flow: canUseTool Bridge
+### Feature 4: /clear Topic Reuse
 
-### Key Difference from v1
+**Requirement:** `/clear` reuses existing topic instead of creating a new one. Posts separator message, re-pins fresh status.
 
-In v1, the PreToolUse HTTP hook holds the Fastify HTTP response open with a deferred promise. When the user taps Approve/Deny, the promise resolves and the HTTP response is sent.
+**Integration Points:**
 
-In v2, the `canUseTool()` callback is called by the SDK inside the query's event loop. The callback returns a `Promise<PermissionResult>` that the SDK awaits. The callback can take as long as needed -- the SDK does not proceed with the tool until the promise resolves.
+| Component | Change Type | Description |
+|-----------|-------------|-------------|
+| `hooks/handlers.ts` | **MODIFY** | Detect `source === 'clear'` in handleSessionStart, reuse topic |
+| `index.ts` | **MODIFY** | initMonitoring must handle status message re-creation |
+| `status-message.ts` | **MODIFY** | Support re-initialization (new pinned message in existing topic) |
+| `session-store.ts` | **MODIFY** | Need method to reset session metadata while keeping threadId |
 
-The deferred promise pattern from ApprovalManager works identically -- only the outer interface changes.
+**Architecture: /clear Flow**
 
-### Design
+```
+User types /clear in Claude Code terminal
+    ↓
+Claude Code fires SessionEnd with reason "clear"
+    ↓ (current: closes topic)
+    ↓ (new: keep topic open, post separator)
+Claude Code fires SessionStart with source "clear"
+    ↓ (current: creates new topic -- wrong)
+    ↓ (new: detect 'clear', reuse topic)
+```
+
+**The tricky part:** SessionEnd fires BEFORE SessionStart. Current onSessionEnd closes the topic. We need to detect that the end reason is "clear" and NOT close the topic.
+
+**Hook payload for SessionEnd with reason "clear":** Per the official docs, `SessionEnd` receives a `reason` field. We need to add this to `SessionEndPayload`:
 
 ```typescript
-// Inside SessionManager:
-private async handleToolApproval(
-  sessionId: string,
-  toolName: string,
-  input: Record<string, unknown>,
-  options: { signal: AbortSignal; toolUseID: string; decisionReason?: string }
-): Promise<PermissionResult> {
-
-  // Auto-approve check
-  if (this.config.autoApprove) {
-    return { behavior: "allow", updatedInput: input };
-  }
-
-  // Look up session's thread ID
-  const session = this.sessionStore.get(sessionId);
-  if (!session) {
-    return { behavior: "allow", updatedInput: input };
-  }
-
-  // Format approval message (reuse existing formatter)
-  const approvalHtml = formatApprovalRequest({
-    tool_name: toolName,
-    tool_input: input,
-    tool_use_id: options.toolUseID,
-    // Adapter: SDK provides these fields differently than hook payloads
-  });
-  const keyboard = makeApprovalKeyboard(options.toolUseID);
-
-  const msg = await this.bot.api.sendMessage(
-    this.config.telegramChatId,
-    approvalHtml,
-    {
-      message_thread_id: session.threadId,
-      parse_mode: "HTML",
-      reply_markup: keyboard,
-    }
-  );
-
-  // Wait for decision with abort signal awareness
-  const decision = await Promise.race([
-    this.approvalManager.waitForDecision(
-      options.toolUseID,
-      sessionId,
-      session.threadId,
-      msg.message_id,
-      toolName
-    ),
-    // Abort signal: if session is cancelled while waiting
-    new Promise<"deny">((resolve) => {
-      if (options.signal.aborted) resolve("deny");
-      options.signal.addEventListener("abort", () => resolve("deny"), { once: true });
-    }),
-  ]);
-
-  // Map to SDK PermissionResult
-  if (decision === "allow") {
-    return { behavior: "allow", updatedInput: input };
-  }
-  return { behavior: "deny", message: "Denied by user via Telegram" };
+export interface SessionEndPayload extends HookPayload {
+  hook_event_name: 'SessionEnd';
+  reason: 'clear' | 'logout' | 'prompt_input_exit' | 'bypass_permissions_disabled' | 'other';
 }
 ```
 
-### Telegram Button Handlers (mostly unchanged)
+**Flow:**
 
-The grammY callback query handlers for approve/deny buttons remain nearly identical. They call `approvalManager.decide(toolUseId, decision)` which resolves the deferred promise. The only change is that the resolved promise now feeds back to the SDK's `canUseTool` callback instead of an HTTP response handler.
+1. SessionEnd with `reason === 'clear'`:
+   - Do NOT close the topic
+   - Do NOT post "Session ended" message
+   - Clean up monitoring (stop transcript watcher, summary timer)
+   - Keep session in store as "pending-clear" state
+   - Destroy old status message
 
-## Message Type Mapping
+2. SessionStart with `source === 'clear'`:
+   - Detect pending-clear session by cwd match (same as resume detection)
+   - Reuse existing threadId
+   - Post separator: `"--- Session cleared ---"`
+   - Create new StatusMessage (new pinned message)
+   - Reset session metadata: toolCallCount=0, filesChanged=empty, contextPercent=0
+   - Re-initialize monitoring
 
-How SDK message types map to existing Telegram output:
-
-| SDK Message Type | v1 Equivalent | Telegram Action | Confidence |
-|-----------------|---------------|-----------------|------------|
-| `SDKSystemMessage` (subtype: "init") | SessionStart hook | Create topic, post start message, init monitoring | HIGH |
-| `SDKAssistantMessage` with text blocks | TranscriptWatcher onAssistantMessage | Post Claude text to topic via batcher | HIGH |
-| `SDKAssistantMessage` with tool_use blocks | PostToolUse hook | Post tool call info (format, verbosity filter) | HIGH |
-| `SDKAssistantMessage.message.usage` | TranscriptWatcher onUsageUpdate | Update context %, status message, threshold warnings | HIGH |
-| `SDKResultMessage` (subtype: "success") | SessionEnd hook | Post summary, close topic, clean up monitoring | HIGH |
-| `SDKResultMessage` (subtype: "error_*") | SessionEnd hook (error) | Post error, close topic | HIGH |
-| `canUseTool()` callback | PreToolUse hook (blocking HTTP) | Post approval message, wait for button tap | HIGH |
-| `SDKCompactBoundaryMessage` | (no v1 equivalent) | Post compaction notice to topic | MEDIUM |
-| `SDKPartialAssistantMessage` | (no v1 equivalent) | Optional: live-stream Claude's reasoning text | LOW priority |
-| `SDKStatusMessage` | (no v1 equivalent) | Could supplement StatusMessage data | LOW priority |
-| `SDKToolUseSummaryMessage` | (no v1 equivalent) | Optional: show tool result summaries | LOW priority |
-
-## Patterns to Follow
-
-### Pattern 1: SDK Session Wrapper
-
-Wrap each SDK session in a struct that encapsulates query instance, input channel, abort controller, and session metadata. This makes cleanup deterministic and prevents resource leaks.
+**Session ID Change:** Critical -- `/clear` creates a NEW session_id. The old session's data is stale. We need to:
+1. On SessionEnd(clear): mark session as `status: 'clearing'` (not 'closed')
+2. On SessionStart(clear): look up by cwd with status 'clearing', remap to new sessionId, reuse threadId
 
 ```typescript
-interface ActiveSession {
-  readonly id: string;
-  readonly query: Query;
-  readonly inputChannel: InputChannel;
-  readonly abortController: AbortController;
-  processingPromise: Promise<void>;
-  sdkSessionId: string;
-  threadId: number;
-  cleanedUp: boolean;
-}
-
-async function cleanupSession(session: ActiveSession): Promise<void> {
-  if (session.cleanedUp) return;
-  session.cleanedUp = true;
-  session.abortController.abort();
-  session.query.close();
-  session.inputChannel.close();
+// In handleSessionStart, before existing resume detection:
+if (payload.source === 'clear') {
+  const clearing = this.sessionStore.getClearingByCwd(payload.cwd);
+  if (clearing) {
+    // Remap: reuse topic, new session ID, reset counters
+    this.sessionStore.set(payload.session_id, {
+      ...clearing,
+      sessionId: payload.session_id,
+      transcriptPath: payload.transcript_path,
+      status: 'active',
+      startedAt: new Date().toISOString(),
+      toolCallCount: 0,
+      filesChanged: new Set<string>(),
+      contextPercent: 0,
+      suppressedCounts: {},
+      lastActivityAt: new Date().toISOString(),
+    });
+    // Post separator and re-init
+    await this.callbacks.onSessionClear(this.sessionStore.get(payload.session_id)!);
+    return;
+  }
 }
 ```
 
-### Pattern 2: Non-Blocking Message Routing
+**New HookCallback needed:**
+```typescript
+onSessionClear(session: SessionInfo): Promise<void>;
+```
 
-Never await long-running operations (Telegram API calls) directly in the SDK message loop. Use the MessageBatcher for all non-critical messages. Only lifecycle messages (topic creation, close) should be awaited.
+This posts the separator, creates new StatusMessage, re-pins it.
+
+## Component Responsibilities (New + Modified)
+
+| Component | Responsibility | Change Type |
+|-----------|---------------|-------------|
+| `content-store.ts` | Store expanded content for callback lookups | **NEW** |
+| `formatter.ts` | Compact tool format, subagent labels, mode keyboards | **MODIFY** |
+| `approval-manager.ts` | Per-session permission modes, auto-accept logic | **MODIFY** |
+| `transcript-watcher.ts` | Emit subagent messages (was: filter them) | **MODIFY** |
+| `hooks/handlers.ts` | SubagentStart/Stop handling, /clear detection | **MODIFY** |
+| `hooks/server.ts` | New routes, remove timeout, PermissionRequest route | **MODIFY** |
+| `types/hooks.ts` | SubagentStartPayload, SubagentStopPayload, reason field | **MODIFY** |
+| `types/sessions.ts` | Permission mode, clearing status | **MODIFY** |
+| `bot.ts` | Expand/collapse callbacks, mode callbacks, /clear handling | **MODIFY** |
+| `topics.ts` | reply_markup support in sendMessage | **MODIFY** |
+| `rate-limiter.ts` | Handle messages with keyboards (no batching) | **MODIFY** |
+| `status-message.ts` | Re-initialization for /clear flow | **MODIFY** |
+| `session-store.ts` | getClearingByCwd, permission mode methods | **MODIFY** |
+| `index.ts` | Wire new callbacks, content store, subagent tracking | **MODIFY** |
+
+## Data Flow Changes
+
+### Current Tool Call Flow
+```
+PostToolUse → HookHandlers → verbosity filter → formatter.formatToolUse() → batcher.enqueue() → topic
+```
+
+### New Tool Call Flow (v3.0)
+```
+PostToolUse → HookHandlers → verbosity filter → formatter.formatCompactToolUse()
+    ↓
+    ├─ short output (< 250 chars): batcher.enqueue(text) [no keyboard, batchable]
+    └─ long output (>= 250 chars): contentStore.store(compact, expanded)
+                                    → batcher.enqueueImmediate(compact, keyboard) [not batched]
+```
+
+### Current Approval Flow
+```
+PreToolUse → server (blocking) → ApprovalManager.waitForDecision() → [timeout or button tap] → HTTP response
+```
+
+### New Approval Flow (v3.0)
+```
+PreToolUse → server (blocking) → ApprovalManager.shouldAutoAccept()?
+    ├─ YES: return allow immediately (no message sent)
+    └─ NO:  send approval message with mode buttons
+            → ApprovalManager.waitForDecision() [no timeout]
+            → button tap: approve/deny + optionally set mode
+            → HTTP response
+```
+
+### New Subagent Flow
+```
+SubagentStart hook → post "[AgentType] started" to topic
+                   → track agent in session state
+
+PostToolUse hooks (from subagent, same session_id)
+                   → check if subagent active → prepend "[AgentType]" label
+
+SubagentStop hook  → post "[AgentType] finished: summary" to topic
+                   → remove from tracking
+```
+
+### New /clear Flow
+```
+SessionEnd(reason=clear) → keep topic open, clean up monitors, mark 'clearing'
+SessionStart(source=clear) → find clearing session by cwd
+                           → reuse threadId, reset counters
+                           → post "--- cleared ---" separator
+                           → create new StatusMessage, pin it
+                           → re-init monitoring
+```
+
+## Recommended Project Structure Changes
+
+```
+src/
+├── bot/
+│   ├── bot.ts              # MODIFY: expand/collapse + mode callback handlers
+│   ├── command-registry.ts  # unchanged
+│   ├── content-store.ts     # NEW: server-side content for expand/collapse
+│   ├── formatter.ts         # MODIFY: compact format, subagent labels, mode keyboards
+│   ├── rate-limiter.ts      # MODIFY: keyboard-aware batching
+│   └── topics.ts            # MODIFY: reply_markup support
+├── control/
+│   └── approval-manager.ts  # MODIFY: permission modes, auto-accept, no timeout
+├── hooks/
+│   ├── handlers.ts          # MODIFY: SubagentStart/Stop, /clear detection
+│   └── server.ts            # MODIFY: new routes, timeout removal
+├── monitoring/
+│   ├── status-message.ts    # MODIFY: re-initialization for /clear
+│   ├── summary-timer.ts     # unchanged
+│   ├── transcript-watcher.ts # MODIFY: emit subagent messages
+│   └── verbosity.ts         # unchanged
+├── sessions/
+│   └── session-store.ts     # MODIFY: getClearingByCwd, permission mode
+├── types/
+│   ├── config.ts            # MODIFY: remove approvalTimeoutMs
+│   ├── hooks.ts             # MODIFY: SubagentStart/Stop payloads, reason field
+│   ├── monitoring.ts        # unchanged
+│   └── sessions.ts          # MODIFY: permissionAutoAccept, clearing status
+├── input/                   # unchanged
+├── utils/
+│   └── text.ts              # unchanged
+├── config.ts                # MODIFY: remove timeout config
+└── index.ts                 # MODIFY: wire everything
+```
+
+## Architectural Patterns
+
+### Pattern 1: Server-Side Callback Store
+
+**What:** Store full content server-side, put only a short ID in Telegram callback_data.
+**When to use:** Any time you need expand/collapse, pagination, or multi-step inline interactions.
+**Trade-offs:** Adds memory pressure (mitigated by TTL cleanup). Loses state on bot restart (acceptable -- buttons on old messages just stop working).
 
 ```typescript
-// GOOD: Non-blocking for tool events
-for await (const msg of query) {
-  if (msg.type === "assistant") {
-    batcher.enqueue(threadId, formatAssistantMessage(msg)); // Returns immediately
-  }
-  if (msg.type === "result") {
-    await batcher.enqueueImmediate(threadId, formatResult(msg)); // Lifecycle: OK to await
-  }
-}
+// Compact callback_data: "x:a3" (5 bytes) vs UUID (36 bytes)
+// 64-byte limit is never an issue with monotonic counter IDs
+const id = contentStore.store({ compactHtml, expandedHtml, threadId });
+const keyboard = new InlineKeyboard().text('Expand', `x:${id}`);
 ```
 
-### Pattern 3: Error Isolation
+### Pattern 2: Permission State Machine per Session
 
-Telegram API errors must never crash the SDK session event loop. Wrap all Telegram interactions in try/catch within the message router.
+**What:** Session-scoped auto-accept mode that progressively reduces permission prompts.
+**When to use:** When the user signals trust ("I approved Bash once, approve it again").
+**Trade-offs:** Reduces safety (mitigated by per-session scope and explicit user choice). "Same Tool" mode accumulates approved tools over session lifetime.
 
 ```typescript
-for await (const msg of query) {
-  try {
-    await routeMessage(sessionId, msg);
-  } catch (err) {
-    console.warn(`Message routing error (session ${sessionId}):`, err);
-    // Continue processing -- the SDK session is still alive
-  }
+// ApprovalManager checks mode BEFORE creating deferred promise
+if (this.shouldAutoAccept(sessionId, toolName)) {
+  return { allow: true, reason: `Auto-accepted (${mode} mode)` };
 }
+// Only create promise + send Telegram message if NOT auto-accepting
 ```
 
-### Pattern 4: Graceful Shutdown
+### Pattern 3: Lifecycle Hook for Topic Reuse
 
-On bot shutdown, abort all SDK sessions cleanly and wait for processing loops to finish:
+**What:** Intercept SessionEnd(clear) + SessionStart(clear) pair to reuse topic instead of creating new one.
+**When to use:** Any command that resets context but should preserve the conversation thread (clear, compact).
+**Trade-offs:** Requires intermediate "clearing" state to bridge the gap between SessionEnd and SessionStart events.
 
-```typescript
-async shutdown(): Promise<void> {
-  const sessions = Array.from(this.sessions.values());
+### Pattern 4: Dual-Source Subagent Visibility
 
-  // Signal all sessions to abort
-  for (const session of sessions) {
-    session.abortController.abort();
-  }
+**What:** Structured lifecycle from hooks (SubagentStart/Stop) + content from transcript (isSidechain).
+**When to use:** When you need both structured metadata and unstructured content from a subsystem.
+**Trade-offs:** Content may be delayed vs lifecycle events (transcript write vs HTTP hook). Correlation requires tracking active subagents.
 
-  // Wait for all processing loops to finish (with timeout)
-  const timeout = new Promise(r => setTimeout(r, 5000));
-  await Promise.race([
-    Promise.allSettled(sessions.map(s => s.processingPromise)),
-    timeout
-  ]);
+## Anti-Patterns
 
-  // Clean up any remaining sessions
-  for (const session of sessions) {
-    await cleanupSession(session);
-  }
+### Anti-Pattern 1: Storing Full Content in callback_data
 
-  this.sessions.clear();
-}
+**What people do:** Try to encode full tool output in Telegram callback_data.
+**Why it's wrong:** 64-byte hard limit. Even base64 encoding won't help for multi-KB content.
+**Do this instead:** Server-side content store with short ID in callback_data.
+
+### Anti-Pattern 2: Batching Messages with Inline Keyboards
+
+**What people do:** Try to combine multiple messages that each have inline keyboards.
+**Why it's wrong:** Each Telegram message can have only ONE inline keyboard (reply_markup). Combining messages loses keyboards.
+**Do this instead:** Send keyboard messages individually (via enqueueImmediate), batch only plain text messages.
+
+### Anti-Pattern 3: Watching N Subagent Transcript Files
+
+**What people do:** Dynamically create a TranscriptWatcher for each subagent's transcript file.
+**Why it's wrong:** O(N) file watchers, complex lifecycle management, most subagents are short-lived.
+**Do this instead:** Use SubagentStart/Stop hooks for lifecycle + last_assistant_message for content. Parse main transcript for subagent tool calls.
+
+### Anti-Pattern 4: Global Permission Mode
+
+**What people do:** Single global "accept all" toggle.
+**Why it's wrong:** Affects all sessions. User approving dangerous ops in one session shouldn't auto-approve in another.
+**Do this instead:** Per-session mode stored in ApprovalManager, cleaned up on session end.
+
+## Build Order (Dependency-Aware)
+
+```
+Phase 1: Compact Tool Output (independent, highest visual impact)
+  1a. content-store.ts (new, no deps)
+  1b. formatter.ts compact format (depends on nothing new)
+  1c. topics.ts reply_markup support (small change)
+  1d. rate-limiter.ts keyboard awareness (depends on 1c)
+  1e. bot.ts expand/collapse callbacks (depends on 1a)
+  1f. index.ts wiring (depends on all above)
+
+Phase 2: Permission Modes (independent of Phase 1)
+  2a. types/sessions.ts + session-store.ts permission fields
+  2b. approval-manager.ts mode logic + auto-accept
+  2c. formatter.ts mode keyboard buttons
+  2d. bot.ts mode callback handlers
+  2e. hooks/server.ts timeout removal
+  2f. index.ts wiring + stdout logging
+
+Phase 3: /clear Topic Reuse (depends on understanding Phase 1+2 wiring)
+  3a. types/hooks.ts reason field on SessionEnd
+  3b. hooks/handlers.ts clear detection logic
+  3c. session-store.ts getClearingByCwd + reset methods
+  3d. status-message.ts re-initialization
+  3e. index.ts onSessionClear callback wiring
+
+Phase 4: Subagent Visibility (most complex, benefits from Phase 1-3 stability)
+  4a. types/hooks.ts SubagentStart/Stop payload types
+  4b. hooks/server.ts new routes
+  4c. hooks/handlers.ts SubagentStart/Stop handlers
+  4d. transcript-watcher.ts emit subagent entries
+  4e. formatter.ts subagent labels
+  4f. index.ts wiring + subagent tracking
 ```
 
-## Anti-Patterns to Avoid
+**Build order rationale:**
+- Phase 1 first: standalone, highest user-visible impact, establishes the content-store pattern used by other features
+- Phase 2 second: standalone, high usability impact (reduces button-tap fatigue)
+- Phase 3 third: smaller scope, needs stable wiring layer
+- Phase 4 last: most complex, most uncertain (subagent hook behavior needs runtime verification), least critical for day-to-day use
 
-### Anti-Pattern 1: Multiple Consumers of Query AsyncGenerator
+## Integration Points Summary
 
-The Query async generator can only have ONE reader. Do NOT pass it to multiple consumers. All message processing must happen in a single `for await` loop per session. If you need to fan-out messages, do it inside that single loop.
+### New Hook Routes Needed
 
-### Anti-Pattern 2: Blocking the Message Loop with Awaits
+| Route | Event | Blocking? |
+|-------|-------|-----------|
+| `/hooks/subagent-start` | SubagentStart | No (fire-and-forget) |
+| `/hooks/subagent-stop` | SubagentStop | No (fire-and-forget) |
 
-Do NOT await slow operations (like topic creation or document upload) inside the message processing loop without error handling. If a Telegram call hangs, it blocks ALL subsequent SDK messages for that session.
+### New Callback Queries
 
-### Anti-Pattern 3: Recreating What SDK Provides
+| Pattern | Purpose | Callback Data |
+|---------|---------|--------------|
+| `x:{id}` | Expand tool output | 3-7 bytes |
+| `c:{id}` | Collapse tool output | 3-7 bytes |
+| `aa:{toolUseId}` | Accept All mode | ~40 bytes |
+| `st:{toolUseId}` | Same Tool mode | ~40 bytes |
+| `so:{toolUseId}` | Safe Only mode | ~40 bytes |
 
-The SDK handles the entire agent loop: tool execution, conversation history, token management, compaction. Do NOT implement custom tool result parsing, conversation state management, or context tracking. Just observe the events.
+### New HookCallbacks
 
-### Anti-Pattern 4: Using SingleMessage Mode for Interactive Sessions
+| Callback | Trigger |
+|----------|---------|
+| `onSessionClear(session)` | SessionStart with source 'clear' after matching SessionEnd |
+| `onSubagentStart(session, payload)` | SubagentStart hook |
+| `onSubagentStop(session, payload)` | SubagentStop hook |
 
-The SDK's single-message mode (string prompt) doesn't support multi-turn input or `canUseTool` properly. Always use streaming input mode (AsyncIterable prompt) for interactive sessions that need approval flows and user input.
+### Modified SessionInfo Fields
 
-## Scalability Considerations
+| Field | Type | Purpose |
+|-------|------|---------|
+| `permissionAutoAccept` | `'ask' \| 'all' \| 'same-tool' \| 'safe' \| 'until-done'` | Current permission mode |
+| `approvedTools` | `Set<string>` | Tools approved in "same-tool" mode |
+| `status` | add `'clearing'` | Intermediate state for /clear flow |
+| `activeSubagents` | `Map<string, { agentType: string }>` | Currently running subagents |
 
-| Concern | At 1 session | At 3 sessions | At 10+ sessions |
-|---------|-------------|---------------|-----------------|
-| Memory | ~50MB per SDK child process | ~150MB | Consider session limits |
-| CPU | Negligible (I/O bound) | Still I/O bound | Still I/O bound |
-| Telegram rate limits | No issue | MessageBatcher handles fine | May need more aggressive batching |
-| SDK processes | 1 child process | 3 child processes | Monitor with OS-level tools |
-| Event loop | Minimal | Concurrent `for await` loops fine | Still fine (all async) |
-| Approval concurrency | 0-1 pending | 0-3 pending | Map keyed by toolUseId handles any count |
+## Scaling Considerations
 
-**Key difference from v1:** Each `query()` spawns a separate Claude Code child process. In v1, Claude Code ran independently and the bot was a lightweight listener. In v2, the bot is responsible for spawning and managing these processes. Monitor memory and set `maxTurns` to prevent runaway sessions.
+| Concern | Current (2-3 sessions) | At 10 sessions | At 50 sessions |
+|---------|------------------------|-----------------|----------------|
+| ContentStore memory | ~100 entries, negligible | ~500 entries, ~5MB | ~2500 entries, ~25MB. Add TTL cleanup |
+| Active subagents | 0-2 per session | 0-5 per session | Consider subagent count limits |
+| Approval mode state | Negligible | Negligible | Negligible |
+| Hook routes | +2 routes, no impact | Same | Same |
 
-## Dependency Changes
-
-### Remove from package.json
-
-- `fastify` -- No more HTTP hook server
-- `pino` -- Was Fastify's logger (use console or a simpler logger)
-
-### Add to package.json
-
-- `@anthropic-ai/claude-agent-sdk` -- The SDK itself
-- `zod` (if not already present) -- SDK peer dependency
-
-### Keep
-
-- `grammy`, `@grammyjs/auto-retry`, `@grammyjs/transformer-throttler`, `@grammyjs/parse-mode` -- Telegram bot
-- `dotenv` -- Environment variable loading
-
-## Suggested Build Order
-
-Based on dependency analysis, the migration should be built bottom-up:
-
-### Phase 1: Types + Config + SDK Dependency
-- Add `@anthropic-ai/claude-agent-sdk` to package.json
-- Update `AppConfig` and `SessionInfo` types (remove hook/tmux fields, add SDK fields)
-- Create `src/sdk/types.ts` with adapter types between SDK and internal formats
-- Update `config.ts` to remove hook server vars, add API key validation
-- **Risk:** Low. No behavior change, just type/config prep.
-
-### Phase 2: InputChannel + Input Bridge
-- Create `src/sdk/input-channel.ts` with the AsyncIterable wrapper
-- Rewrite `src/control/input-manager.ts` to use InputChannel instead of tmux
-- Unit testable in isolation with mock consumers
-- **Risk:** Medium. The AsyncIterable/push pattern needs careful testing for edge cases (close during await, rapid pushes, etc.).
-
-### Phase 3: MessageRouter
-- Create `src/sdk/message-router.ts` that classifies SDKMessages and routes to existing formatters
-- Adapt `formatToolUse` to accept SDK tool_use blocks (create adapter functions)
-- Wire to existing MessageBatcher, StatusMessage, SummaryTimer
-- **Risk:** Medium. Need to map SDK message fields to v1 formatter expectations. Most of the mapping is straightforward but tool_input/tool_response shapes may differ.
-
-### Phase 4: Approval Bridge
-- Adapt `src/control/approval-manager.ts` for canUseTool callback use
-- Add AbortSignal awareness
-- Wire approval flow into SessionManager (canUseTool -> Telegram -> decide -> PermissionResult)
-- **Risk:** Low. The deferred promise pattern is identical. Only the outer interface changes.
-
-### Phase 5: SessionManager
-- Create `src/sdk/session-manager.ts` -- the orchestrator
-- Integrates InputChannel, MessageRouter, ApprovalBridge
-- Manages concurrent session lifecycle
-- Integration test with a real SDK session
-- **Risk:** High. This is the core integration. Concurrent session management, error handling, cleanup are all critical.
-
-### Phase 6: Entry Point Rewrite + Cleanup
-- Rewrite `src/index.ts` to wire SessionManager instead of Fastify/hooks
-- Update `src/bot/bot.ts` text handler to use `sessionManager.sendInput()`
-- Add `/run` command to start sessions from Telegram
-- Delete dead files (hooks/, install-hooks.ts, transcript-watcher.ts)
-- Remove Fastify from package.json
-- **Risk:** Medium. Large change but mechanically straightforward if phases 1-5 are solid.
-
-## Open Questions
-
-### 1. Session Initiation Model
-
-v1 auto-discovers externally-launched sessions via hooks. v2 needs a new trigger mechanism.
-
-**Options:**
-- **(a) User sends `/run <prompt>` in Telegram** -- Bot creates SDK session. This is what PROJECT.md implies ("Bot manages Claude Code sessions directly").
-- **(b) Bot monitors filesystem for new Claude Code sessions** -- Hybrid mode. More complex.
-- **(c) Both** -- Most flexible but most complex.
-
-**Recommendation:** Start with (a). Add (b) later if needed.
-
-### 2. Bot Restart Behavior
-
-v1 reconnects to sessions that were active before restart (topics still exist, monitoring re-initializes).
-
-With SDK, restarting the bot kills SDK child processes. Options:
-- **(a) Use `resume: sessionId`** to continue SDK sessions if their session files exist on disk. The SDK supports this natively.
-- **(b) Accept restart = session loss**, post "Bot restarted" notice.
-
-**Recommendation:** (a) is feasible because the SDK persists session state to disk by default. On restart, find active sessions from SessionStore, resume each with `query({ prompt, options: { resume: sdkSessionId } })`.
-
-### 3. API Key Model
-
-v1 uses the user's existing Claude Code CLI auth (Claude.ai account). v2 SDK requires `ANTHROPIC_API_KEY` environment variable (Anthropic API account). This is a different auth model with different billing.
-
-The SDK also supports Bedrock and Vertex via environment variables. Need to document this change clearly for users.
-
-### 4. V1 vs V2 SDK API
-
-The V2 preview (`unstable_v2_createSession`, `session.send()`, `session.stream()`) is much cleaner for multi-turn conversations. However, it's marked unstable and missing some features. Build with V1 streaming input, but structure code so switching to V2 later is a one-module change in InputChannel.
-
-### 5. SDK Process Cleanup on Crash
-
-If the bot process crashes without calling `query.close()`, orphan Claude Code child processes may remain. Consider:
-- PID tracking in a temp file
-- Process group management
-- Cleanup script on startup
+No scaling concerns for the target scale of 2-3 machines with 2-3 sessions each.
 
 ## Sources
 
-- [Claude Agent SDK Overview](https://platform.claude.com/docs/en/agent-sdk/overview) -- Official overview, capabilities, built-in tools
-- [Claude Agent SDK TypeScript Reference](https://platform.claude.com/docs/en/agent-sdk/typescript) -- Complete API: query(), Options, SDKMessage types, CanUseTool, PermissionResult, Query methods, Hook types
-- [Claude Agent SDK Quickstart](https://platform.claude.com/docs/en/agent-sdk/quickstart) -- Installation, basic usage, permission modes
-- [Handle Approvals and User Input](https://platform.claude.com/docs/en/agent-sdk/user-input) -- canUseTool callback, AskUserQuestion, PermissionResult
-- [Session Management](https://platform.claude.com/docs/en/agent-sdk/sessions) -- Session create, resume, fork, session_id capture
-- [Streaming vs Single-Turn Mode](https://platform.claude.com/docs/en/agent-sdk/streaming-vs-single-mode) -- AsyncIterable input, multi-turn patterns, streaming benefits
-- [TypeScript V2 Preview](https://platform.claude.com/docs/en/agent-sdk/typescript-v2-preview) -- send()/stream() patterns, createSession, unstable API
-- [@anthropic-ai/claude-agent-sdk on npm](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk) -- Package info, version
+- [Claude Code Hooks Reference](https://code.claude.com/docs/en/hooks) -- SubagentStart/SubagentStop fields, SessionStart source values, SessionEnd reasons, PermissionRequest hook (HIGH confidence, official docs)
+- [grammY Inline Keyboards](https://grammy.dev/plugins/keyboard) -- callback_data usage, editMessageReplyMarkup (HIGH confidence, official docs)
+- [Telegram Bot API](https://core.telegram.org/bots/api) -- 64-byte callback_data limit, editMessageText with reply_markup (HIGH confidence, official docs)
+- [callback-data library](https://github.com/deptyped/callback-data) -- structured callback data patterns for grammY (MEDIUM confidence, community library)
+- [Claude Code Permissions](https://platform.claude.com/docs/en/agent-sdk/permissions) -- permission modes: default, plan, acceptEdits, dontAsk, bypassPermissions (HIGH confidence, official docs)
+
+---
+*Architecture research for: Claude Code Telegram Bridge v3.0 UX Overhaul*
+*Researched: 2026-03-01*

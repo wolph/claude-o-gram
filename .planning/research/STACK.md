@@ -1,398 +1,447 @@
-# Technology Stack: v2.0 SDK Migration
+# Stack Research: v3.0 UX Overhaul
 
-**Project:** Claude Code Telegram Bridge
+**Domain:** Telegram bot UX features -- compact output, permission modes, subagent visibility, topic reuse
 **Researched:** 2026-03-01
-**Focus:** Stack changes needed for Claude Agent SDK migration
-**Overall Confidence:** HIGH
+**Confidence:** HIGH (existing stack, Telegram API capabilities verified against official docs)
 
-## Executive Summary
+## Scope
 
-The v2.0 migration replaces the fragile tmux/HTTP-hook/JSONL-watching architecture with the Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`). This is primarily a **subtraction**: the SDK subsumes the Fastify HTTP hook server, the tmux text injection layer, the JSONL transcript watcher, and the hook auto-installer. One package is added (the SDK itself plus its Zod peer dependency), and two packages are removed (Fastify and Pino). The existing grammY Telegram stack, TypeScript toolchain, and all monitoring/formatting code remain unchanged.
+This research covers ONLY the stack additions and changes needed for v3.0 features. The existing validated stack (grammY, Fastify, JSONL transcript watching, SDK query({ resume }), InlineKeyboard, message batching, debounced status edits) is not re-researched.
 
-## Current Stack (v1.0)
+## Key Finding: No New Dependencies Needed
 
-| Package | Version | Purpose | v2.0 Status |
-|---------|---------|---------|-------------|
-| `grammy` | ^1.40.1 | Telegram bot framework | **KEEP** |
-| `@grammyjs/auto-retry` | ^2.0.2 | Auto-retry on Telegram rate limits | **KEEP** |
-| `@grammyjs/parse-mode` | ^2.2.1 | HTML parse mode plugin | **KEEP** |
-| `@grammyjs/transformer-throttler` | ^1.2.1 | Message throttling | **KEEP** |
-| `fastify` | ^5.7.4 | HTTP server for hook POSTs | **REMOVE** |
-| `pino` | ^10.3.1 | Logging (Fastify default logger) | **REMOVE** |
-| `dotenv` | ^17.3.1 | Environment variable loading | **KEEP** |
-| `typescript` | ^5.9.3 | Build toolchain (dev) | **KEEP** |
-| `@types/node` | ^25.3.2 | Node.js type definitions (dev) | **KEEP** |
+All four v3.0 features can be implemented with the existing dependency set. The work is purely application-level: new formatting logic, additional Telegram API method calls already available in grammY, expanded hook endpoints, and state management patterns built on the existing in-memory Map + JSON persistence model.
 
-## Recommended Stack Changes
+---
 
-### ADD: @anthropic-ai/claude-agent-sdk
+## Feature 1: Compact Tool Output with Expand/Collapse Buttons
 
-| Property | Value |
-|----------|-------|
-| **Package** | `@anthropic-ai/claude-agent-sdk` |
-| **Version** | `^0.2.63` (latest as of 2026-03-01) |
-| **Confidence** | HIGH -- verified via `npm view`, official docs, changelog |
-| **Purpose** | Replaces Fastify hook server, tmux injection, JSONL transcript watching |
-| **Node.js requirement** | `>=18.0.0` (project already requires `>=20.0.0`, compatible) |
-| **Peer dependency** | `zod@^4.0.0` (must be installed alongside) |
-| **License** | Proprietary (Anthropic Commercial Terms of Service) |
+### What's Needed
 
-**Why this package:**
-- Official programmatic interface to Claude Code -- same tools, agent loop, and context management
-- `query()` function returns an async generator streaming `SDKMessage` events that replace ALL three v1 data sources:
-  - `SDKAssistantMessage` replaces JSONL transcript watching (text output)
-  - `PostToolUse` hook callbacks replace HTTP POST handlers (tool call events)
-  - `canUseTool` callback replaces HTTP PreToolUse blocking endpoint (approval flow)
-- `streamInput()` / AsyncIterable prompt replaces tmux `send-keys` (text input injection)
-- Session management (create, resume, fork) replaces our manual session tracking from hook payloads
-- Cross-platform -- no tmux dependency
+Transform the current verbose tool call format into `ToolName(args...)` one-liners with a 250-char limit and an inline "Expand" button that toggles to show full details.
 
-**Release cadence:** Very frequent (every 1-3 days), tracks Claude Code CLI versions. The `0.x` version indicates pre-1.0 but the API is stable with backward-compatible incremental changes. Pin to `^0.2.63` and expect regular updates.
+### Stack Assessment
 
-**Source:** [npm package](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk) | [GitHub](https://github.com/anthropics/claude-agent-sdk-typescript) | [Official docs](https://platform.claude.com/docs/en/agent-sdk/typescript)
+| Requirement | Existing Capability | Gap | Solution |
+|-------------|---------------------|-----|----------|
+| Compact one-liner formatting | `formatToolUse()` in formatter.ts already has tiered verbosity | Current format includes emoji + bold + code blocks, not `Tool(args...)` | Rewrite formatter to produce compact format |
+| Expand/collapse buttons | `InlineKeyboard` in grammY, `bot.callbackQuery()` handler pattern | No expand/collapse pattern exists | New callback_data pattern + message editing |
+| Store full content for expand | Nothing in-memory for message content | Need to store original full content keyed by message | In-memory Map with TTL cleanup |
+| Edit message on button tap | `editMessageText` used by approval flow and `StatusMessage` | Works, pattern is proven | Reuse same pattern |
 
-### ADD: zod
+### Telegram API Constraints (verified)
 
-| Property | Value |
-|----------|-------|
-| **Package** | `zod` |
-| **Version** | `^4.0.0` (peer dep requirement; latest is 4.3.6) |
-| **Confidence** | HIGH -- required peer dependency, verified via `npm view` |
-| **Purpose** | Required peer dependency of the Agent SDK; also used for `tool()` MCP definitions |
-| **Direct use** | Not required for our use case (we are not defining custom MCP tools via `tool()`), but must be installed to satisfy peer dependency |
+- **callback_data limit: 1-64 bytes UTF-8.** Current approval buttons use `approve:{toolUseId}` (44 bytes). For expand/collapse, `expand:{messageId}` is sufficient. Message IDs are integers (typically 5-8 digits), so `expand:12345678` = 16 bytes, well within limit.
+- **editMessageText** returns the edited Message object (not for inline messages). Can update both text and reply_markup in a single call. Returns error if text is identical ("message is not modified") -- already handled in TopicManager.editMessage().
+- **editMessageReplyMarkup** can swap an InlineKeyboard independently of text. Available in grammY as `ctx.editMessageReplyMarkup()` or `bot.api.editMessageReplyMarkup()`.
+- **4096 char message limit** applies to expanded content. Long tool outputs already use file attachments; expanded view should do the same truncation.
+- **Rate limit on edits: shared bucket** for editMessageText and editMessageCaption. The existing 3-second debounce on StatusMessage is sufficient protection.
 
-**Why Zod 4:** The SDK requires `^4.0.0` specifically. Zod 4 is a major version bump from Zod 3 with a different API surface. Since we only need it as a peer dep (not for direct schema validation in our code), this is a transparent dependency.
-
-**Source:** [npm peer dependency metadata](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk)
-
-### REMOVE: fastify
-
-| Property | Value |
-|----------|-------|
-| **Package** | `fastify` |
-| **Current version** | ^5.7.4 |
-| **Why remove** | The SDK's `query()` async generator and hook callbacks eliminate the need for an HTTP server. Hook events arrive as `SDKMessage` stream events and `canUseTool` callbacks, not HTTP POSTs. |
-| **Migration impact** | Delete `src/hooks/server.ts`. Rewrite `src/hooks/handlers.ts` to process `SDKMessage` events instead of HTTP payloads. Delete `src/utils/install-hooks.ts` (no hook config to install). |
-
-### REMOVE: pino
-
-| Property | Value |
-|----------|-------|
-| **Package** | `pino` |
-| **Current version** | ^10.3.1 |
-| **Why remove** | Only used as Fastify's default logger (`Fastify({ logger: true })`). With Fastify removed, Pino has no consumers. Use `console.log`/`console.warn`/`console.error` for basic logging (sufficient for a single-machine daemon). |
-| **Migration impact** | Minimal. All existing log calls already use `console.*`. |
-
-### KEEP UNCHANGED
-
-The following packages require no changes:
-
-| Package | Rationale |
-|---------|-----------|
-| `grammy` + plugins | Telegram bot layer is orthogonal to the Claude interface. The bot still manages topics, sends messages, handles callback queries. Nothing changes. |
-| `dotenv` | Still needed to load `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and now `ANTHROPIC_API_KEY`. |
-| `typescript` | Build toolchain. May need `target` bump for `await using` (V2 SDK preview), but V1 `query()` API works with current `ES2022` target. |
-| `@types/node` | Node.js types. No change needed. |
-
-## SDK API Surface Mapping
-
-How each v1.0 mechanism maps to the SDK.
-
-### Session Lifecycle
-
-| v1.0 | v2.0 SDK |
-|------|----------|
-| HTTP POST `/hooks/session-start` with `SessionStartPayload` | `SDKSystemMessage` with `subtype: "init"` contains `session_id`, `cwd`, `tools` |
-| HTTP POST `/hooks/session-end` with `SessionEndPayload` | `SDKResultMessage` with `subtype: "success"` or `"error_*"` indicates session/query completion |
-| `installHooks()` writing to `~/.claude/settings.json` | Not needed -- SDK spawns Claude Code internally, no hook config required |
-| `SessionStore.getActiveByCwd()` resume detection | `options.resume: sessionId` for session resumption |
-
-### Tool Call Monitoring
-
-| v1.0 | v2.0 SDK |
-|------|----------|
-| HTTP POST `/hooks/post-tool-use` | `SDKAssistantMessage` with `message.content` containing `tool_use` blocks |
-| `PostToolUsePayload.tool_name`, `tool_input`, `tool_response` | `content_block.name`, `content_block.input`; tool results arrive as `SDKUserMessage` with `tool_use_result` |
-| SDK hooks for programmatic callbacks | `hooks.PostToolUse` callback receives `PostToolUseHookInput` with `tool_name`, `tool_input`, `tool_response`, `tool_use_id` |
-| Verbosity filter in handler | Same filter logic, applied to SDK hook events or stream messages |
-
-### Text Output Capture
-
-| v1.0 | v2.0 SDK |
-|------|----------|
-| `TranscriptWatcher` tailing JSONL file with `fs.watch` | `SDKAssistantMessage.message.content` text blocks in the stream |
-| `onAssistantMessage(text)` callback | Filter `message.content` for `block.type === "text"` blocks |
-| Real-time streaming via `includePartialMessages: true` | `SDKPartialAssistantMessage` (type `"stream_event"`) with `content_block_delta` events |
-| `calculateContextPercentage()` from token usage | `SDKAssistantMessage.message.usage` contains `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` |
-| Context compaction detection | `SDKCompactBoundaryMessage` with `subtype: "compact_boundary"` |
-
-### Approval Flow
-
-| v1.0 | v2.0 SDK |
-|------|----------|
-| HTTP POST `/hooks/pre-tool-use` (blocking, long timeout) | `canUseTool` callback in `Options` |
-| `PreToolUsePayload` with `tool_name`, `tool_use_id`, `tool_input` | `canUseTool(toolName, input, options)` where `options.toolUseID` provides the ID |
-| `ApprovalManager.waitForDecision()` deferred promise | Same pattern: `canUseTool` returns a `Promise<PermissionResult>` that resolves when user decides |
-| Return `{ permissionDecision: "allow" }` HTTP response | Return `{ behavior: "allow", updatedInput }` from callback |
-| Return `{ permissionDecision: "deny" }` HTTP response | Return `{ behavior: "deny", message: "reason" }` from callback |
-| Auto-approve if `permission_mode === "bypassPermissions"` | Set `permissionMode: "bypassPermissions"` in SDK options (SDK handles it) |
-
-### Text Input Injection
-
-| v1.0 | v2.0 SDK |
-|------|----------|
-| `tmux send-keys` / `paste-buffer` via `TextInputManager.inject()` | `query()` with `AsyncIterable<SDKUserMessage>` prompt (streaming input mode) |
-| Queue text then inject on next poll | Yield new `SDKUserMessage` from the async generator when user sends text |
-| Bracketed paste workaround for Ink | Not needed -- SDK accepts structured messages, not terminal keystrokes |
-| `tmux` availability check | Not needed -- SDK is cross-platform |
-
-### Notifications
-
-| v1.0 | v2.0 SDK |
-|------|----------|
-| HTTP POST `/hooks/notification` | `hooks.Notification` callback OR `SDKStatusMessage` / `SDKTaskNotificationMessage` in stream |
-| `NotificationPayload.notification_type` | `NotificationHookInput.notification_type` in hook callback |
-
-## Key SDK Concepts for v2.0
-
-### Streaming Input Mode (Required)
-
-The bot MUST use **streaming input mode** because it needs multi-turn interaction (user sends text from Telegram mid-session). This means passing an `AsyncIterable<SDKUserMessage>` as the `prompt` parameter:
+### Implementation Pattern (No New Libraries)
 
 ```typescript
-import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+// callback_data format: "expand:{threadId}:{msgId}" or "collapse:{threadId}:{msgId}"
+// Both fit comfortably within 64-byte limit
 
-// AsyncGenerator that yields user messages on demand
-async function* userMessageStream(): AsyncGenerator<SDKUserMessage> {
-  // Yield initial prompt
-  yield {
-    type: "user",
-    session_id: "",
-    message: { role: "user", content: "Initial task prompt" },
-    parent_tool_use_id: null,
-  };
+// Store expanded content in-memory with auto-cleanup
+const expandableContent = new Map<string, {
+  compact: string;
+  expanded: string;
+  timestamp: number;
+}>();
 
-  // Later, when Telegram user sends text:
-  // yield another SDKUserMessage from a queued promise
-}
-
-const q = query({
-  prompt: userMessageStream(),
-  options: {
-    permissionMode: "default",
-    canUseTool: async (toolName, input, opts) => {
-      // Post to Telegram, wait for Approve/Deny button press
-      // Return { behavior: "allow" } or { behavior: "deny", message: "..." }
-    },
-    includePartialMessages: true, // For real-time tool call streaming
-    allowedTools: ["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
-  },
+// grammY callback query handler (same pattern as approval buttons)
+bot.callbackQuery(/^expand:(\d+):(\d+)$/, async (ctx) => {
+  const key = `${ctx.match[1]}:${ctx.match[2]}`;
+  const content = expandableContent.get(key);
+  if (content) {
+    await ctx.editMessageText(content.expanded, {
+      parse_mode: 'HTML',
+      reply_markup: new InlineKeyboard().text('Collapse', `collapse:${key}`),
+    });
+  }
+  await ctx.answerCallbackQuery();
 });
-
-for await (const message of q) {
-  // Route to Telegram based on message.type
-}
 ```
 
-The `Query` object also provides `streamInput(stream)` for sending additional messages and `interrupt()` for cancellation.
+### What NOT to Add
 
-### V1 vs V2 API Decision
+- **No database** for storing expanded content. In-memory Map with TTL (10-15 minute cleanup) is sufficient -- expanded content is ephemeral, and if the bot restarts the "Expand" button gracefully shows "Content no longer available."
+- **No @grammyjs/conversations plugin.** The expand/collapse is a simple stateless toggle, not a multi-step conversation flow.
+- **No @grammyjs/menu plugin.** The built-in InlineKeyboard is simpler and already used for approvals. The menu plugin adds complexity for dynamic menus we do not need.
 
-**Use V1 `query()` API.** The V2 `unstable_v2_createSession()` interface is simpler for multi-turn but:
-- All exports prefixed `unstable_` -- API may change without notice
-- Missing some features (session forking)
-- V1 is mature, well-documented, and production-ready
-- V1 streaming input mode (`AsyncIterable<SDKUserMessage>`) handles our multi-turn needs
+---
 
-Revisit V2 when it drops the `unstable_` prefix and reaches feature parity.
+## Feature 2: Permission Modes (Accept All, Same Tool, Safe Only, Until Done)
 
-### Authentication
+### What's Needed
 
-The SDK requires an API key via one of:
-1. `ANTHROPIC_API_KEY` environment variable (default, recommended)
-2. `CLAUDE_CODE_USE_BEDROCK=1` for AWS Bedrock
-3. `CLAUDE_CODE_USE_VERTEX=1` for Google Vertex AI
+Replace the binary approve/deny flow with configurable auto-acceptance modes that persist per-session.
 
-Use `ANTHROPIC_API_KEY` in the `.env` file (loaded by `dotenv`). This is a **new** environment variable -- v1.0 did not require an API key because it attached to externally-launched Claude Code sessions.
+### Permission Mode Definitions
 
-### Permission Mode
+| Mode | Behavior | Implementation |
+|------|----------|----------------|
+| **Ask** (default) | Current behavior: show button, wait for decision | No change needed |
+| **Accept All** | Auto-allow everything until mode changes | Return `permissionDecision: "allow"` in PreToolUse handler without sending Telegram message |
+| **Safe Only** | Auto-allow read-only tools (Read, Glob, Grep), ask for others | Check tool name against safe set before deciding to prompt |
+| **Same Tool** | After approving a tool once, auto-allow same tool_name for rest of session | Track approved tool names per session in a Set |
+| **Until Done** | Auto-allow everything for remainder of session (no way back except session end) | Same as Accept All but cannot be changed back |
 
-Use `permissionMode: "default"` with a `canUseTool` callback. This is the only mode that gives us programmatic control over individual approval decisions. The other modes either auto-approve everything (`bypassPermissions`, `acceptEdits`) or deny without callback (`dontAsk`).
+### Stack Assessment
 
-Processing order: PreToolUse Hook -> Deny Rules -> Allow Rules -> Ask Rules -> Permission Mode Check -> `canUseTool` Callback -> PostToolUse Hook.
+| Requirement | Existing Capability | Gap | Solution |
+|-------------|---------------------|-----|----------|
+| Per-session mode storage | `SessionInfo` has `permissionMode` field already | Field stores CLI mode, not bot mode | Add new `approvalMode` field to SessionInfo |
+| Mode switching command | `/verbose`, `/normal`, `/quiet` command pattern | No permission mode commands | Add `/approve` command with mode argument |
+| Mode buttons | InlineKeyboard for approve/deny | Need mode selector keyboard | New InlineKeyboard with mode options |
+| Tool classification | `classifyRisk()` in formatter.ts | Classifies for display, not for auto-approval decisions | New `isToolSafe()` function based on Claude Code's own read-only classification |
+| Same-tool tracking | Nothing | Need per-session approved tool set | Add `approvedTools: Set<string>` to session state |
 
-### SDK Message Types (Key Ones)
+### Claude Code's Permission Classification (verified from official docs)
 
-| Type | Constant | When It Fires | What We Do |
-|------|----------|---------------|------------|
-| `SDKSystemMessage` | `type: "system", subtype: "init"` | Session start | Create Telegram topic, capture `session_id` |
-| `SDKAssistantMessage` | `type: "assistant"` | Each assistant turn completes | Extract text blocks -> post to topic; extract tool_use blocks -> post tool calls |
-| `SDKPartialAssistantMessage` | `type: "stream_event"` | Token-by-token streaming | Real-time tool call detection (`content_block_start` for tool_use) |
-| `SDKUserMessage` | `type: "user"` | User turn (including tool results) | Ignore (we generate these) |
-| `SDKResultMessage` | `type: "result"` | Query completes | Close topic, post summary |
-| `SDKCompactBoundaryMessage` | `type: "system", subtype: "compact_boundary"` | Context compacted | Post context warning |
-| `SDKStatusMessage` | `type: "status"` | Status updates | Update status message |
-| `SDKToolUseSummaryMessage` | `type: "tool_use_summary"` | Tool call summary | Post summary to topic |
+| Tool Type | Tools | Approval Required |
+|-----------|-------|-------------------|
+| Read-only (safe) | Read, Glob, Grep, WebSearch, WebFetch | No |
+| File modification | Write, Edit, MultiEdit, NotebookEdit | Yes (until session end) |
+| Bash commands | Bash, BashBackground | Yes (permanently per project+command) |
+| Subagent | Agent | Depends on subagent permissions |
 
-### Query Object Methods
+The bot should mirror this classification for "Safe Only" mode:
+- **Auto-allow:** Read, Glob, Grep, WebSearch, WebFetch
+- **Still ask:** Bash, BashBackground, Write, Edit, MultiEdit, NotebookEdit, Agent, and any unknown/MCP tools
 
-| Method | Purpose | Our Use |
-|--------|---------|---------|
-| `interrupt()` | Cancel current turn | When user sends /stop from Telegram |
-| `close()` | Terminate session | On session end or bot shutdown |
-| `streamInput(stream)` | Send additional messages | Inject user text from Telegram replies |
-| `setPermissionMode(mode)` | Change permission mode | Not needed (always "default") |
+### Implementation Pattern (No New Libraries)
 
-## Installation Commands
+The decision logic goes into the PreToolUse HTTP handler in `server.ts`, before sending the Telegram message. The existing `ApprovalManager.waitForDecision()` is only called when the mode requires user interaction.
 
-```bash
-# Add new dependencies
-npm install @anthropic-ai/claude-agent-sdk zod
+```typescript
+// New type in types/sessions.ts
+type ApprovalMode = 'ask' | 'accept-all' | 'safe-only' | 'same-tool' | 'until-done';
 
-# Remove obsolete dependencies
-npm uninstall fastify pino
-```
-
-## Environment Variables
-
-### New
-
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `ANTHROPIC_API_KEY` | Yes | Claude API authentication for SDK |
-
-### Unchanged
-
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `TELEGRAM_BOT_TOKEN` | Yes | grammY bot authentication |
-| `TELEGRAM_CHAT_ID` | Yes | Target Telegram group |
-| `DEFAULT_VERBOSITY` | No | Message verbosity filter |
-| `APPROVAL_TIMEOUT_MS` | No | How long to wait for user approval |
-| `SUMMARY_INTERVAL_MS` | No | Periodic summary frequency |
-
-### Removed
-
-| Variable | Reason |
-|----------|--------|
-| `HOOK_SERVER_PORT` | No HTTP server needed |
-| `HOOK_SERVER_HOST` | No HTTP server needed |
-
-## TypeScript Configuration
-
-Current `tsconfig.json` works as-is for V1 SDK API:
-
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "Node16",
-    "moduleResolution": "Node16",
-    "strict": true
+// Decision logic in PreToolUse handler
+function shouldAutoApprove(
+  mode: ApprovalMode,
+  toolName: string,
+  approvedTools: Set<string>,
+): boolean {
+  switch (mode) {
+    case 'accept-all':
+    case 'until-done':
+      return true;
+    case 'safe-only':
+      return SAFE_TOOLS.has(toolName);
+    case 'same-tool':
+      return approvedTools.has(toolName);
+    case 'ask':
+    default:
+      return false;
   }
 }
 ```
 
-No changes needed. If V2 preview is adopted later (uses `await using`), bump target to `ES2024` or add `lib: ["ESNext.Disposable"]`.
+### What NOT to Add
 
-## Source File Impact Analysis
+- **No PermissionRequest hook.** The existing PreToolUse hook provides everything needed. PermissionRequest is a separate hook that fires when Claude Code's own permission dialog appears -- our bot intercepts at the PreToolUse level, which is earlier and gives us full control.
+- **No persistent mode storage beyond session lifetime.** Permission modes reset when sessions end. This matches Claude Code's own behavior where `acceptEdits` mode is session-scoped.
+- **No AUTO_APPROVE env var changes.** The existing `AUTO_APPROVE=true` config is a global override. The new modes are per-session, user-selectable, and more granular.
 
-### Files to DELETE
+---
 
-| File | Reason |
-|------|--------|
-| `src/hooks/server.ts` | Fastify HTTP server -- replaced by SDK stream |
-| `src/utils/install-hooks.ts` | Hook auto-installer -- SDK spawns Claude internally |
-| `src/monitoring/transcript-watcher.ts` | JSONL file watcher -- replaced by SDK stream events |
-| `src/control/input-manager.ts` | tmux text injection -- replaced by SDK streaming input |
+## Feature 3: Subagent Visibility
 
-### Files to REWRITE
+### What's Needed
 
-| File | Change |
-|------|--------|
-| `src/hooks/handlers.ts` | Transform from HTTP payload handlers to SDK message/hook processors |
-| `src/index.ts` | Replace Fastify server + hook install with SDK `query()` loop |
-| `src/types/hooks.ts` | Replace custom hook payload types with SDK-provided types |
-| `src/types/sessions.ts` | Simplify: remove `tmuxPane`, `transcriptPath` fields |
-| `src/config.ts` | Remove hook server config, add API key config |
+Show when subagents start/stop, what type they are, and their tool calls, with clear visual labeling distinguishing main agent vs subagent activity.
 
-### Files to KEEP (Minor Updates)
+### Stack Assessment
 
-| File | Change |
-|------|--------|
-| `src/bot/bot.ts` | No change -- grammY bot setup is independent |
-| `src/bot/topics.ts` | No change -- topic management is independent |
-| `src/bot/rate-limiter.ts` | No change -- Telegram rate limiting still needed |
-| `src/bot/formatter.ts` | Minor updates to accept SDK types instead of custom hook types |
-| `src/monitoring/status-message.ts` | Minor updates -- data source changes but status message logic stays |
-| `src/monitoring/summary-timer.ts` | Minor updates -- same concept, different data source |
-| `src/monitoring/verbosity.ts` | No change -- filter logic is independent of data source |
-| `src/control/approval-manager.ts` | Minor refactor -- same deferred-promise pattern, now resolves `PermissionResult` instead of custom type |
-| `src/sessions/session-store.ts` | Simplify -- remove tmux-specific fields |
-| `src/utils/text.ts` | No change -- text formatting utilities are independent |
+| Requirement | Existing Capability | Gap | Solution |
+|-------------|---------------------|-----|----------|
+| Detect subagent start | No SubagentStart hook endpoint | Need new HTTP endpoint | Add `/hooks/subagent-start` to Fastify server |
+| Detect subagent stop | No SubagentStop hook endpoint | Need new HTTP endpoint | Add `/hooks/subagent-stop` to Fastify server |
+| Track active subagents | SessionStore tracks sessions, not subagents | Need subagent tracking per session | Add `activeSubagents: Map<string, SubagentInfo>` to session state |
+| Identify which agent made a tool call | Hooks do NOT include agent_id in PreToolUse/PostToolUse | **Cannot determine from hooks alone** | Parse transcript JSONL for `isSidechain` field |
+| Display agent identity in messages | Formatter has no agent context | Need agent label in formatted output | Add optional `agentLabel` parameter to format functions |
 
-## Version Compatibility Matrix
+### Critical Finding: Hook Limitations for Agent Identity
 
-| Component | Minimum | Current | Notes |
-|-----------|---------|---------|-------|
-| Node.js | 18.0.0 (SDK) / 20.0.0 (project) | 25.0.0 | Project min is stricter, compatible |
-| TypeScript | 5.0 (SDK V1) / 5.2 (SDK V2) | 5.9.3 | Compatible with both V1 and V2 |
-| Zod | 4.0.0 | 4.3.6 | Required peer dependency |
-| grammY | 1.x | 1.40.1 | Independent of SDK, no change |
-| Agent SDK | 0.2.63 | 0.2.63 | Pin to ^0.2.x for stability |
+**The PreToolUse and PostToolUse hooks do NOT include `agent_id`, `agent_type`, or any field identifying which agent made the tool call.** This was confirmed by reviewing:
+- Official hooks documentation (common input fields: session_id, transcript_path, cwd, permission_mode, hook_event_name only)
+- GitHub issue #16126 requesting agent identity in PreToolUse (CLOSED as NOT PLANNED)
+- GitHub issue #21481 requesting agent context fields (CLOSED as COMPLETED, but not visible in current common hook input schema)
 
-## Alternatives Considered
+**Consequence:** We cannot reliably label individual PostToolUse messages with their originating agent purely from hook data. Two approaches exist:
 
-| Category | Recommended | Alternative | Why Not |
-|----------|-------------|-------------|---------|
-| Claude interface | Agent SDK `query()` | Raw Anthropic API SDK (`@anthropic-ai/sdk`) | SDK provides built-in tools, agent loop, context management. Raw API requires implementing tool execution ourselves -- thousands of lines of code we don't need to write. |
-| Claude interface | Agent SDK `query()` | Claude Code CLI (`--print`, `--output-format stream-json`) | CLI is for one-shot tasks or CI. No `canUseTool` callback support for programmatic approval. |
-| SDK API version | V1 `query()` | V2 `unstable_v2_createSession()` | V2 is unstable preview, missing features. V1 is production-ready. |
-| Session model | Streaming input (AsyncIterable) | Single message + resume | Streaming gives real-time multi-turn, which maps directly to Telegram conversation flow. Single message + resume adds latency per turn and loses in-progress context. |
-| Logging | `console.*` | Pino standalone | Overkill for a single-machine daemon. Can add structured logging later if needed. |
-| HTTP hook bridge | Remove entirely | Keep Fastify alongside SDK | Redundant. SDK hooks are in-process callbacks, not HTTP endpoints. No reason to keep a server. |
-| Session model | Bot manages sessions | Attach to external sessions | v1.0 attached to externally-launched sessions. v2.0 bot launches and manages Claude Code directly via SDK, giving full lifecycle control. |
+#### Approach A: SubagentStart/Stop Hooks + Heuristic (RECOMMENDED)
 
-## SDK Versioning Risk Assessment
+Use SubagentStart and SubagentStop hooks to track active subagent windows. When a subagent is active and a PostToolUse arrives, it *might* be from that subagent, but there is no guarantee (the main agent can also make tool calls while subagents run).
 
-The SDK is at `0.2.x` (pre-1.0). Mitigations:
+**Advantages:** Simple, no extra parsing, gives start/stop lifecycle messages.
+**Limitations:** Cannot definitively attribute individual tool calls to subagents. Acceptable for v3.0 -- the goal is "see what subagents are doing" not "perfectly attribute every call."
 
-1. **Rapid release cadence** (every 1-3 days) means bugs get fixed quickly
-2. **No breaking changes** observed in recent changelog (0.2.40 through 0.2.63)
-3. **Parity with Claude Code CLI** -- SDK version tracks CLI version, both maintained by Anthropic
-4. **V1 API is stable** -- the `query()` function, `SDKMessage` types, and `canUseTool` callback have been stable across all 0.2.x releases
-5. The `0.x` version primarily reflects the rapid iteration pace, not instability
-6. Pin to `^0.2.63` to get patches but avoid hypothetical future major changes
+SubagentStart hook payload (verified):
+```json
+{
+  "session_id": "abc123",
+  "hook_event_name": "SubagentStart",
+  "agent_id": "agent-abc123",
+  "agent_type": "Explore"
+}
+```
+
+SubagentStop hook payload (verified):
+```json
+{
+  "session_id": "abc123",
+  "hook_event_name": "SubagentStop",
+  "agent_id": "def456",
+  "agent_type": "Explore",
+  "agent_transcript_path": "~/.claude/projects/.../subagents/agent-def456.jsonl",
+  "last_assistant_message": "Analysis complete..."
+}
+```
+
+#### Approach B: Transcript Parsing for Sidechain Attribution
+
+The existing `TranscriptWatcher` already reads JSONL entries and has access to the `isSidechain` field. Currently it filters OUT sidechain entries (`if (entry.isSidechain) return;`). This could be changed to process sidechain entries separately and emit them with an agent label.
+
+**Advantages:** More accurate attribution.
+**Limitations:** Transcript entries do not reliably include the agent_id or agent_type. The `isSidechain: true` flag tells you it is a subagent, but not which one. Would need to correlate with SubagentStart timing.
+
+#### Recommended Hybrid Approach
+
+1. Add SubagentStart/SubagentStop HTTP hook endpoints to Fastify
+2. Track active subagents per session (agent_id, agent_type, start time)
+3. Post lifecycle messages: "Subagent Explore started", "Subagent Explore finished: {last_assistant_message summary}"
+4. In TranscriptWatcher, process `isSidechain: true` entries and emit them as subagent messages (currently skipped)
+5. Label subagent messages with a visual prefix like `[Explore]` in the Telegram output
+
+### Hook Installation Changes
+
+The `installHooks()` function in `utils/install-hooks.ts` needs two new entries:
+
+```typescript
+SubagentStart: [
+  {
+    matcher: '',
+    hooks: [
+      { type: 'http', url: `${baseUrl}/hooks/subagent-start`, timeout: 10 },
+    ],
+  },
+],
+SubagentStop: [
+  {
+    matcher: '',
+    hooks: [
+      { type: 'http', url: `${baseUrl}/hooks/subagent-stop`, timeout: 10 },
+    ],
+  },
+],
+```
+
+### New Types Needed
+
+```typescript
+// In types/hooks.ts
+interface SubagentStartPayload extends HookPayload {
+  hook_event_name: 'SubagentStart';
+  agent_id: string;
+  agent_type: string;  // 'Bash' | 'Explore' | 'Plan' | custom agent names
+}
+
+interface SubagentStopPayload extends HookPayload {
+  hook_event_name: 'SubagentStop';
+  agent_id: string;
+  agent_type: string;
+  agent_transcript_path: string;
+  last_assistant_message: string;
+  stop_hook_active: boolean;
+}
+
+// In types/sessions.ts or new file
+interface SubagentInfo {
+  agentId: string;
+  agentType: string;
+  startedAt: string;
+}
+```
+
+### What NOT to Add
+
+- **No separate transcript watcher per subagent.** The SubagentStop hook includes `last_assistant_message` which provides the summary. Reading `agent_transcript_path` JSONL files for every subagent would be expensive and complex.
+- **No WebSocket or streaming connection to Claude Code.** The hook-based architecture is sufficient for lifecycle events.
+- **No SDK `canUseTool` callback.** This was explicitly deferred to v2.1 and is out of scope for v3.0.
+
+---
+
+## Feature 4: /clear Topic Reuse with New Pinned Status
+
+### What's Needed
+
+When the user runs `/clear` in Claude Code, reuse the existing Telegram topic instead of closing it and creating a new one. Post a visual separator and re-pin a fresh status message.
+
+### Stack Assessment
+
+| Requirement | Existing Capability | Gap | Solution |
+|-------------|---------------------|-----|----------|
+| Detect /clear event | SessionStart hook with `source: "clear"` | Currently treated as new session creation | Add special handling for `source === "clear"` |
+| Send separator message | `TopicManager.sendMessage()` | No separator format | New formatter function for clear separator |
+| Unpin old status | `bot.api.unpinChatMessage()` available in grammY | Not currently used | Add `unpinMessage()` to TopicManager |
+| Pin new status | `StatusMessage.initialize()` creates + pins | Assumes fresh topic | Call initialize() on existing topic's threadId |
+| Reset session counters | SessionStore tracks toolCallCount, filesChanged | No reset method | Add `resetSession()` method to SessionStore |
+
+### Telegram API Methods Needed (already in grammY)
+
+- `unpinChatMessage(chatId, { message_id })` -- unpin the old status message
+- `unpinAllChatMessages(chatId)` -- alternative: clear all pins in topic (simpler but more aggressive)
+- The existing `sendMessage` + `pinChatMessage` flow for the new status message
+
+### SessionStart Source Detection
+
+The SessionStart hook payload already includes `source: "clear"`. The existing `handleSessionStart()` only checks for `source === "resume"`. Adding `source === "clear"` handling follows the same pattern:
+
+```typescript
+if (payload.source === 'clear') {
+  const existing = this.sessionStore.getActiveByCwd(payload.cwd);
+  if (existing) {
+    // Reuse topic: post separator, reset counters, new status message
+    // Do NOT create new topic or close existing one
+  }
+}
+```
+
+### What NOT to Add
+
+- **No topic deletion/recreation.** The entire point is reusing the existing topic.
+- **No message history clearing.** Telegram does not support bulk message deletion in topics by bots. The separator message visually delineates the old vs new context.
+
+---
+
+## Recommended Stack (Unchanged Core + Application Changes)
+
+### Core Technologies (No Changes)
+
+| Technology | Version | Purpose | Status |
+|------------|---------|---------|--------|
+| grammy | ^1.40.1 | Telegram bot framework | KEEP -- provides all needed API methods |
+| @grammyjs/auto-retry | ^2.0.2 | Rate limit handling | KEEP |
+| @grammyjs/transformer-throttler | ^1.2.1 | API request throttling | KEEP |
+| fastify | ^5.7.4 | HTTP hook server | KEEP -- add 2 new endpoints |
+| @anthropic-ai/claude-agent-sdk | ^0.2.63 | SDK input delivery | KEEP |
+| typescript | ^5.9.3 | Language | KEEP |
+
+### Supporting Libraries (No Changes)
+
+| Library | Version | Purpose | Status |
+|---------|---------|---------|--------|
+| dotenv | ^17.3.1 | Environment config | KEEP |
+| pino | ^10.3.1 | Structured logging | KEEP |
+| zod | ^4.3.6 | Schema validation | KEEP (not currently used but available) |
+
+### What NOT to Add
+
+| Avoid | Why | What to Do Instead |
+|-------|-----|-------------------|
+| Redis / SQLite / any database | Expandable content and subagent state are ephemeral, session-scoped | In-memory Maps with TTL cleanup |
+| @grammyjs/menu | Over-engineered for simple expand/collapse and mode-select keyboards | Built-in InlineKeyboard class |
+| @grammyjs/conversations | No multi-step conversation flows needed | Direct callback query handlers |
+| @grammyjs/hydrate | Adds method shortcuts to message objects; not needed for our patterns | Direct `bot.api.*` calls |
+| @grammyjs/stateless-question | Text input already works via the existing message handler | Keep existing text handler |
+| Any state management library | Session state is simple enough for plain Maps + JSON persistence | SessionStore pattern |
+| WebSocket libraries | Hook architecture is sufficient; no need for persistent connections | HTTP hooks |
+
+---
+
+## Installation Commands
+
+```bash
+# No new packages to install. Existing dependencies cover all v3.0 features.
+# Verify current versions are up to date:
+npm outdated
+```
+
+---
+
+## Application-Level Changes Summary
+
+### New Files Needed
+
+| File | Purpose |
+|------|---------|
+| `src/types/approval.ts` | ApprovalMode type, SubagentInfo interface, safe tool set |
+
+No new library-level dependencies required.
+
+### Modified Files
+
+| File | Changes |
+|------|---------|
+| `src/types/hooks.ts` | Add SubagentStartPayload, SubagentStopPayload |
+| `src/types/sessions.ts` | Add `approvalMode`, `approvedTools`, `activeSubagents` fields |
+| `src/types/config.ts` | Add `defaultApprovalMode` config option |
+| `src/bot/formatter.ts` | Rewrite tool format to compact one-liner; add expand content generation; add subagent labels |
+| `src/bot/bot.ts` | Add expand/collapse callback query handlers; add `/approve` command handler |
+| `src/hooks/handlers.ts` | Add handleSubagentStart/Stop; modify handleSessionStart for /clear source |
+| `src/hooks/server.ts` | Add `/hooks/subagent-start` and `/hooks/subagent-stop` endpoints |
+| `src/control/approval-manager.ts` | Add approval mode logic to bypass waitForDecision when auto-approving |
+| `src/monitoring/transcript-watcher.ts` | Process `isSidechain: true` entries instead of skipping them |
+| `src/monitoring/status-message.ts` | Add permission mode display to status message |
+| `src/utils/install-hooks.ts` | Add SubagentStart and SubagentStop hook installation |
+| `src/index.ts` | Wire new handlers; add expandable content store; add subagent tracking |
+| `src/sessions/session-store.ts` | Add resetSession(), approval mode methods |
+| `src/config.ts` | Parse DEFAULT_APPROVAL_MODE env var |
+| `src/bot/topics.ts` | Add `unpinMessage()` method for /clear flow |
+
+### New Environment Variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `DEFAULT_APPROVAL_MODE` | `ask` | Default permission mode for new sessions |
+
+### Changed Environment Variable Defaults
+
+| Variable | Old Default | New Default | Reason |
+|----------|-------------|-------------|--------|
+| `APPROVAL_TIMEOUT_MS` | `300000` (5 min) | `0` (infinite) | v3.0 requirement: "No permission timeout -- wait forever" |
+
+---
+
+## Version Compatibility
+
+| Package | Compatible With | Notes |
+|---------|-----------------|-------|
+| grammy@^1.40.1 | @grammyjs/auto-retry@^2.0.2, @grammyjs/transformer-throttler@^1.2.1 | All grammY ecosystem packages maintain backward compat within major versions |
+| grammy@^1.40.1 | Telegram Bot API 9.x | grammY 1.x supports all current Bot API features including editMessageReplyMarkup, unpinChatMessage |
+| fastify@^5.7.4 | Node.js >=20.0.0 | Matches project engines requirement |
+| typescript@^5.9.3 | All project dependencies | ESM-first, all deps provide TS types |
+
+---
 
 ## Confidence Assessment
 
 | Area | Confidence | Reason |
 |------|------------|--------|
-| SDK package choice | HIGH | Official Anthropic SDK, verified on npm, comprehensive docs |
-| SDK API surface (`query`, `canUseTool`, message types) | HIGH | Verified against official TypeScript reference docs |
-| Zod peer dependency | HIGH | Verified via `npm view @anthropic-ai/claude-agent-sdk peerDependencies` |
-| Removal of Fastify | HIGH | SDK eliminates need for HTTP hook server entirely |
-| Removal of Pino | MEDIUM | Only used by Fastify; could add back later for structured logging |
-| V1 vs V2 decision | MEDIUM | V2 is objectively simpler but unstable; V1 is safer for production |
-| Streaming input pattern for multi-turn | HIGH | Documented with examples, matches our multi-turn Telegram flow exactly |
-| canUseTool for approval flow | HIGH | Documented pattern, maps directly to existing `ApprovalManager.waitForDecision()` |
-| Token usage from SDK messages | MEDIUM | `message.usage` is documented on `BetaMessage`; exact field mapping for context % needs verification during implementation |
+| No new dependencies needed | HIGH | Verified all required Telegram API methods exist in grammY; all patterns are variations of existing code |
+| Expand/collapse buttons | HIGH | Verified callback_data limits (64 bytes), editMessageText behavior, InlineKeyboard patterns -- all work |
+| Permission modes | HIGH | PreToolUse hook provides full control; tool classification verified against Claude Code official docs |
+| Subagent visibility | MEDIUM | SubagentStart/SubagentStop hooks verified and well-documented; agent attribution for individual tool calls is LIMITED by hook design -- agent_id is not included in PostToolUse payloads |
+| /clear topic reuse | HIGH | SessionStart `source: "clear"` verified in hooks docs; topic reuse is straightforward Telegram API |
+| Infinite approval timeout | HIGH | Change default from 300000 to 0 and adjust timeout logic to treat 0 as "no timeout" |
 
 ## Sources
 
-- [npm: @anthropic-ai/claude-agent-sdk](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk) -- package metadata, version 0.2.63, peer deps confirmed
-- [Agent SDK TypeScript Reference](https://platform.claude.com/docs/en/agent-sdk/typescript) -- full API: `query()`, `Options`, `CanUseTool`, `PermissionResult`, all `SDKMessage` types
-- [Agent SDK Overview](https://platform.claude.com/docs/en/agent-sdk/overview) -- capabilities, architecture, built-in tools, hooks, subagents, MCP, permissions, sessions
-- [Agent SDK Quickstart](https://platform.claude.com/docs/en/agent-sdk/quickstart) -- installation, prerequisites (Node.js 18+), basic usage, permission modes
-- [Streaming Input Modes](https://platform.claude.com/docs/en/agent-sdk/streaming-vs-single-mode) -- streaming vs single message, AsyncIterable pattern, multi-turn flow
-- [Streaming Output](https://platform.claude.com/docs/en/agent-sdk/streaming-output) -- `includePartialMessages`, `SDKPartialAssistantMessage`, `content_block_delta` events
-- [Handle Approvals and User Input](https://platform.claude.com/docs/en/agent-sdk/user-input) -- `canUseTool` callback, `PermissionResult`, `AskUserQuestion` tool
-- [Session Management](https://platform.claude.com/docs/en/agent-sdk/sessions) -- session IDs, resume, fork, persistence
-- [TypeScript V2 Preview](https://platform.claude.com/docs/en/agent-sdk/typescript-v2-preview) -- `unstable_v2_createSession()`, `send()`, `stream()`, unstable status
-- [Migration Guide](https://platform.claude.com/docs/en/agent-sdk/migration-guide) -- from Claude Code SDK to Agent SDK, breaking changes
-- [GitHub Changelog](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md) -- release history, version 0.2.63 latest
-- `npm view` on local machine -- version 0.2.63, `peerDependencies: { zod: '^4.0.0' }`, `engines: { node: '>=18.0.0' }`
+- [Telegram Bot API official documentation](https://core.telegram.org/bots/api) -- callback_data 1-64 byte limit, editMessageText, message limits
+- [Telegram API limits](https://limits.tginfo.me/en) -- rate limits for edit operations
+- [grammY InlineKeyboard plugin docs](https://grammy.dev/plugins/keyboard) -- keyboard builder API, callback query handling
+- [grammY API reference](https://grammy.dev/ref/core/api) -- editMessageText, editMessageReplyMarkup return types
+- [Claude Code Hooks reference](https://code.claude.com/docs/en/hooks) -- SubagentStart/SubagentStop schemas, common input fields, PreToolUse decision control
+- [Claude Code Permissions documentation](https://code.claude.com/docs/en/permissions) -- permission modes (default, acceptEdits, plan, dontAsk, bypassPermissions), tool type classification
+- [GitHub issue #16126](https://github.com/anthropics/claude-code/issues/16126) -- agent identity NOT available in PreToolUse hooks (closed as NOT PLANNED)
+- [GitHub issue #21481](https://github.com/anthropics/claude-code/issues/21481) -- agent context fields request (closed as COMPLETED but not in current common hook input)
+- [GitHub issue #7881](https://github.com/anthropics/claude-code/issues/7881) -- SubagentStop shared session_id limitation
+- [GitHub issue #13326](https://github.com/anthropics/claude-code/issues/13326) -- sidechain transcript format, isSidechain field behavior
 
 ---
-*Stack research for: Claude Code Telegram Bridge v2.0 SDK Migration*
+*Stack research for: Claude Code Telegram Bridge v3.0 UX Overhaul*
 *Researched: 2026-03-01*
