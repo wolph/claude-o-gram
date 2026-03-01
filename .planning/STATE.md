@@ -4,16 +4,16 @@ milestone: v2.0
 milestone_name: SDK Input Migration
 current_phase: 4
 current_phase_name: SDK Resume Input
-current_plan: Not started
-status: ready_to_plan
+current_plan: 2 of 2
+status: in_progress
 last_updated: "2026-03-01"
 last_activity: 2026-03-01
 progress:
   total_phases: 2
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_plans: 2
+  completed_plans: 1
+  percent: 25
 ---
 
 # Project State
@@ -23,20 +23,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-01)
 
 **Core value:** See what Claude Code is doing and respond to its questions from anywhere, without needing to be at the terminal.
-**Current focus:** v2.0 SDK Input Migration -- Phase 4: SDK Resume Input (ready to plan)
+**Current focus:** v2.0 SDK Input Migration -- Phase 4: SDK Resume Input (plan 1 of 2 complete)
 
 ## Current Position
 
 **Phase:** 4 of 5 (SDK Resume Input)
 **Current Phase Name:** SDK Resume Input
 **Total Phases:** 2 (v2.0 milestone)
-**Current Plan:** Not started (ready to plan)
-**Total Plans in Phase:** TBD
-**Status:** Ready to plan
+**Current Plan:** 2 of 2
+**Total Plans in Phase:** 2
+**Status:** In progress
 **Last Activity:** 2026-03-01
-**Last Activity Description:** Roadmap created for v2.0 milestone
+**Last Activity Description:** Completed 04-01: SDK deps, config, SdkInputManager
 
-**Progress:** [░░░░░░░░░░] 0%
+**Progress:** [##░░░░░░░░] 25%
 
 ## Performance Metrics
 
@@ -58,6 +58,12 @@ See: .planning/PROJECT.md (updated 2026-03-01)
 | Phase 03 P01 | 3min | 2 tasks | 9 files |
 | Phase 03 P02 | 5min | 2 tasks | 6 files |
 
+**By Phase (v2.0):**
+
+| Phase | Plans | Total | Avg/Plan |
+|-------|-------|-------|----------|
+| Phase 04 P01 | 2min | 2 tasks | 5 files |
+
 ## Accumulated Context
 
 ### Decisions
@@ -69,6 +75,9 @@ Recent decisions affecting current work:
 - [v2.0]: Double-turn bug (#207) workaround: one-shot query per user message with resume
 - [v2.0]: Hook infrastructure (Fastify, transcript watcher) STAYS in v2.0 -- only tmux injection replaced
 - [v2.0]: Phase 4 builds SDK input, Phase 5 removes tmux code (build new before removing old)
+- [04-01]: Used settingSources: [] to avoid loading filesystem settings during resume
+- [04-01]: Query stream drained but NOT processed for Telegram (hook server handles output)
+- [04-01]: 5-minute AbortController timeout per query to prevent orphaned processes
 
 ### Pending Todos
 
@@ -82,5 +91,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-01
-Stopped at: Roadmap created for v2.0 milestone, ready to plan Phase 4
+Stopped at: Completed 04-01-PLAN.md (SDK deps, config, SdkInputManager)
 Resume file: None
