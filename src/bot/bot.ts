@@ -5,11 +5,13 @@ import type { AppConfig } from '../types/config.js';
 import type { SessionStore } from '../sessions/session-store.js';
 import type { VerbosityTier } from '../types/monitoring.js';
 import type { ApprovalManager } from '../control/approval-manager.js';
-import type { SdkInputManager } from '../sdk/input-manager.js';
+import type { InputRouter } from '../input/input-router.js';
+import type { CommandRegistry } from './command-registry.js';
 import {
   formatApprovalResult,
   formatApprovalExpired,
 } from './formatter.js';
+import { expandCache, cacheKey, buildExpandedHtml } from './expand-cache.js';
 
 /** Bot context type alias for use across the bot module */
 export type BotContext = Context;
@@ -28,7 +30,8 @@ export async function createBot(
   config: AppConfig,
   sessionStore: SessionStore,
   approvalManager: ApprovalManager,
-  sdkInputManager: SdkInputManager,
+  inputRouter: InputRouter,
+  commandRegistry: CommandRegistry,
 ): Promise<Bot<BotContext>> {
   const bot = new Bot<BotContext>(config.telegramBotToken);
 
@@ -172,10 +175,101 @@ export async function createBot(
     }
   });
 
-  // --- Phase 4: Text input handler (SDK-only) ---
+  // --- Phase 6: Expand/collapse callback query handlers ---
+
+  // Handle Expand button taps
+  bot.callbackQuery(/^exp:(\d+)$/, async (ctx) => {
+    const messageId = parseInt(ctx.match[1]);
+    const key = cacheKey(config.telegramChatId, messageId);
+    const entry = expandCache.get(key);
+    if (!entry) {
+      await ctx.answerCallbackQuery({ text: 'Content no longer available', show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery(); // dismiss loading spinner
+    const expandedHtml = buildExpandedHtml(entry);
+    const collapseKeyboard = new InlineKeyboard().text('\u25C2 Collapse', `col:${messageId}`);
+    try {
+      await ctx.editMessageText(expandedHtml, {
+        parse_mode: 'HTML',
+        reply_markup: collapseKeyboard,
+      });
+    } catch (err) {
+      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+        console.warn('Failed to expand message:', err instanceof Error ? err.message : err);
+      }
+    }
+  });
+
+  // Handle Collapse button taps
+  bot.callbackQuery(/^col:(\d+)$/, async (ctx) => {
+    const messageId = parseInt(ctx.match[1]);
+    const key = cacheKey(config.telegramChatId, messageId);
+    const entry = expandCache.get(key);
+    if (!entry) {
+      await ctx.answerCallbackQuery({ text: 'Content no longer available', show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery();
+    const expandKeyboard = new InlineKeyboard().text('\u25B8 Expand', `exp:${messageId}`);
+    try {
+      await ctx.editMessageText(entry.compact, {
+        parse_mode: 'HTML',
+        reply_markup: expandKeyboard,
+      });
+    } catch (err) {
+      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+        console.warn('Failed to collapse message:', err instanceof Error ? err.message : err);
+      }
+    }
+  });
+
+  // --- CLI command forwarding (catch-all for non-bot-native commands) ---
+  bot.on('message:text', async (ctx, next) => {
+    const text = ctx.message.text;
+    if (!text.startsWith('/')) return next(); // Not a command, pass to text handler
+
+    const threadId = ctx.message.message_thread_id;
+    if (!threadId) return next(); // Not in a forum topic
+
+    const session = sessionStore.getByThreadId(threadId);
+    if (!session || session.status !== 'active') return next();
+
+    // Parse command: "/gsd_progress args" or "/gsd_progress@botname args"
+    const match = text.match(/^\/([a-z0-9_]+)(?:@\w+)?(?:\s+(.*))?$/);
+    if (!match) return next();
+
+    const [, tgCommand, args] = match;
+
+    // Skip bot-native commands (already handled by bot.command() above)
+    if (commandRegistry.isBotNative(tgCommand)) return next();
+
+    // Reverse-map to Claude name
+    const claudeName = commandRegistry.toClaudeName(tgCommand);
+    const cliCommand = claudeName
+      ? `/${claudeName}${args ? ' ' + args : ''}`
+      : `/${tgCommand}${args ? ' ' + args : ''}`;
+
+    const result = await inputRouter.send(session.sessionId, cliCommand);
+
+    if (result.status === 'sent') {
+      try {
+        await ctx.react('\u26A1');
+      } catch {
+        // Reaction not supported
+      }
+    } else {
+      await ctx.reply(
+        `\u274C Failed to send command: ${result.error}`,
+        { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
+      );
+    }
+  });
+
+  // --- Text input handler (tmux / FIFO / SDK resume) ---
 
   // Listen for text messages in forum topics.
-  // When user replies in a session topic, feed text to Claude Code via SDK resume.
+  // Routes input to the appropriate sender for the session.
   bot.on('message:text', async (ctx) => {
     const threadId = ctx.message.message_thread_id;
     if (!threadId) return; // Not in a forum topic
@@ -185,9 +279,6 @@ export async function createBot(
     if (!session) return; // Not a managed session topic
     if (session.status !== 'active') return; // Session is closed
 
-    // Skip bot commands (handled by command handlers above)
-    if (ctx.message.text.startsWith('/')) return;
-
     // Build input text, including quoted message context if replying to a specific message
     let text = ctx.message.text;
     const replied = ctx.message.reply_to_message;
@@ -195,11 +286,7 @@ export async function createBot(
       text = `[Quoting: "${replied.text}"]\n\n${text}`;
     }
 
-    const result = await sdkInputManager.send(
-      session.sessionId,
-      text,
-      session.cwd,
-    );
+    const result = await inputRouter.send(session.sessionId, text);
 
     if (result.status === 'sent') {
       try {
