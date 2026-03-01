@@ -1,96 +1,74 @@
-# Requirements: Claude Code Telegram Bridge
+# Requirements: Claude Code Telegram Bridge v2.0
 
-**Defined:** 2026-02-28
+**Defined:** 2026-03-01
 **Core Value:** See what Claude Code is doing and respond to its questions from anywhere, without needing to be at the terminal.
 
-## v1 Requirements
+## v2.0 Requirements
 
-Requirements for initial release. Each maps to roadmap phases.
+Replace tmux text injection with Claude Agent SDK for reliable, cross-platform input delivery.
 
-### Session Management
+### SDK Input
 
-- [x] **SESS-01**: Bot auto-creates a Telegram forum topic when a Claude Code session starts (via SessionStart hook)
-- [x] **SESS-02**: Bot auto-closes the topic when the Claude Code session ends (via SessionEnd hook)
-- [x] **SESS-03**: Bot auto-discovers new sessions without manual registration
-- [x] **SESS-04**: Concurrent sessions each get their own topic with isolated message routing
-- [x] **SESS-05**: Each machine runs its own bot with a separate BotFather token, appearing as a distinct group member
+- [ ] **SDK-01**: Text input from Telegram is delivered to Claude Code via SDK `query({ resume })` instead of tmux injection
+- [ ] **SDK-02**: SDK input works cross-platform (no tmux dependency for text delivery)
+- [ ] **SDK-03**: Quoted message context is included when user replies to a specific bot message
 
-### Monitoring
+### Reliability
 
-- [x] **MNTR-01**: Tool calls (file reads, edits, bash commands) are posted to the session topic via PostToolUse hook
-- [x] **MNTR-02**: Claude's text output is captured by parsing JSONL transcript files and posted to the topic
-- [x] **MNTR-03**: Notification hook events (permission prompts, idle alerts) are forwarded to the topic
-- [x] **MNTR-04**: Messages are batched and queued to stay under Telegram's 20 msg/min rate limit
-- [x] **MNTR-05**: A live-updating status message in each topic shows remaining context window and quota usage (updated via editMessageText)
-- [x] **MNTR-06**: Periodic summary updates aggregate activity ("Working on X, 3 files edited")
+- [ ] **REL-01**: Text input reliably submits (no more "flash and disappear" tmux issues)
+- [ ] **REL-02**: Input delivery confirms success via message reaction
 
-### Control
+### Cleanup
 
-- [x] **CTRL-01**: PreToolUse hook blocks and posts permission questions to Telegram with inline Approve/Deny buttons
-- [x] **CTRL-02**: User can reply with custom text input from Telegram that feeds back into Claude Code
-- [x] **CTRL-03**: Blocked hooks auto-deny after a configurable timeout if no response is received
+- [ ] **CLN-01**: tmux pane capture hook (`capture-tmux-pane.sh`) removed from hook installer
+- [ ] **CLN-02**: TextInputManager tmux injection code removed
+- [ ] **CLN-03**: tmuxPane field removed from session types and store
 
-### UX
+## Future Requirements
 
-- [x] **UX-01**: Messages use HTML formatting with code blocks for commands, bold for tool names
-- [x] **UX-02**: Outputs exceeding 4096 characters are sent as .txt document attachments
-- [x] **UX-03**: Users can configure verbosity to filter which events get posted to Telegram
+Deferred to v2.1+.
 
-## v2 Requirements
+### Full SDK Migration
 
-Deferred to future release. Tracked but not in current roadmap.
+- **FSDK-01**: Bot manages Claude Code sessions directly via SDK `query()`
+- **FSDK-02**: SDK streaming output replaces JSONL transcript file watching
+- **FSDK-03**: SDK event callbacks replace HTTP hook server
+- **FSDK-04**: SDK `canUseTool` callback replaces deferred-promise approval flow
 
-### Multi-Agent
+### New Features
 
-- **AGNT-01**: SubagentStart/Stop hooks tracked and posted to session topic
-- **AGNT-02**: Subagent activity shown nested under parent session
-
-### Resilience
-
-- **RSLC-01**: Bot persists session state across restarts and reconnects to active sessions
-- **RSLC-02**: Multi-machine dashboard topic showing all active sessions across all machines
+- **FEAT-01**: Start Claude Code sessions from Telegram
+- **FEAT-02**: Multi-machine dashboard topic
+- **FEAT-03**: Subagent tracking (SubagentStart/Stop hooks)
 
 ## Out of Scope
 
 | Feature | Reason |
 |---------|--------|
-| Starting Claude Code sessions from Telegram | Massively increases scope and security risk; monitor/control only |
-| Central server / shared state | Each machine is self-contained; Telegram group IS the shared view |
-| Multi-user access control | Single-user system; bot owner controls everything |
-| Web dashboard | Telegram client IS the dashboard |
-| Wrapping Claude Code in PTY/pipe | Fragile, breaks on updates; hooks + JSONL are the stable APIs |
-| Real-time token-by-token streaming | Telegram rate limits (20 msg/min) make true streaming impossible |
-| Plugin/extension system | Premature abstraction; build core first |
+| Full SDK session management | Deferred to v2.1 — keep external session model for now |
+| Removing Fastify hook server | Still needed for session discovery and tool call events |
+| Removing transcript watcher | Still needed for Claude text output capture |
+| V2 preview API (`unstable_v2_*`) | Unstable, silently ignores critical options (#176) |
+| Streaming input mode | Double-turn bug (#207) doubles token costs |
 
 ## Traceability
 
-Which phases cover which requirements. Updated during roadmap creation.
-
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SESS-01 | Phase 1 | Complete |
-| SESS-02 | Phase 1 | Complete |
-| SESS-03 | Phase 1 | Complete |
-| SESS-04 | Phase 1 | Complete |
-| SESS-05 | Phase 1 | Complete |
-| MNTR-01 | Phase 2 | Complete |
-| MNTR-02 | Phase 2 | Complete |
-| MNTR-03 | Phase 2 | Complete |
-| MNTR-04 | Phase 1 | Complete |
-| MNTR-05 | Phase 2 | Complete |
-| MNTR-06 | Phase 2 | Complete |
-| CTRL-01 | Phase 3 | Complete |
-| CTRL-02 | Phase 3 | Complete |
-| CTRL-03 | Phase 3 | Complete |
-| UX-01 | Phase 1 | Complete |
-| UX-02 | Phase 1 | Complete |
-| UX-03 | Phase 2 | Complete |
+| SDK-01 | TBD | Pending |
+| SDK-02 | TBD | Pending |
+| SDK-03 | TBD | Pending |
+| REL-01 | TBD | Pending |
+| REL-02 | TBD | Pending |
+| CLN-01 | TBD | Pending |
+| CLN-02 | TBD | Pending |
+| CLN-03 | TBD | Pending |
 
 **Coverage:**
-- v1 requirements: 17 total
-- Mapped to phases: 17
-- Unmapped: 0
+- v2.0 requirements: 8 total
+- Mapped to phases: 0 (pending roadmap)
+- Unmapped: 8
 
 ---
-*Requirements defined: 2026-02-28*
-*Last updated: 2026-02-28 after roadmap creation*
+*Requirements defined: 2026-03-01*
+*Last updated: 2026-03-01 after initial definition*
