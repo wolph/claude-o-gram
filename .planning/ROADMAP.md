@@ -34,7 +34,10 @@
   2. User replies to a specific bot message and the quoted context is included in the input delivered to Claude Code
   3. Bot reacts to the user's message with a checkmark after input is successfully delivered
   4. Input works on any OS where Node.js runs (no tmux or terminal emulator dependency)
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 04-01-PLAN.md -- Install SDK deps, add API key config, create SdkInputManager
+- [ ] 04-02-PLAN.md -- Wire SDK input into bot text handler and application lifecycle
 
 ### Phase 5: tmux Cleanup
 **Goal**: All tmux-related code is removed so the codebase has no dead paths or unused dependencies
@@ -57,5 +60,5 @@ Phases execute in numeric order: 4 -> 5
 | 1. Foundation | v1.0 | 4/4 | Complete | 2026-02-28 |
 | 2. Monitoring | v1.0 | 3/3 | Complete | 2026-03-01 |
 | 3. Control | v1.0 | 2/2 | Complete | 2026-03-01 |
-| 4. SDK Resume Input | v2.0 | 0/? | Not started | - |
+| 4. SDK Resume Input | v2.0 | 0/2 | Planning complete | - |
 | 5. tmux Cleanup | v2.0 | 0/? | Not started | - |
