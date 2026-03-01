@@ -2,23 +2,19 @@
 
 ## What This Is
 
-A per-machine Telegram bot that bridges Claude Code sessions to a shared Telegram group, giving you full remote visibility and bidirectional control over Claude Code from any device. Each machine runs its own bot (appearing as a separate group member), and each active Claude Code session gets its own topic thread in the group.
+A per-machine Telegram bot that bridges Claude Code sessions to a shared Telegram group, giving you full remote visibility and bidirectional control over Claude Code from any device. Each machine runs its own bot (appearing as a separate group member), and each active Claude Code session gets its own topic thread in the group. Text input from Telegram is delivered to Claude Code via the Agent SDK for reliable, cross-platform delivery.
 
 ## Core Value
 
 See what Claude Code is doing and respond to its questions from anywhere, without needing to be at the terminal.
 
-## Current Milestone: v2.0 SDK Migration
+## Current State: v2.0 Shipped
 
-**Goal:** Replace the fragile tmux injection + HTTP hook server architecture with the Claude Agent SDK for reliable, cross-platform programmatic control.
+Shipped v2.0 SDK Input Migration on 2026-03-01. Replaced tmux text injection with Claude Agent SDK `query({ resume })` for cross-platform input delivery, then removed all tmux code from the codebase.
 
-**Target features:**
-- Agent SDK streaming input replaces tmux text injection
-- SDK event callbacks replace HTTP hook server
-- SDK streaming output replaces JSONL transcript file watching
-- SDK `canUseTool` callback replaces deferred-promise approval flow
-- Bot manages Claude Code sessions directly (not attaching to externally-launched ones)
-- Cross-platform support (no tmux dependency)
+**Tech stack:** TypeScript, grammY, Fastify, @anthropic-ai/claude-agent-sdk
+**Codebase:** ~3,500 LOC TypeScript
+**Architecture:** HTTP hook server + transcript watcher + SDK resume input
 
 ## Requirements
 
@@ -34,10 +30,15 @@ See what Claude Code is doing and respond to its questions from anywhere, withou
 - ✓ User can reply with custom text input from Telegram that feeds back into Claude Code — v1.0
 - ✓ Each machine's bot appears as a distinct member in the Telegram group — v1.0
 - ✓ Bot auto-discovers and tracks new Claude Code sessions starting on the machine — v1.0
+- ✓ Text input delivered via SDK query({ resume }) instead of tmux injection — v2.0
+- ✓ SDK input works cross-platform (no tmux dependency) — v2.0
+- ✓ Quoted message context included when replying to specific bot messages — v2.0
+- ✓ Reliable text submission with message reaction confirmation — v2.0
+- ✓ All tmux code removed (hook installer, TextInputManager, tmuxPane field) — v2.0
 
 ### Active
 
-(Defined in REQUIREMENTS.md for v2.0)
+(None — next milestone not started)
 
 ### Out of Scope
 
@@ -46,20 +47,26 @@ See what Claude Code is doing and respond to its questions from anywhere, withou
 - Multi-machine dashboard — deferred to v2.1
 - Subagent tracking — deferred to v2.1
 - Multi-user access control — single-user system, the bot owner controls everything
+- Full SDK session management (bot-controlled sessions) — deferred to v2.1
+- Removing Fastify hook server — still needed for session discovery and tool call events
+- Removing transcript watcher — still needed for Claude text output capture
+- SDK streaming output — deferred to v2.1
+- SDK canUseTool callback — deferred to v2.1
 
 ## Context
 
 - Claude Code has a hook system (PreToolUse, PostToolUse, Notification, Stop, UserPromptSubmit) that fires shell commands on events
 - Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`) provides streaming input/output, native tool approval via `canUseTool`, and session management
-- v1.0 used tmux `send-keys`/`paste-buffer` for text injection — fragile, Linux-only, fails with Ink's bracketed paste handling
-- v1.0 used HTTP hook server (Fastify) receiving hook POST requests — functional but adds architectural complexity
-- v1.0 used JSONL transcript file watching for Claude's text output — works but couples to internal file format
+- v2.0 uses SDK `query({ resume })` for text input — one-shot per message, per-session serialized, 5-min timeout
+- v2.0 keeps HTTP hook server (Fastify) for session discovery and tool call events
+- v2.0 keeps JSONL transcript file watching for Claude's text output capture
 - Telegram supergroups support "Topics" (forum mode) which map perfectly to per-session threads
 - Target scale is 2-3 machines, each potentially running multiple concurrent Claude Code sessions
+- Known SDK limitation: double-turn bug (#207) prevents streaming input mode, one-shot+resume is the workaround
 
 ## Constraints
 
-- **Agent SDK**: Must use `@anthropic-ai/claude-agent-sdk` streaming API — the officially supported programmatic interface
+- **Agent SDK**: Must use `@anthropic-ai/claude-agent-sdk` V1 API — V2 preview is unstable (#176)
 - **Telegram API**: Must respect Telegram's rate limits (especially for streaming tool calls and text output)
 - **Bot per machine**: Architecture is decentralized — no shared state between machines beyond the Telegram group itself
 - **Backward compatibility**: All existing Telegram UX must be preserved (topics, formatting, reactions, verbosity)
@@ -69,12 +76,13 @@ See what Claude Code is doing and respond to its questions from anywhere, withou
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
 | One bot per machine (not centralized) | Simpler deployment, no server infra, each machine is self-contained | ✓ Good |
-| Hooks for output, log parsing for text (v1.0) | Hooks capture structured events; log parsing fills gaps for text output | ⚠️ Revisit — SDK replaces both |
-| PreToolUse blocking for input (v1.0) | Only reliable way to inject decisions without wrappers or pipe mode | ⚠️ Revisit — SDK provides canUseTool |
+| Hooks for output, log parsing for text | Hooks capture structured events; log parsing fills gaps for text output | ⚠️ Revisit — SDK could replace both in v2.1 |
+| PreToolUse blocking for approvals | Only reliable way to inject decisions without wrappers or pipe mode | ⚠️ Revisit — SDK provides canUseTool in v2.1 |
 | Telegram Topics for sessions | Natural mapping — each session is an isolated conversation thread | ✓ Good |
 | Separate BotFather tokens per machine | Each bot appears as a distinct group member, natural identity per machine | ✓ Good |
-| tmux text injection (v1.0) | No SDK available at time of v1.0 development | ⚠️ Revisit — fragile, SDK replaces |
-| Migrate to Claude Agent SDK (v2.0) | Official cross-platform API; eliminates tmux dependency, HTTP server, transcript watching | — Pending |
+| SDK query({ resume }) for text input (v2.0) | Official cross-platform API; eliminates tmux dependency for input delivery | ✓ Good |
+| One-shot+resume (not streaming input) (v2.0) | Double-turn bug #207 doubles token costs with streaming input | ✓ Good — workaround endorsed by Anthropic |
+| Keep hook server + transcript watcher (v2.0) | Only replace tmux injection in v2.0, keep working output infrastructure | ✓ Good — incremental migration reduces risk |
 
 ---
-*Last updated: 2026-03-01 after v2.0 milestone start*
+*Last updated: 2026-03-01 after v2.0 milestone completion*
