@@ -9,7 +9,7 @@ import { MessageBatcher } from './bot/rate-limiter.js';
 import {
   formatSessionStart,
   formatSessionEnd,
-  formatToolUse,
+  formatToolCompact,
   formatNotification,
   formatApprovalRequest,
   formatApprovalExpired,
@@ -18,9 +18,10 @@ import { installHooks } from './utils/install-hooks.js';
 import { TranscriptWatcher, calculateContextPercentage } from './monitoring/transcript-watcher.js';
 import { StatusMessage } from './monitoring/status-message.js';
 import { SummaryTimer } from './monitoring/summary-timer.js';
-import { escapeHtml, markdownToHtml } from './utils/text.js';
+import { escapeHtml, markdownToHtml, isProceduralNarration, convertCommandsForTelegram } from './utils/text.js';
 import { ApprovalManager } from './control/approval-manager.js';
-import { SdkInputManager } from './sdk/input-manager.js';
+import { InputRouter } from './input/input-router.js';
+import { CommandRegistry } from './bot/command-registry.js';
 import type { SessionInfo } from './types/sessions.js';
 import type { StatusData } from './types/monitoring.js';
 import type { PreToolUsePayload } from './types/hooks.js';
@@ -80,12 +81,17 @@ export async function main(): Promise<void> {
     join(config.dataDir, 'sessions.json'),
   );
 
-  // 4. Phase 3/4: Create control managers
+  // 4. Create control managers and input router
   const approvalManager = new ApprovalManager(config.approvalTimeoutMs);
-  const sdkInputManager = new SdkInputManager();
+  const inputRouter = new InputRouter();
+
+  // 4b. Discover Claude Code commands for Telegram autocomplete
+  const commandRegistry = new CommandRegistry();
+  commandRegistry.discover();
+  console.log(`Discovered ${commandRegistry.getEntries().length} Claude Code commands`);
 
   // 5. Create bot instance (with plugins, not yet started)
-  const bot = await createBot(config, sessionStore, approvalManager, sdkInputManager);
+  const bot = await createBot(config, sessionStore, approvalManager, inputRouter, commandRegistry);
 
   // 6. Create topic manager wired to bot
   const topicManager = new TopicManager(bot, config.telegramChatId);
@@ -135,10 +141,15 @@ export async function main(): Promise<void> {
     const transcriptWatcher = new TranscriptWatcher(
       session.transcriptPath,
       // onAssistantMessage: post to Telegram via batcher
-      (text) => {
-        // Truncate to 500 chars inline, full as .txt attachment if longer
-        if (text.length > 500) {
-          const truncated = text.slice(0, 500) + '... (truncated)';
+      (rawText) => {
+        // Filter short procedural narration ("Let me read...", "I'll check...")
+        if (isProceduralNarration(rawText)) return;
+
+        // Convert Claude Code command references to Telegram-clickable format
+        const text = convertCommandsForTelegram(rawText);
+
+        if (text.length > 3000) {
+          const truncated = text.slice(0, 1500) + '\n... (truncated)';
           batcher.enqueue(session.threadId, `<b>Claude:</b>\n${markdownToHtml(truncated)}`, {
             content: text,
             filename: 'claude-output.txt',
@@ -242,6 +253,14 @@ export async function main(): Promise<void> {
 
       // Initialize monitoring components for this session
       initMonitoring(session);
+
+      // Detect and register input method (tmux / FIFO / SDK resume)
+      void inputRouter.register(session.sessionId, session.cwd, session.permissionMode).then(() => {
+        const method = inputRouter.getMethod(session.sessionId);
+        if (method) {
+          sessionStore.updateInputMethod(session.sessionId, method);
+        }
+      });
     },
 
     onSessionEnd: async (session) => {
@@ -264,9 +283,9 @@ export async function main(): Promise<void> {
         monitors.delete(session.sessionId);
       }
 
-      // Phase 3/4: Clean up control state
+      // Clean up control state and input router
       approvalManager.cleanupSession(session.sessionId);
-      sdkInputManager.cleanup(session.sessionId);
+      inputRouter.cleanup(session.sessionId);
 
       const summary = formatSessionEnd(latest, 'completed');
       // Send immediately (not batched) -- this is a lifecycle event
@@ -276,9 +295,10 @@ export async function main(): Promise<void> {
     },
 
     onToolUse: async (session, payload) => {
-      const result = formatToolUse(payload);
+      const result = formatToolCompact(payload);
       // Enqueue (batched) -- tool use messages are high frequency
-      batcher.enqueue(session.threadId, result.text, result.attachment);
+      // TODO(06-02): wire expand cache and keyboard attachment
+      batcher.enqueue(session.threadId, result.compact);
 
       // Update status message with current tool
       const monitor = monitors.get(session.sessionId);
@@ -380,6 +400,8 @@ export async function main(): Promise<void> {
       try {
         // Re-initialize monitoring for active sessions on restart
         initMonitoring(session);
+        // Re-detect input method
+        void inputRouter.register(session.sessionId, session.cwd, session.permissionMode);
       } catch (err) {
         console.warn(
           `Failed to reconnect session in topic ${session.threadId}:`,
@@ -397,6 +419,26 @@ export async function main(): Promise<void> {
   // 12. Start both servers
   bot.start();
   console.log('Telegram bot started (polling)');
+
+  // 12b. Register discovered commands with Telegram autocomplete menu
+  const botCommands = commandRegistry.getEntries().map((e) => ({
+    command: e.telegramName,
+    description: e.description.slice(0, 256),
+  }));
+  if (botCommands.length > 100) {
+    console.warn(`Command count ${botCommands.length} exceeds Telegram limit of 100; truncating`);
+  }
+  const toRegister = botCommands.slice(0, 100);
+  if (toRegister.length > 0) {
+    try {
+      await bot.api.setMyCommands(toRegister, {
+        scope: { type: 'chat', chat_id: config.telegramChatId },
+      });
+      console.log(`Registered ${toRegister.length} commands with Telegram`);
+    } catch (err) {
+      console.warn('Failed to register Telegram commands:', err instanceof Error ? err.message : err);
+    }
+  }
 
   await server.listen({
     port: config.hookServerPort,

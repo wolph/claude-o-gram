@@ -1,6 +1,28 @@
-import { escapeHtml, truncateText, splitForTelegram } from '../utils/text.js';
+import { escapeHtml, truncateText, shortenCommand } from '../utils/text.js';
 import type { PostToolUsePayload, PreToolUsePayload, NotificationPayload } from '../types/hooks.js';
 import type { SessionInfo } from '../types/sessions.js';
+
+// ---------------------------------------------------------------------------
+// Compact tool result type
+// ---------------------------------------------------------------------------
+
+/**
+ * Result of formatting a tool call in compact mode.
+ * The compact string is a single-line HTML summary (max 250 chars).
+ * expandContent holds the full output for the expand cache (null if not needed).
+ */
+export interface CompactToolResult {
+  /** Single-line compact display, max 250 chars, HTML-escaped */
+  compact: string;
+  /** Full expanded content for LRU cache. null for tools that don't need expansion. */
+  expandContent: string | null;
+  /** Tool name for expand view headers */
+  toolName: string;
+}
+
+// ---------------------------------------------------------------------------
+// Session formatting (unchanged)
+// ---------------------------------------------------------------------------
 
 /**
  * Format a session start notification message.
@@ -55,47 +77,207 @@ export function formatSessionEnd(session: SessionInfo, reason: string): string {
   return parts.join('\n');
 }
 
+// ---------------------------------------------------------------------------
+// Compact tool formatter
+// ---------------------------------------------------------------------------
+
 /**
- * Format a PostToolUse event into HTML text and optionally a file attachment.
+ * Format a PostToolUse event into a compact single-line summary.
  *
- * Tiered verbosity per user decisions:
- * - Compact one-liners for reads/searches
- * - Detailed blocks for edits/bash
- * - File attachments for long outputs
+ * Returns a CompactToolResult with:
+ * - compact: single-line HTML (max 250 chars), e.g. `Read(src/bot/formatter.ts)`
+ * - expandContent: full output for the expand cache (null if not applicable)
+ * - toolName: for expand view headers
  */
-export function formatToolUse(
-  payload: PostToolUsePayload,
-): { text: string; attachment?: { content: string; filename: string } } {
+export function formatToolCompact(payload: PostToolUsePayload): CompactToolResult {
   const toolName = payload.tool_name;
   const input = payload.tool_input || {};
   const response = payload.tool_response || {};
 
   switch (toolName) {
     case 'Read':
-      return formatRead(input);
+      return compactRead(toolName, input);
 
     case 'Glob':
-      return formatGlob(input, response);
+      return compactGlob(toolName, input);
 
     case 'Grep':
-      return formatGrep(input);
-
-    case 'Write':
-      return formatWrite(input);
+      return compactGrep(toolName, input);
 
     case 'Edit':
-      return formatEdit(input);
+      return compactEdit(toolName, input);
 
     case 'MultiEdit':
-      return formatMultiEdit(input);
+      return compactMultiEdit(toolName, input);
+
+    case 'Write':
+      return compactWrite(toolName, input);
 
     case 'Bash':
-      return formatBash(input, response);
+      return compactBash(toolName, input, response);
 
-    default:
-      return formatDefault(toolName, input);
+    default: {
+      // Agent/Task tools
+      if (toolName.includes('Agent') || toolName.includes('Task')) {
+        return compactAgent(toolName, input);
+      }
+      return compactDefault(toolName, input);
+    }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Per-tool compact formatters
+// ---------------------------------------------------------------------------
+
+function compactRead(toolName: string, input: Record<string, unknown>): CompactToolResult {
+  const filePath = (input.file_path as string) || (input.path as string) || 'unknown';
+  const compact = truncCompact(`Read(${smartPath(filePath)})`);
+  return { compact, expandContent: null, toolName };
+}
+
+function compactGlob(toolName: string, input: Record<string, unknown>): CompactToolResult {
+  const pattern = (input.pattern as string) || '*';
+  const compact = truncCompact(`Glob("${pattern}")`);
+  return { compact, expandContent: null, toolName };
+}
+
+function compactGrep(toolName: string, input: Record<string, unknown>): CompactToolResult {
+  const pattern = (input.pattern as string) || '';
+  const path = (input.path as string) || '';
+  const pathPart = path ? `, ${smartPath(path)}` : '';
+  const compact = truncCompact(`Grep("${pattern}"${pathPart})`);
+  return { compact, expandContent: null, toolName };
+}
+
+function compactEdit(toolName: string, input: Record<string, unknown>): CompactToolResult {
+  const filePath = (input.file_path as string) || (input.path as string) || 'unknown';
+  const oldStr = (input.old_string as string) || '';
+  const newStr = (input.new_string as string) || '';
+  const stats = diffStats(oldStr, newStr);
+  const compact = truncCompact(`Edit(${smartPath(filePath)}) ${stats}`);
+
+  // Build simplified diff for expand content
+  const diffLines: string[] = [];
+  for (const line of oldStr.split('\n')) {
+    diffLines.push(`- ${line}`);
+  }
+  for (const line of newStr.split('\n')) {
+    diffLines.push(`+ ${line}`);
+  }
+  const expandContent = diffLines.join('\n').slice(0, 3900);
+
+  return { compact, expandContent, toolName };
+}
+
+function compactMultiEdit(toolName: string, input: Record<string, unknown>): CompactToolResult {
+  const filePath = (input.file_path as string) || (input.path as string) || 'unknown';
+  const edits = (input.edits as Array<Record<string, unknown>>) || [];
+  const editCount = edits.length;
+
+  // Aggregate diff stats across all edits
+  let totalAdded = 0;
+  let totalRemoved = 0;
+  const diffSections: string[] = [];
+
+  for (let i = 0; i < edits.length; i++) {
+    const oldStr = (edits[i].old_string as string) || '';
+    const newStr = (edits[i].new_string as string) || '';
+    const oldLines = oldStr.split('\n');
+    const newLines = newStr.split('\n');
+    totalRemoved += oldLines.length;
+    totalAdded += newLines.length;
+
+    const section: string[] = [`--- edit ${i + 1} ---`];
+    for (const line of oldLines) {
+      section.push(`- ${line}`);
+    }
+    for (const line of newLines) {
+      section.push(`+ ${line}`);
+    }
+    diffSections.push(section.join('\n'));
+  }
+
+  const stats = `+${totalAdded} -${totalRemoved}`;
+  const compact = truncCompact(`Edit(${smartPath(filePath)}) ${stats} (${editCount} edits)`);
+  const expandContent = diffSections.join('\n\n').slice(0, 3900);
+
+  return { compact, expandContent, toolName };
+}
+
+function compactWrite(toolName: string, input: Record<string, unknown>): CompactToolResult {
+  const filePath = (input.file_path as string) || (input.path as string) || 'unknown';
+  const content = (input.content as string) || '';
+  const lineCount = content.split('\n').length;
+  const compact = truncCompact(`Write(${smartPath(filePath)}) ${lineCount} lines`);
+  const expandContent = content.slice(0, 3900);
+
+  return { compact, expandContent, toolName };
+}
+
+function compactBash(toolName: string, input: Record<string, unknown>, response: Record<string, unknown>): CompactToolResult {
+  const command = shortenCommand((input.command as string) || '');
+  // Determine exit status
+  const exitCode = response.exit_code;
+  const output = extractBashOutput(response);
+  let indicator = '';
+
+  if (typeof exitCode === 'number') {
+    indicator = exitCode === 0 ? ' \u2713' : ' \u2717';
+  } else if (output !== undefined) {
+    // Heuristic: if there's stderr content with "error" or "Error", mark as failure
+    const stderr = (typeof response.stderr === 'string') ? response.stderr : '';
+    if (stderr && /error/i.test(stderr)) {
+      indicator = ' \u2717';
+    }
+  }
+
+  // Preview: first meaningful line of command, truncated
+  const commandPreview = command.split('\n')[0].slice(0, 200);
+  const compact = truncCompact(`Bash(${commandPreview})${indicator}`);
+
+  // Expand content: full stdout/stderr
+  const expandContent = output ? output.slice(0, 3900) : null;
+
+  return { compact, expandContent, toolName };
+}
+
+function compactAgent(toolName: string, input: Record<string, unknown>): CompactToolResult {
+  const description = (input.description as string) || (input.prompt as string) || '';
+  const preview = description.slice(0, 80);
+  const compact = truncCompact(`Agent(${toolName}) spawned -- "${preview}"`);
+  return { compact, expandContent: null, toolName };
+}
+
+function compactDefault(toolName: string, input: Record<string, unknown>): CompactToolResult {
+  let argsPreview = '';
+  try {
+    argsPreview = JSON.stringify(input);
+  } catch {
+    argsPreview = String(input);
+  }
+  if (argsPreview.length > 150) {
+    argsPreview = argsPreview.slice(0, 150) + '\u2026';
+  }
+  const compact = truncCompact(`${toolName}(${argsPreview})`);
+
+  // Expand content: full JSON of input
+  let expandContent: string | null = null;
+  try {
+    expandContent = JSON.stringify(input, null, 2);
+    if (expandContent && expandContent.length > 3900) {
+      expandContent = expandContent.slice(0, 3900);
+    }
+  } catch {
+    // ignore
+  }
+
+  return { compact, expandContent, toolName };
+}
+
+// ---------------------------------------------------------------------------
+// Notification formatting (unchanged)
+// ---------------------------------------------------------------------------
 
 /**
  * Format a Notification hook event into HTML with urgency-based styling.
@@ -131,7 +313,9 @@ export function formatNotification(payload: NotificationPayload): string {
   }
 }
 
-// --- Phase 3: Approval formatting ---
+// ---------------------------------------------------------------------------
+// Approval formatting (unchanged)
+// ---------------------------------------------------------------------------
 
 /** Risk level for tool approval display */
 type RiskLevel = 'safe' | 'caution' | 'danger';
@@ -204,7 +388,7 @@ function buildToolPreview(toolName: string, input: Record<string, unknown>): str
   switch (toolName) {
     case 'Bash':
     case 'BashBackground': {
-      const cmd = (input.command as string) || '';
+      const cmd = shortenCommand((input.command as string) || '');
       const truncated = escapeHtml(truncateText(cmd, 200));
       return `<b>Command:</b>\n<pre>${truncated}</pre>`;
     }
@@ -296,159 +480,51 @@ export function formatApprovalExpired(
   return `${originalText}\n\n\u23F0 <b>Expired</b> \u2014 auto-denied after ${minutes}m`;
 }
 
-// --- Compact one-liners for reads/searches ---
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-function formatRead(
-  input: Record<string, unknown>,
-): { text: string; attachment?: undefined } {
-  const filePath = (input.file_path as string) || (input.path as string) || 'unknown';
-  return { text: `\u{1F441} Read <code>${escapeHtml(filePath)}</code>` };
-}
-
-function formatGlob(
-  input: Record<string, unknown>,
-  response: Record<string, unknown>,
-): { text: string; attachment?: undefined } {
-  const pattern = (input.pattern as string) || 'unknown';
-  // Try to extract match count from response
-  const content = response.content as string | undefined;
-  let countStr = '';
-  if (content) {
-    const lines = content.trim().split('\n').filter(Boolean);
-    countStr = ` (${lines.length} matches)`;
+/**
+ * Shorten a file path for compact display.
+ * - Replace $HOME with ~/
+ * - If <= 60 chars, return as-is
+ * - Otherwise: first segment + ... + last 2 segments
+ */
+function smartPath(filePath: string): string {
+  let p = filePath;
+  const home = process.env.HOME;
+  if (home && p.startsWith(home + '/')) {
+    p = '~/' + p.slice(home.length + 1);
   }
-  return { text: `\u{1F50D} Glob <code>${escapeHtml(pattern)}</code>${countStr}` };
+  if (p.length <= 60) return p;
+
+  const segments = p.split('/');
+  if (segments.length <= 3) return p;
+
+  const first = segments[0];
+  const lastTwo = segments.slice(-2).join('/');
+  return `${first}/.../${lastTwo}`;
 }
 
-function formatGrep(
-  input: Record<string, unknown>,
-): { text: string; attachment?: undefined } {
-  const pattern = (input.pattern as string) || 'unknown';
-  const path = (input.path as string) || '';
-  const pathPart = path ? ` in <code>${escapeHtml(path)}</code>` : '';
-  return { text: `\u{1F50D} Grep <code>${escapeHtml(pattern)}</code>${pathPart}` };
+/**
+ * Count lines added/removed between old and new strings.
+ * Returns a "+N -M" stats string.
+ */
+function diffStats(oldStr: string, newStr: string): string {
+  const oldLines = oldStr ? oldStr.split('\n').length : 0;
+  const newLines = newStr ? newStr.split('\n').length : 0;
+  return `+${newLines} -${oldLines}`;
 }
 
-// --- Detailed blocks for edits/bash ---
-
-function formatWrite(
-  input: Record<string, unknown>,
-): { text: string; attachment?: undefined } {
-  const filePath = (input.file_path as string) || (input.path as string) || 'unknown';
-  const content = (input.content as string) || '';
-  const preview = escapeHtml(truncateText(content, 500));
-  return {
-    text: `\u{1F4DD} <b>Write</b> <code>${escapeHtml(filePath)}</code>\n<pre>${preview}</pre>`,
-  };
+/**
+ * Truncate a compact line to 250 chars max, HTML-escaping dynamic content.
+ * Uses Unicode ellipsis for truncation.
+ */
+function truncCompact(raw: string): string {
+  const escaped = escapeHtml(raw);
+  if (escaped.length <= 250) return escaped;
+  return escaped.slice(0, 247) + '\u2026';
 }
-
-function formatEdit(
-  input: Record<string, unknown>,
-): { text: string; attachment?: undefined } {
-  const filePath = (input.file_path as string) || (input.path as string) || 'unknown';
-  let oldStr = (input.old_string as string) || '';
-  let newStr = (input.new_string as string) || '';
-
-  // Truncate if combined length is too long
-  if (oldStr.length + newStr.length > 1000) {
-    oldStr = truncateText(oldStr, 500);
-    newStr = truncateText(newStr, 500);
-  }
-
-  return {
-    text: [
-      `\u{1F4DD} <b>Edit</b> <code>${escapeHtml(filePath)}</code>`,
-      `<pre>- ${escapeHtml(oldStr)}`,
-      `+ ${escapeHtml(newStr)}</pre>`,
-    ].join('\n'),
-  };
-}
-
-function formatMultiEdit(
-  input: Record<string, unknown>,
-): { text: string; attachment?: undefined } {
-  const filePath = (input.file_path as string) || (input.path as string) || 'unknown';
-  const edits = input.edits as Array<Record<string, unknown>> | undefined;
-  const editCount = edits ? edits.length : 0;
-
-  // Show first edit as sample if available
-  if (edits && edits.length > 0) {
-    let oldStr = (edits[0].old_string as string) || '';
-    let newStr = (edits[0].new_string as string) || '';
-
-    if (oldStr.length + newStr.length > 1000) {
-      oldStr = truncateText(oldStr, 500);
-      newStr = truncateText(newStr, 500);
-    }
-
-    return {
-      text: [
-        `\u{1F4DD} <b>Edit</b> <code>${escapeHtml(filePath)}</code> (${editCount} edits)`,
-        `<pre>- ${escapeHtml(oldStr)}`,
-        `+ ${escapeHtml(newStr)}</pre>`,
-      ].join('\n'),
-    };
-  }
-
-  return {
-    text: `\u{1F4DD} <b>Edit</b> <code>${escapeHtml(filePath)}</code> (${editCount} edits)`,
-  };
-}
-
-function formatBash(
-  input: Record<string, unknown>,
-  response: Record<string, unknown>,
-): { text: string; attachment?: { content: string; filename: string } } {
-  const command = (input.command as string) || '';
-  const output = extractBashOutput(response);
-
-  const parts: string[] = [
-    `\u{1F4BB} <b>Bash</b>`,
-    `<pre><code>${escapeHtml(command)}</code></pre>`,
-  ];
-
-  let attachment: { content: string; filename: string } | undefined;
-
-  if (output) {
-    const split = splitForTelegram(output);
-    if (split.inline) {
-      if (output.length <= 400) {
-        // Short output: use blockquote
-        parts.push(`<blockquote>${escapeHtml(output)}</blockquote>`);
-      } else {
-        // Medium output: use pre block
-        parts.push(`<pre>${escapeHtml(output)}</pre>`);
-      }
-    } else {
-      // Long output: send as file attachment
-      attachment = { content: output, filename: 'bash-output.txt' };
-      parts.push(`<i>(output sent as file attachment)</i>`);
-    }
-  }
-
-  return { text: parts.join('\n'), attachment };
-}
-
-// --- Default for unknown tools ---
-
-function formatDefault(
-  toolName: string,
-  input: Record<string, unknown>,
-): { text: string; attachment?: undefined } {
-  const escapedName = escapeHtml(toolName);
-  let inputStr = '';
-  try {
-    inputStr = JSON.stringify(input, null, 2);
-  } catch {
-    inputStr = String(input);
-  }
-  const truncated = escapeHtml(truncateText(inputStr, 500));
-  return {
-    text: `\u{1F527} <b>${escapedName}</b>\n<pre>${truncated}</pre>`,
-  };
-}
-
-// --- Helpers ---
 
 /**
  * Extract bash output from response payload.
