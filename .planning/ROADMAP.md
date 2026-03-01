@@ -48,7 +48,9 @@ Plans:
   2. TextInputManager contains no tmux `send-keys` or `paste-buffer` code paths
   3. Session types and session store have no `tmuxPane` field
   4. The project builds cleanly and all existing functionality (topics, output, approvals, input) works after removal
-**Plans**: TBD
+**Plans:** 1 plan
+Plans:
+- [ ] 05-01-PLAN.md -- Remove all tmux code: types, store, handlers, hook installer, TextInputManager, bot fallback, index wiring
 
 ## Progress
 
@@ -61,4 +63,4 @@ Phases execute in numeric order: 4 -> 5
 | 2. Monitoring | v1.0 | 3/3 | Complete | 2026-03-01 |
 | 3. Control | v1.0 | 2/2 | Complete | 2026-03-01 |
 | 4. SDK Resume Input | v2.0 | 1/2 | In progress | - |
-| 5. tmux Cleanup | v2.0 | 0/? | Not started | - |
+| 5. tmux Cleanup | v2.0 | 0/1 | Not started | - |
