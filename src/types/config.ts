@@ -28,4 +28,9 @@ export interface AppConfig {
   approvalTimeoutMs: number;
   /** When true, bypass all approval prompts and auto-allow (default: false) */
   autoApprove: boolean;
+
+  // --- Phase 4 SDK config ---
+
+  /** Anthropic API key for SDK query() calls (required for text input delivery) */
+  anthropicApiKey: string;
 }
