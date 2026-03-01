@@ -11,12 +11,12 @@ Replace tmux text injection with Claude Agent SDK for reliable, cross-platform i
 
 - [x] **SDK-01**: Text input from Telegram is delivered to Claude Code via SDK `query({ resume })` instead of tmux injection
 - [x] **SDK-02**: SDK input works cross-platform (no tmux dependency for text delivery)
-- [ ] **SDK-03**: Quoted message context is included when user replies to a specific bot message
+- [x] **SDK-03**: Quoted message context is included when user replies to a specific bot message
 
 ### Reliability
 
 - [x] **REL-01**: Text input reliably submits (no more "flash and disappear" tmux issues)
-- [ ] **REL-02**: Input delivery confirms success via message reaction
+- [x] **REL-02**: Input delivery confirms success via message reaction
 
 ### Cleanup
 
@@ -57,9 +57,9 @@ Deferred to v2.1+.
 |-------------|-------|--------|
 | SDK-01 | Phase 4 | Complete |
 | SDK-02 | Phase 4 | Complete |
-| SDK-03 | Phase 4 | Pending |
+| SDK-03 | Phase 4 | Complete |
 | REL-01 | Phase 4 | Complete |
-| REL-02 | Phase 4 | Pending |
+| REL-02 | Phase 4 | Complete |
 | CLN-01 | Phase 5 | Pending |
 | CLN-02 | Phase 5 | Pending |
 | CLN-03 | Phase 5 | Pending |
