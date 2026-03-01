@@ -4,6 +4,7 @@
 
 - [x] **v1.0 MVP** — Phases 1-3 (shipped 2026-03-01)
 - [x] **v2.0 SDK Input Migration** — Phases 4-5 (shipped 2026-03-01)
+- [ ] **v3.0 UX Overhaul** — Phases 6-9 (in progress)
 
 ## Phases
 
@@ -24,7 +25,82 @@
 
 </details>
 
+### v3.0 UX Overhaul (In Progress)
+
+**Milestone Goal:** Make Telegram output match Claude Code's terminal experience -- compact, clean, and controllable.
+
+- [ ] **Phase 6: Compact Tool Output** - Terminal-fidelity tool display with expand/collapse and content store
+- [ ] **Phase 7: Permission Modes** - Tiered auto-accept modes replacing binary approve/deny
+- [ ] **Phase 8: Topic Reuse on /clear** - Reuse existing topic with separator, re-pin, and counter reset
+- [ ] **Phase 9: Subagent Visibility** - Subagent lifecycle messages and agent-prefixed output
+
+## Phase Details
+
+### Phase 6: Compact Tool Output
+**Goal**: Users see tool calls as clean one-liners matching Claude Code's terminal, with on-demand expand for full content
+**Depends on**: Phase 5 (existing output infrastructure)
+**Requirements**: OUT-01, OUT-02, OUT-03, OUT-04, OUT-05, OUT-06, OUT-07
+**Success Criteria** (what must be TRUE):
+  1. Tool calls appear as single-line `Tool(args...)` messages, never multi-line verbose blocks
+  2. Long tool calls show a truncated line with an Expand button; tapping Expand edits the message in-place to show full content with a Collapse button
+  3. No emoji status labels, no "waiting for input" commentary, no extra formatting around Claude's text output
+  4. Pinned status message uses compact format without emoji decoration
+  5. Expanded content is retrievable for the lifetime of the session (not lost after message scrolls)
+**Plans**: TBD
+
+Plans:
+- [ ] 06-01: TBD
+- [ ] 06-02: TBD
+
+### Phase 7: Permission Modes
+**Goal**: Users control how aggressively permissions are auto-approved, eliminating button-tap fatigue for trusted workflows
+**Depends on**: Phase 6 (compact format for auto-approved permission display, ContentStore callback pattern)
+**Requirements**: PERM-01, PERM-02, PERM-03, PERM-04, PERM-05, PERM-06, PERM-07, PERM-08, PERM-09
+**Success Criteria** (what must be TRUE):
+  1. Permission prompts wait indefinitely -- no auto-deny timeout surprises the user
+  2. User can activate Accept All, Same Tool, Safe Only, or Until Done modes from Telegram, and the bot auto-approves matching tool calls without prompting
+  3. A persistent Stop button is visible whenever any auto-accept mode is active, and tapping it returns to manual approval
+  4. Auto-approved tool calls appear as compact lines (not silent) so the user sees what was approved
+  5. Destructive commands (rm -rf, sudo, curl|bash) always prompt regardless of mode
+**Plans**: TBD
+
+Plans:
+- [ ] 07-01: TBD
+- [ ] 07-02: TBD
+
+### Phase 8: Topic Reuse on /clear
+**Goal**: Users can /clear context without losing their topic thread -- the existing topic gets a visual separator and fresh status
+**Depends on**: Phase 7 (infinite timeout must be live before /clear can interrupt pending approvals)
+**Requirements**: SESS-01, SESS-02, SESS-03, SESS-04, SESS-05, SESS-06
+**Success Criteria** (what must be TRUE):
+  1. Running /clear in Claude Code reuses the existing Telegram topic instead of creating a new one
+  2. A visual separator line appears in the topic marking where context was cleared
+  3. A new pinned status message appears after /clear, and the old one is unpinned
+  4. Session counters (tools used, files changed, duration) reset to zero after /clear
+**Plans**: TBD
+
+Plans:
+- [ ] 08-01: TBD
+
+### Phase 9: Subagent Visibility
+**Goal**: Users see when subagents spawn, what they do, and when they finish -- no more invisible background work
+**Depends on**: Phase 8 (stable handler flow after /clear changes; Phase 6 compact format for agent-prefixed lines)
+**Requirements**: AGENT-01, AGENT-02, AGENT-03, AGENT-04, AGENT-05, AGENT-06
+**Success Criteria** (what must be TRUE):
+  1. Subagent spawn and completion are announced in the topic with agent name and type
+  2. Tool calls made during an active subagent are visually tagged with the agent's name
+  3. Subagent text output is visually tagged with the agent's name
+  4. Nested subagents (agent spawning agent) show stacked prefixes up to 2 levels deep
+**Plans**: TBD
+
+Plans:
+- [ ] 09-01: TBD
+- [ ] 09-02: TBD
+
 ## Progress
+
+**Execution Order:**
+Phases execute in numeric order: 6 → 7 → 8 → 9
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
@@ -33,3 +109,7 @@
 | 3. Control | v1.0 | 2/2 | Complete | 2026-03-01 |
 | 4. SDK Resume Input | v2.0 | 2/2 | Complete | 2026-03-01 |
 | 5. tmux Cleanup | v2.0 | 1/1 | Complete | 2026-03-01 |
+| 6. Compact Tool Output | v3.0 | 0/? | Not started | - |
+| 7. Permission Modes | v3.0 | 0/? | Not started | - |
+| 8. Topic Reuse on /clear | v3.0 | 0/? | Not started | - |
+| 9. Subagent Visibility | v3.0 | 0/? | Not started | - |
