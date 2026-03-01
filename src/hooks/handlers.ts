@@ -20,8 +20,8 @@ import { escapeHtml } from '../utils/text.js';
  * This decouples session logic from Telegram, making it testable and wirable in Plan 04.
  */
 export interface HookCallbacks {
-  onSessionStart(session: SessionInfo, isResume: boolean): Promise<void>;
-  onSessionEnd(session: SessionInfo): Promise<void>;
+  onSessionStart(session: SessionInfo, source: 'new' | 'resume' | 'clear'): Promise<void>;
+  onSessionEnd(session: SessionInfo, reason: string): Promise<void>;
   onToolUse(session: SessionInfo, payload: PostToolUsePayload): Promise<void>;
   onNotification(session: SessionInfo, payload: NotificationPayload): Promise<void>;
   onPreToolUse(session: SessionInfo, payload: PreToolUsePayload): Promise<Record<string, unknown>>;
@@ -71,10 +71,11 @@ export class HookHandlers {
       suppressedCounts: {},
       contextPercent: 0,
       lastActivityAt: now,
+      permissionMode: payload.permission_mode,
     };
 
     this.sessionStore.set(payload.session_id, session);
-    await this.callbacks.onSessionStart(session, false);
+    await this.callbacks.onSessionStart(session, 'new');
 
     // Re-fetch to get updated threadId set by onSessionStart
     const registered = this.sessionStore.get(payload.session_id);
@@ -210,13 +211,43 @@ export class HookHandlers {
           ...existing,
           sessionId: payload.session_id,
           transcriptPath: payload.transcript_path,
+          permissionMode: payload.permission_mode ?? existing.permissionMode,
         });
         await this.callbacks.onSessionStart(
           this.sessionStore.get(payload.session_id)!,
-          true
+          'resume'
         );
         return;
       }
+    }
+
+    // /clear detection: reuse topic from recently closed session
+    if (payload.source === 'clear') {
+      const recentClosed = this.sessionStore.getRecentlyClosedByCwd(payload.cwd);
+      if (recentClosed) {
+        // Reuse the topic: create new session entry with old threadId
+        const clearNow = new Date().toISOString();
+        this.sessionStore.set(payload.session_id, {
+          ...recentClosed,
+          sessionId: payload.session_id,
+          transcriptPath: payload.transcript_path,
+          status: 'active',
+          startedAt: clearNow,
+          lastActivityAt: clearNow,
+          toolCallCount: 0,
+          filesChanged: new Set<string>(),
+          suppressedCounts: {},
+          contextPercent: 0,
+          permissionMode: payload.permission_mode ?? recentClosed.permissionMode,
+        });
+        await this.callbacks.onSessionStart(
+          this.sessionStore.get(payload.session_id)!,
+          'clear'
+        );
+        return;
+      }
+      // Fallback: if no recently closed session found, treat as new session
+      // (handles edge cases where the bot restarted between clear events)
     }
 
     // Derive topic name from cwd basename
@@ -249,10 +280,11 @@ export class HookHandlers {
       suppressedCounts: {},
       contextPercent: 0,
       lastActivityAt: now,
+      permissionMode: payload.permission_mode,
     };
 
     this.sessionStore.set(payload.session_id, session);
-    await this.callbacks.onSessionStart(session, false);
+    await this.callbacks.onSessionStart(session, 'new');
   }
 
   /**
@@ -269,7 +301,7 @@ export class HookHandlers {
     }
 
     this.sessionStore.updateStatus(payload.session_id, 'closed');
-    await this.callbacks.onSessionEnd(session);
+    await this.callbacks.onSessionEnd(session, payload.reason);
   }
 
   /**

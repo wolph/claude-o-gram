@@ -269,14 +269,16 @@ export async function main(): Promise<void> {
   // 8. Define HookCallbacks -- THE CRITICAL WIRING
   //    This connects session lifecycle events to Telegram forum topic actions.
   const callbacks: HookCallbacks = {
-    onSessionStart: async (session, isResume) => {
-      if (isResume && session.threadId > 0) {
+    onSessionStart: async (session, source) => {
+      if (source === 'resume' && session.threadId > 0) {
         // Resume: reopen existing topic and post resume message
         await topicManager.reopenTopic(session.threadId, session.topicName);
         await batcher.enqueueImmediate(
           session.threadId,
           formatSessionStart(session, true),
         );
+      } else if (source === 'clear') {
+        // /clear transition: handled in Task 2
       } else {
         // New session: create topic, update store, post start message
         const threadId = await topicManager.createTopic(session.topicName);
@@ -301,7 +303,7 @@ export async function main(): Promise<void> {
       });
     },
 
-    onSessionEnd: async (session) => {
+    onSessionEnd: async (session, reason) => {
       // Re-fetch session from store to get latest toolCallCount/filesChanged
       const latest = sessionStore.get(session.sessionId) || session;
 

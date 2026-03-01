@@ -146,6 +146,15 @@ export class SessionStore {
     }
   }
 
+  /** Update the detected input method for a session */
+  updateInputMethod(sessionId: string, method: 'tmux' | 'fifo' | 'sdk-resume'): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.inputMethod = method;
+      this.save();
+    }
+  }
+
   /** Update the context window usage percentage */
   updateContextPercent(sessionId: string, percent: number): void {
     const session = this.sessions.get(sessionId);
@@ -166,6 +175,43 @@ export class SessionStore {
     session.suppressedCounts = {};
     this.save();
     return counts;
+  }
+
+  /**
+   * Reset session counters for /clear transitions.
+   * Resets toolCallCount, filesChanged, suppressedCounts, startedAt, and contextPercent.
+   */
+  resetCounters(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.toolCallCount = 0;
+    session.filesChanged = new Set<string>();
+    session.suppressedCounts = {};
+    session.contextPercent = 0;
+    session.startedAt = new Date().toISOString();
+    session.lastActivityAt = new Date().toISOString();
+    this.save();
+  }
+
+  /**
+   * Find a recently closed session for the given cwd.
+   * Used for /clear transitions where SessionEnd(reason=clear) closes the session
+   * before SessionStart(source=clear) can reuse the topic.
+   * Returns the most recently closed session for this cwd, if any.
+   */
+  getRecentlyClosedByCwd(cwd: string): SessionInfo | undefined {
+    let best: SessionInfo | undefined;
+    let bestTime = 0;
+    for (const session of this.sessions.values()) {
+      if (session.cwd === cwd && session.status === 'closed' && session.threadId > 0) {
+        const t = new Date(session.lastActivityAt || session.startedAt).getTime();
+        if (t > bestTime) {
+          bestTime = t;
+          best = session;
+        }
+      }
+    }
+    return best;
   }
 
   /** Get all sessions (active and closed) */
