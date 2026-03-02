@@ -18,6 +18,7 @@ import { installHooks } from './utils/install-hooks.js';
 import { TranscriptWatcher, calculateContextPercentage } from './monitoring/transcript-watcher.js';
 import { StatusMessage } from './monitoring/status-message.js';
 import { SummaryTimer } from './monitoring/summary-timer.js';
+import { ClearDetector } from './monitoring/clear-detector.js';
 import { escapeHtml, markdownToHtml, isProceduralNarration, convertCommandsForTelegram } from './utils/text.js';
 import { ApprovalManager } from './control/approval-manager.js';
 import { InputRouter } from './input/input-router.js';
@@ -149,6 +150,123 @@ export async function main(): Promise<void> {
    * Stores threadId and statusMessageId so the clear flow can reuse the topic.
    */
   const clearPending = new Map<string, { threadId: number; statusMessageId: number }>();
+
+  // Per-CWD clear detectors (filesystem watcher for /clear bypass of hooks)
+  const clearDetectors = new Map<string, ClearDetector>();
+
+  /**
+   * Start a ClearDetector for a session's CWD if one isn't already running.
+   * Detects /clear via filesystem when HTTP hooks don't fire (bug #6428).
+   */
+  function startClearDetector(session: SessionInfo): void {
+    if (clearDetectors.has(session.cwd)) {
+      // Update session ID on existing detector
+      clearDetectors.get(session.cwd)!.updateSessionId(session.sessionId);
+      return;
+    }
+
+    const detector = new ClearDetector(
+      session.cwd,
+      session.sessionId,
+      (sid) => !!sessionStore.get(sid),
+      (newTranscriptPath, newSessionId) => {
+        void handleClearDetected(session.cwd, newTranscriptPath, newSessionId);
+      },
+    );
+    clearDetectors.set(session.cwd, detector);
+    detector.start();
+  }
+
+  /**
+   * Handle a /clear event detected via filesystem watcher.
+   * Mirrors the onSessionStart(source='clear') logic but triggered by
+   * ClearDetector instead of HTTP hooks.
+   */
+  async function handleClearDetected(
+    cwd: string,
+    newTranscriptPath: string,
+    newSessionId: string,
+  ): Promise<void> {
+    // Find the prior session. SessionEnd(reason=clear) fires BEFORE the new
+    // transcript appears, so the session is likely already closed.
+    // Check three sources: active (SessionEnd didn't fire), clearPending
+    // (SessionEnd fired and stored threadId), recently closed (fallback).
+    const active = sessionStore.getActiveByCwd(cwd);
+    const pending = clearPending.get(cwd);
+    const recentlyClosed = !active ? sessionStore.getRecentlyClosedByCwd(cwd) : undefined;
+    const oldSession = active ?? recentlyClosed;
+
+    // Need at least a threadId to post into
+    const threadId = oldSession?.threadId ?? pending?.threadId ?? 0;
+    if (threadId === 0) return;
+
+    // Clean up clearPending if it was used
+    if (pending) clearPending.delete(cwd);
+
+    // Pre-register new session with same threadId (prevents ensureSession race)
+    const clearNow = new Date().toISOString();
+    const newSessionData: SessionInfo = {
+      sessionId: newSessionId,
+      threadId,
+      cwd,
+      topicName: oldSession?.topicName ?? cwd.split('/').pop() ?? 'session',
+      startedAt: clearNow,
+      status: 'active',
+      transcriptPath: newTranscriptPath,
+      toolCallCount: 0,
+      filesChanged: new Set<string>(),
+      verbosity: oldSession?.verbosity ?? config.defaultVerbosity,
+      statusMessageId: 0,
+      suppressedCounts: {},
+      contextPercent: 0,
+      lastActivityAt: clearNow,
+      permissionMode: oldSession?.permissionMode,
+    };
+    sessionStore.set(newSessionId, newSessionData);
+
+    // Clean up old monitoring (may already be cleaned by SessionEnd handler)
+    if (oldSession) {
+      const oldMonitor = monitors.get(oldSession.sessionId);
+      if (oldMonitor) {
+        oldMonitor.transcriptWatcher.stop();
+        oldMonitor.summaryTimer.stop();
+        oldMonitor.statusMessage.destroy();
+        monitors.delete(oldSession.sessionId);
+      }
+      approvalManager.cleanupSession(oldSession.sessionId);
+      inputRouter.cleanup(oldSession.sessionId);
+      if (oldSession.status === 'active') {
+        sessionStore.updateStatus(oldSession.sessionId, 'closed');
+      }
+    }
+
+    // Post timestamped separator (SESS-02)
+    const now = new Date();
+    const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const separator = `\u2500\u2500\u2500 context cleared at ${timeStr} \u2500\u2500\u2500`;
+    await batcher.enqueueImmediate(threadId, separator);
+
+    // Reset counters (SESS-05)
+    sessionStore.resetCounters(newSessionId);
+
+    // Fresh monitoring (SESS-03)
+    const newSession = sessionStore.get(newSessionId)!;
+    initMonitoring(newSession);
+
+    // Update the ClearDetector to track the new session ID
+    const detector = clearDetectors.get(cwd);
+    if (detector) {
+      detector.updateSessionId(newSessionId);
+    }
+
+    // Re-detect input method
+    void inputRouter.register(newSessionId, cwd, newSession.permissionMode).then(() => {
+      const method = inputRouter.getMethod(newSessionId);
+      if (method) {
+        sessionStore.updateInputMethod(newSessionId, method);
+      }
+    });
+  }
 
   // Phase 3: Track original message text for approval expiry edits
   const approvalMessageTexts = new Map<string, string>();
@@ -333,6 +451,9 @@ export async function main(): Promise<void> {
         // Initialize fresh monitoring (creates new StatusMessage, pins it) (SESS-03)
         initMonitoring(session);
 
+        // Update ClearDetector for the new session ID
+        startClearDetector(session);
+
         // Re-detect input method
         void inputRouter.register(session.sessionId, session.cwd, session.permissionMode).then(() => {
           const method = inputRouter.getMethod(session.sessionId);
@@ -365,6 +486,9 @@ export async function main(): Promise<void> {
 
       // Initialize monitoring components for this session
       initMonitoring(session);
+
+      // Start filesystem-based /clear detector (workaround for bug #6428)
+      startClearDetector(session);
 
       // Detect and register input method (tmux / FIFO / SDK resume)
       void inputRouter.register(session.sessionId, session.cwd, session.permissionMode).then(() => {
@@ -546,6 +670,8 @@ export async function main(): Promise<void> {
       try {
         // Re-initialize monitoring for active sessions on restart
         initMonitoring(session);
+        // Start /clear detector (filesystem workaround for bug #6428)
+        startClearDetector(session);
         // Re-detect input method
         void inputRouter.register(session.sessionId, session.cwd, session.permissionMode);
       } catch (err) {
@@ -606,6 +732,11 @@ export async function main(): Promise<void> {
     }
     monitors.clear();
     clearPending.clear();
+    // Stop all clear detectors
+    for (const [, detector] of clearDetectors) {
+      detector.stop();
+    }
+    clearDetectors.clear();
     // Phase 3: Clean up control managers
     approvalManager.shutdown();
     batcher.shutdown();

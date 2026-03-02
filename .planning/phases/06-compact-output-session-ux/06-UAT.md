@@ -1,9 +1,9 @@
 ---
-status: diagnosed
+status: passed
 phase: 06-compact-output-session-ux
 source: [06-01-SUMMARY.md, 06-02-SUMMARY.md, 06-03-SUMMARY.md]
 started: 2026-03-01T22:00:00Z
-updated: 2026-03-02T01:15:00Z
+updated: 2026-03-02T14:00:00Z
 ---
 
 ## Current Test
@@ -46,76 +46,27 @@ result: pass
 
 ### 9. /clear Separator
 expected: After /clear, a visual separator line appears in the topic with a timestamp, like "─── context cleared at 14:30 ───" using box-drawing characters.
-result: issue
-reported: "I'm not seeing a separator"
-severity: major
+previous_result: issue (plan 04 applied fix, then ClearDetector workaround)
+result: pass
 
 ### 10. /clear Status Pin Rotation
-expected: After /clear, the previously pinned status message is unpinned and a fresh new status message is posted and pinned in its place.
-result: issue
-reported: "I'm not seeing a new status message being posted. Additionally, no need to unpin the previously pinned status message."
-severity: major
+expected: After /clear, a fresh new status message is posted and pinned. (No unpin of old message needed.)
+previous_result: issue (plan 04 applied fix, then ClearDetector workaround)
+result: pass
 
 ### 11. /clear Counter Reset
 expected: After /clear, the new pinned status message shows counters reset to zero: "0 calls | 0 files" and "0% ctx". Duration timer also resets.
-result: issue
-reported: "Like I said in response to the previous test, not working."
-severity: major
+previous_result: issue (plan 04 applied fix, then ClearDetector workaround)
+result: pass
 
 ## Summary
 
 total: 11
-passed: 8
-issues: 3
+passed: 11
+issues: 0
 pending: 0
 skipped: 0
 
 ## Gaps
 
-- truth: "Visual separator line appears in the topic after /clear with timestamp"
-  status: failed
-  reason: "User reported: I'm not seeing a separator"
-  severity: major
-  test: 9
-  root_cause: "Claude Code upstream bug #6428 - SessionEnd doesn't fire on /clear. The clearPending bridge map is never populated, so the separator code in onSessionStart is skipped."
-  artifacts:
-    - path: "src/index.ts"
-      issue: "onSessionStart clear branch reads from clearPending map which is never populated when SessionEnd doesn't fire"
-    - path: "src/hooks/handlers.ts"
-      issue: "handleSessionStart source=clear uses getRecentlyClosedByCwd() which requires session to be closed, but it's still active"
-  missing:
-    - "Restructure /clear handling to work with SessionStart(source=clear) alone, without requiring preceding SessionEnd"
-    - "In handlers.ts: when source=clear, look for active session by cwd using getActiveByCwd() instead of getRecentlyClosedByCwd()"
-  debug_session: ".planning/debug/clear-separator-missing.md"
-
-- truth: "After /clear, a fresh new status message is posted and pinned"
-  status: failed
-  reason: "User reported: I'm not seeing a new status message being posted. Additionally, no need to unpin the previously pinned status message."
-  severity: major
-  test: 10
-  root_cause: "Same upstream bug #6428. Without SessionEnd firing, clearPending is empty, so onSessionStart skips status message creation. Also: user says unpin is unnecessary."
-  artifacts:
-    - path: "src/index.ts"
-      issue: "clearPending.get(session.cwd) returns undefined because SessionEnd never stored anything"
-    - path: "src/hooks/handlers.ts"
-      issue: "Falls through to new-session path creating duplicate topic instead of reusing existing one"
-  missing:
-    - "Extract threadId and statusMessageId directly from existing active session object instead of clearPending map"
-    - "Clean up old session monitoring during SessionStart(source=clear) handler since SessionEnd never does this"
-    - "Remove unpin logic per user feedback"
-  debug_session: ".planning/debug/clear-no-status-message.md"
-
-- truth: "After /clear, status message counters reset to zero"
-  status: failed
-  reason: "User reported: Like I said in response to the previous test, not working."
-  severity: major
-  test: 11
-  root_cause: "Dependent on test 10. Counter reset code (sessionStore.resetCounters, initMonitoring) is correctly implemented but never reached because the clear branch in onSessionStart is skipped."
-  artifacts:
-    - path: "src/sessions/session-store.ts"
-      issue: "resetCounters() method exists and is correct, but never called"
-    - path: "src/index.ts"
-      issue: "initMonitoring(session) call in clear branch is never reached"
-  missing:
-    - "Will resolve automatically when test 10 fix is applied"
-  debug_session: ".planning/debug/clear-counter-reset.md"
+None. All gaps resolved by ClearDetector filesystem workaround (bypasses upstream hook limitation).
