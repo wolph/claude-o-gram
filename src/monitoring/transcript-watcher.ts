@@ -56,14 +56,18 @@ export class TranscriptWatcher {
   /** Debounce delay for fs.watch change events */
   private static readonly DEBOUNCE_MS = 100;
 
+  private onSidechainMessage?: (text: string) => void;
+
   constructor(
     filePath: string,
     onAssistantMessage: (text: string) => void,
     onUsageUpdate: (usage: TokenUsage) => void,
+    onSidechainMessage?: (text: string) => void,
   ) {
     this.filePath = filePath;
     this.onAssistantMessage = onAssistantMessage;
     this.onUsageUpdate = onUsageUpdate;
+    this.onSidechainMessage = onSidechainMessage;
   }
 
   /**
@@ -201,8 +205,32 @@ export class TranscriptWatcher {
    * Filters out sidechain (subagent) messages and tool_use/tool_result blocks.
    */
   private processEntry(entry: TranscriptEntry): void {
-    // Skip subagent messages
-    if (entry.isSidechain) return;
+    // Subagent (sidechain) messages: emit via sidechain callback if registered
+    if (entry.isSidechain) {
+      if (!this.onSidechainMessage) return;
+      if (entry.type !== 'assistant') return;
+      if (entry.message.role !== 'assistant') return;
+
+      // Extract text content (same logic as main chain)
+      const content = entry.message.content;
+      let text: string | null = null;
+      if (typeof content === 'string') {
+        text = content;
+      } else if (Array.isArray(content)) {
+        const textParts = (content as ContentBlock[])
+          .filter(
+            (block): block is { type: 'text'; text: string } =>
+              block.type === 'text',
+          )
+          .map((block) => block.text);
+        text = textParts.length > 0 ? textParts.join('\n') : null;
+      }
+
+      if (text && text.trim().length > 0) {
+        this.onSidechainMessage(text);
+      }
+      return;
+    }
 
     // Only process assistant messages
     if (entry.type !== 'assistant') return;
