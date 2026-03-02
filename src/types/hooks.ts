@@ -54,3 +54,20 @@ export interface StopPayload extends HookPayload {
   stop_hook_active: boolean;
   last_assistant_message: string;
 }
+
+/** Payload for SubagentStart hook event (command hook, fire-and-forget) */
+export interface SubagentStartPayload extends HookPayload {
+  hook_event_name: 'SubagentStart';
+  agent_id: string;
+  agent_type: string;  // "Explore", "Plan", custom agent type
+}
+
+/** Payload for SubagentStop hook event (HTTP hook, fire-and-forget) */
+export interface SubagentStopPayload extends HookPayload {
+  hook_event_name: 'SubagentStop';
+  stop_hook_active: boolean;
+  agent_id: string;
+  agent_type: string;
+  agent_transcript_path: string;
+  last_assistant_message: string;
+}
