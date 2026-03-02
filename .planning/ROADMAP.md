@@ -78,11 +78,11 @@ Plans:
   2. Tool calls made during an active subagent are visually tagged with the agent's name prefix
   3. Subagent text output is visually tagged with the agent's name prefix
   4. Nested subagents (agent spawning agent) show stacked prefixes up to 2 levels deep
-**Plans**: TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] 08-01: TBD
-- [ ] 08-02: TBD
+- [ ] 08-01-PLAN.md -- Subagent infrastructure: types, SubagentTracker, hook registration (command + HTTP), Fastify routes, handler methods, formatter functions
+- [ ] 08-02-PLAN.md -- Subagent wiring: TranscriptWatcher sidechain callback, index.ts integration (spawn/done/tool prefix/text prefix/auto-approve dedup/cleanup)
 
 ## Progress
 
@@ -98,4 +98,4 @@ Phases execute in numeric order: 6 -> 7 -> 8
 | 5. tmux Cleanup | v2.0 | 1/1 | Complete | 2026-03-01 |
 | 6. Compact Output & Session UX | v3.0 | 4/4 | Complete | 2026-03-02 |
 | 7. Permission Modes | v3.0 | 1/2 | In Progress | - |
-| 8. Subagent Visibility | v3.0 | 0/? | Not started | - |
+| 8. Subagent Visibility | v3.0 | 0/2 | Not started | - |
