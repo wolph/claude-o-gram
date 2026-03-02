@@ -1,12 +1,13 @@
 import { Bot, InputFile, InlineKeyboard } from 'grammy';
 import type { BotContext } from './bot.js';
+import { STATUS_EMOJIS } from '../monitoring/topic-status.js';
 
 /**
  * Forum topic lifecycle management for Telegram supergroups.
  *
  * Handles creating, closing, reopening, renaming topics,
  * sending messages and file attachments to specific topics.
- * Uses status emojis per user decisions.
+ * Status emoji prefixes are managed by TopicStatusManager (Phase 9).
  */
 export class TopicManager {
   private bot: Bot<BotContext>;
@@ -18,14 +19,15 @@ export class TopicManager {
   }
 
   /**
-   * Create a new forum topic with active status emoji.
+   * Create a new forum topic.
+   * Status emoji prefix is set by TopicStatusManager after creation.
    * @returns The message_thread_id for the created topic.
    */
   async createTopic(name: string): Promise<number> {
     try {
       const topic = await this.bot.api.createForumTopic(
         this.chatId,
-        '\u{1F7E2} ' + name,
+        name,
       );
       return topic.message_thread_id;
     } catch (error) {
@@ -36,12 +38,13 @@ export class TopicManager {
 
   /**
    * Close a topic with done status emoji.
+   * Uses shared STATUS_EMOJIS.done constant for the checkmark prefix.
    * Best-effort: logs errors but does not throw.
    */
   async closeTopic(threadId: number, topicName: string): Promise<void> {
     try {
       await this.bot.api.editForumTopic(this.chatId, threadId, {
-        name: '\u2705 ' + topicName + ' (done)',
+        name: STATUS_EMOJIS.done + ' ' + topicName + ' (done)',
       });
       await this.bot.api.closeForumTopic(this.chatId, threadId);
     } catch (error) {
@@ -50,23 +53,20 @@ export class TopicManager {
   }
 
   /**
-   * Reopen a closed topic and restore active status emoji.
-   * Used when a session resumes.
+   * Reopen a closed topic.
+   * Status emoji is set by TopicStatusManager after reopen.
    */
-  async reopenTopic(threadId: number, topicName: string): Promise<void> {
+  async reopenTopic(threadId: number, _topicName: string): Promise<void> {
     await this.bot.api.reopenForumTopic(this.chatId, threadId);
-    await this.bot.api.editForumTopic(this.chatId, threadId, {
-      name: '\u{1F7E2} ' + topicName,
-    });
   }
 
   /**
    * Rename a topic (e.g., when user runs /rename in Claude Code).
-   * Preserves the active status emoji prefix.
+   * Sets plain name without emoji -- TopicStatusManager handles the prefix.
    */
   async renameTopic(threadId: number, newName: string): Promise<void> {
     await this.bot.api.editForumTopic(this.chatId, threadId, {
-      name: '\u{1F7E2} ' + newName,
+      name: newName,
     });
   }
 

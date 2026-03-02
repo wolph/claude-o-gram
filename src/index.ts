@@ -640,11 +640,6 @@ export async function main(): Promise<void> {
           monitor.statusMessage.requestUpdate(
             buildStatusData(latestSession, payload.tool_name),
           );
-          // Update topic description with compact status
-          const ctx = latestSession.contextPercent || 0;
-          monitor.statusMessage.updateTopicDescription(
-            `\u{1F7E2} ${latestSession.topicName} | ${ctx}% ctx`,
-          );
         }
       }
     },

@@ -153,28 +153,6 @@ export class StatusMessage {
   }
 
   /**
-   * Update the forum topic name/description with a compact status string.
-   * Topic names are limited to 128 characters by the Telegram API.
-   * Failure is non-fatal.
-   */
-  async updateTopicDescription(description: string): Promise<void> {
-    const truncated = description.length > 128
-      ? description.slice(0, 125) + '...'
-      : description;
-
-    try {
-      await this.bot.api.editForumTopic(this.chatId, this.threadId, {
-        name: truncated,
-      });
-    } catch (err) {
-      console.warn(
-        'StatusMessage: failed to update topic description:',
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
-
-  /**
    * Clean up: clear any pending timer and send a final "Session ended" update.
    * The final update is best-effort (fire-and-forget).
    */
