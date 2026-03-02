@@ -1,16 +1,16 @@
-# Architecture Research: v3.0 UX Overhaul Integration
+# Architecture Research: v4.0 Status & Settings Integration
 
-**Domain:** Telegram Bot UX features integrating with existing hook/transcript architecture
-**Researched:** 2026-03-01
-**Confidence:** HIGH (existing codebase fully analyzed, official Claude Code hooks docs verified, Telegram Bot API constraints verified)
+**Domain:** Claude Code Telegram Bridge -- adding status indicators, sub-agent suppression, sticky deduplication, and settings topic to existing architecture
+**Researched:** 2026-03-02
+**Confidence:** HIGH (existing codebase fully analyzed, Telegram Bot API constraints verified, v3.0 architecture fully understood)
 
-## Current Architecture (Baseline)
+## Existing Architecture (v3.0 Baseline)
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
 │                        Claude Code Process                            │
 │  Hooks: SessionStart, SessionEnd, PreToolUse, PostToolUse,            │
-│         Notification, SubagentStart, SubagentStop                     │
+│         Notification, Stop, SubagentStart, SubagentStop               │
 │  Transcript: ~/.claude/projects/.../session.jsonl                     │
 └──────────────┬──────────────────────────────────────┬─────────────────┘
                │ HTTP POST (hook events)              │ JSONL file writes
@@ -18,21 +18,27 @@
 ┌──────────────────────────┐         ┌──────────────────────────────────┐
 │  Fastify Hook Server     │         │  TranscriptWatcher (per-session) │
 │  /hooks/session-start    │         │  fs.watch + byte-position tail   │
-│  /hooks/session-end      │         │  Filters: isSidechain === false  │
-│  /hooks/post-tool-use    │         │  Emits: onAssistantMessage,      │
-│  /hooks/notification     │         │         onUsageUpdate            │
+│  /hooks/session-end      │         │  Emits: onAssistantMessage,      │
+│  /hooks/post-tool-use    │         │         onUsageUpdate,           │
+│  /hooks/notification     │         │         onSidechainMessage       │
 │  /hooks/pre-tool-use     │         └──────────────┬───────────────────┘
 │    (BLOCKING)            │                        │
+│  /hooks/subagent-start   │                        │
+│  /hooks/subagent-stop    │                        │
 └──────────┬───────────────┘                        │
            │                                        │
            ▼                                        ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │                         index.ts Wiring Layer                        │
 │  HookCallbacks: onSessionStart, onSessionEnd, onToolUse,             │
-│                 onNotification, onPreToolUse, onBackfillSummary       │
+│                 onNotification, onPreToolUse, onStop,                 │
+│                 onSubagentStart, onSubagentStop, onBackfillSummary    │
 │  SessionMonitor: { transcriptWatcher, statusMessage, summaryTimer }  │
 │  ApprovalManager: deferred promises keyed by tool_use_id             │
+│  PermissionModeManager: per-session auto-accept state machine        │
+│  SubagentTracker: agent lifecycle, depth, description stash          │
 │  InputRouter: tmux | fifo | sdk-resume per session                   │
+│  ClearDetector: filesystem watcher for /clear workaround             │
 └──────────┬───────────────────────────────────────────────────────────┘
            │
            ▼
@@ -40,681 +46,676 @@
 │                          Telegram Layer                               │
 │  Bot (grammY): callback queries, text input, /commands               │
 │  TopicManager: create/close/reopen/rename topics, send messages      │
-│  MessageBatcher: debounce tool calls into combined messages          │
+│  MessageBatcher: 2s debounce, combines messages, expand cache        │
 │  StatusMessage: pinned msg, edit-in-place with 3s debounce           │
-│  Formatter: formatToolUse, formatApprovalRequest, etc.               │
+│  ExpandCache: in-memory LRU for expand/collapse button content       │
+│  Formatter: formatToolCompact, formatApproval*, formatSubagent*      │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Architectural Properties
+### Current Topic Naming Conventions (v3.0)
 
-1. **Hook server is the event source** -- all tool calls and session lifecycle arrive as HTTP POSTs
-2. **TranscriptWatcher is the text source** -- Claude's text output comes from tailing JSONL, currently filters `isSidechain === true`
-3. **ApprovalManager blocks HTTP responses** -- PreToolUse hook connection stays open until user taps Approve/Deny or timeout
-4. **MessageBatcher debounces** -- 2s window, combines messages, respects 4096 char Telegram limit
-5. **StatusMessage edits in place** -- pinned per-topic, 3s debounce minimum
-6. **SessionStore is the truth** -- in-memory Map with atomic JSON persistence, keyed by sessionId, lookup by threadId
+The `TopicManager` already uses emoji unicode prefixes to convey status via topic names:
+
+| State | Current Prefix | API Method |
+|-------|---------------|------------|
+| Active (new/resume) | `🟢 project-name` | `createForumTopic` / `editForumTopic({ name })` |
+| Done (closed) | `✅ project-name (done)` | `editForumTopic({ name })` + `closeForumTopic` |
+
+### Critical Telegram API Constraint (HIGH confidence)
+
+`icon_color` (RGB integer) in forum topics is ONLY settable at creation time via `createForumTopic`. `editForumTopic` does NOT accept `icon_color`. The `icon_custom_emoji_id` parameter CAN be changed after creation, but requires Telegram Premium or emoji IDs from `getForumTopicIconStickers` (the default topic icon pack) -- these are opaque IDs with no semantic color guarantee.
+
+**Conclusion:** Color-coded status is best implemented via unicode circle emoji prefixes in the topic name (🟢/🟡/🔴/⬜), NOT via the `icon_color` API field. The existing `TopicManager` already uses this pattern. The v4.0 feature extends it with two new states (busy/yellow and down/gray) and adds startup reset behavior.
+
+---
 
 ## Feature Integration Analysis
 
-### Feature 1: Compact Tool Output with Expand/Collapse
+### Feature 1: Color-Coded Topic Status Indicators
 
-**Requirement:** Tool calls displayed as `Tool(args...)` with 250-char limit. Inline "Expand" button shows full content.
+**Requirement:** Green=ready, yellow=busy, red=error, gray=down. All old topics set to gray on startup.
+
+**Mechanism:** Extend the existing `TopicManager.editTopicName()` pattern. No new Telegram API calls needed -- just extend the prefix logic.
+
+**Status Color Mapping:**
+
+| Status | Emoji Prefix | When |
+|--------|-------------|------|
+| Ready (idle, awaiting input) | `🟢` | Session active, Stop hook fired, no subagent |
+| Busy (working) | `🟡` | PostToolUse, SubagentStart received |
+| Error | `🔴` | Session error state (future use; not triggered today) |
+| Down (closed/offline) | `⬜` | Bot startup (all old sessions), SessionEnd |
+
+**Current state vs target:**
+
+- Currently: `🟢` on create/resume, `✅ (done)` on close -- no busy/down states
+- Target: 4-state machine updated on hook events
 
 **Integration Points:**
 
 | Component | Change Type | Description |
 |-----------|-------------|-------------|
-| `formatter.ts` | **MODIFY** | New `formatCompactToolUse()` returning compact one-liner + full content |
-| `bot.ts` | **MODIFY** | Add `callbackQuery` handler for `expand:{id}` and `collapse:{id}` |
-| `rate-limiter.ts` | **MODIFY** | `enqueue()` must accept optional `InlineKeyboard` for expand button |
-| `topics.ts` | **MODIFY** | `sendMessage()` must accept optional `reply_markup` parameter |
-| New: `content-store.ts` | **NEW** | In-memory Map storing full tool output keyed by short ID |
-
-**Architecture Pattern: Server-Side Content Store**
-
-Telegram's `callback_data` is limited to 64 bytes. A tool_use_id UUID is 36 chars. With prefix `expand:`, that is 43 bytes -- fits. But the FULL content to show on expand cannot be in callback_data. Solution: store full content server-side, look up on callback.
-
-```typescript
-// src/bot/content-store.ts
-interface StoredContent {
-  compactHtml: string;      // The collapsed one-liner
-  expandedHtml: string;     // The full detailed view
-  threadId: number;         // For validation
-  createdAt: number;        // For TTL cleanup
-}
-
-class ContentStore {
-  private store = new Map<string, StoredContent>();
-  private counter = 0;
-
-  // Short IDs: monotonic counter, base36 = ~4 chars for first 1M entries
-  store(content: StoredContent): string {
-    const id = (this.counter++).toString(36);
-    this.store.set(id, content);
-    return id;
-  }
-
-  get(id: string): StoredContent | undefined {
-    return this.store.get(id);
-  }
-
-  // Periodic cleanup: remove entries older than 1 hour
-  cleanup(maxAgeMs: number = 3600_000): void { ... }
-}
-```
-
-**callback_data format:** `x:{id}` for expand (3-7 bytes), `c:{id}` for collapse (3-7 bytes). Well within 64-byte limit.
+| `bot/topics.ts` | **MODIFY** | Add `setTopicStatus(threadId, topicName, status)` method; status enum covers `ready | busy | error | down` |
+| `index.ts` | **MODIFY** | Call `setTopicStatus('busy')` on PostToolUse and SubagentStart; call `setTopicStatus('ready')` on Stop hook; call `setTopicStatus('down')` on SessionEnd |
+| `index.ts` startup | **MODIFY** | On bot start, iterate all sessions in SessionStore, call `setTopicStatus('down')` for each known threadId |
+| `types/sessions.ts` | **MODIFY** | Add `topicStatus: 'ready' | 'busy' | 'error' | 'down'` field to `SessionInfo` for persistence |
+| `sessions/session-store.ts` | **MODIFY** | Add `updateTopicStatus(sessionId, status)` method |
 
 **Data Flow:**
 
 ```
-PostToolUse hook arrives
+Bot starts up
     ↓
-HookHandlers.handlePostToolUse() -- unchanged
+sessionStore.getAllSessions() → filter: threadId > 0
     ↓
-callbacks.onToolUse() in index.ts
+for each: topicManager.setTopicStatus(threadId, topicName, 'down')
+    (fire-and-forget, best-effort -- topic may be closed already)
+
+PostToolUse / SubagentStart hook fires
     ↓
-formatter.formatCompactToolUse(payload) → { compact, expanded }
+callbacks.onToolUse / callbacks.onSubagentStart
     ↓
-contentStore.store({ compactHtml, expandedHtml, threadId })
+topicManager.setTopicStatus(session.threadId, session.topicName, 'busy')
+    (debounced -- avoid editForumTopic spam on rapid tool calls)
+
+Stop hook fires
     ↓
-batcher.enqueue(threadId, compact, { keyboard: expandButton(id) })
+callbacks.onStop
     ↓
-User taps [Expand ▼]
+topicManager.setTopicStatus(session.threadId, session.topicName, 'ready')
+
+SessionEnd fires
     ↓
-bot.callbackQuery(/^x:(.+)$/) → contentStore.get(id) → editMessageText(expanded, collapseButton)
+callbacks.onSessionEnd
     ↓
-User taps [Collapse ▲]
-    ↓
-bot.callbackQuery(/^c:(.+)$/) → contentStore.get(id) → editMessageText(compact, expandButton)
+topicManager.closeTopic() (existing) with 'down' prefix instead of '✅'
 ```
 
-**Critical Decision: When to show expand button?**
+**Debouncing Requirement:**
 
-Only when content exceeds 250 chars. Short tool calls (Read, Glob) stay as bare one-liners with no button. This keeps noise low.
-
-**MessageBatcher Change:**
-
-The batcher currently concatenates messages with `\n\n` separators. Messages with inline keyboards CANNOT be batched together (each keyboard is per-message). Two options:
-
-1. **Messages with keyboards bypass batching** -- send immediately via `enqueueImmediate`. This is safe because expand buttons are informational, not time-critical.
-2. **Split batch on keyboard boundary** -- flush accumulated non-keyboard messages, then send keyboard message, continue batching.
-
-**Recommendation: Option 1** because it is simpler and the keyboard messages are already lower frequency (only for long tool outputs).
-
-However, this creates a subtlety: if a rapid sequence of tool calls all have expand buttons, they become individual messages instead of batched. This is acceptable because long-output tools (Bash with output, Write with content) are less frequent than short ones (Read, Glob, Grep).
-
-### Feature 2: Permission Modes (Accept All, Same Tool, Safe Only, Until Done)
-
-**Requirement:** Replace binary approve/deny with tiered auto-accept modes. No timeout -- wait forever.
-
-**Integration Points:**
-
-| Component | Change Type | Description |
-|-----------|-------------|-------------|
-| `approval-manager.ts` | **MODIFY** | Add mode state per-session, auto-resolve logic |
-| `bot.ts` | **MODIFY** | New callback queries for mode buttons, new /permission command |
-| `formatter.ts` | **MODIFY** | Mode selector keyboard on approval messages |
-| `hooks/server.ts` | **MODIFY** | Remove timeout for PreToolUse, respect auto-accept |
-| `types/sessions.ts` | **MODIFY** | Add `permissionAutoAccept` field to SessionInfo |
-| `session-store.ts` | **MODIFY** | Add `updatePermissionMode()` method |
-| `types/config.ts` | **MODIFY** | Remove `approvalTimeoutMs`, add default permission mode |
-
-**Architecture Pattern: Per-Session Permission State Machine**
-
-```
-                    ┌─────────────────────────┐
-                    │  Permission Mode State   │
-                    │  (per session in store)   │
-                    └────────────┬────────────┘
-                                 │
-    ┌────────────────┬───────────┼───────────┬──────────────────┐
-    ▼                ▼           ▼           ▼                  ▼
- ┌──────┐    ┌───────────┐  ┌────────┐  ┌──────────┐    ┌──────────┐
- │ Ask  │    │ Same Tool │  │ Safe   │  │ All      │    │ Until    │
- │ Each │    │ Auto      │  │ Only   │  │ Auto     │    │ Done     │
- └──────┘    └───────────┘  └────────┘  └──────────┘    └──────────┘
-  default     auto-accept    auto-accept  auto-accept    auto-accept
-  (prompt)    same tool_name  Read/Glob/   everything     everything
-              as last         Grep/safe               until session ends
-              approved        tools only
-```
-
-**Mode definitions:**
-
-| Mode | Behavior | Auto-Accept Criteria |
-|------|----------|---------------------|
-| Ask Each | Current behavior | Never auto-accept |
-| Same Tool | Auto-accept if tool_name matches a previously approved tool | `approvedTools.has(payload.tool_name)` |
-| Safe Only | Auto-accept read-only tools | `SAFE_TOOLS.has(payload.tool_name)` |
-| Accept All | Auto-accept everything for this session | Always |
-| Until Done | Auto-accept everything until session ends | Always (same as Accept All but named for clarity) |
-
-**Where auto-accept logic lives:**
-
-The PreToolUse handler in `hooks/server.ts` currently checks `config.autoApprove` and `payload.permission_mode`. The new mode logic should live in `ApprovalManager` because:
-
-1. ApprovalManager already owns the per-session approval state
-2. The mode is per-session, and ApprovalManager is already keyed by sessionId
-3. Keeps the hook server thin (just delegates)
+`editForumTopic` is rate-limited by Telegram (same limits as `editMessageText`). Rapid PostToolUse events (e.g., 10 Read calls in 2s) would trigger 10 `editForumTopic` calls. The busy state only needs to be set ONCE per "working" period. Debounce strategy: track `currentTopicStatus` per session in-memory; skip `editForumTopic` if already in the target state.
 
 ```typescript
-// In ApprovalManager
-shouldAutoAccept(sessionId: string, toolName: string): boolean {
-  const mode = this.sessionModes.get(sessionId);
-  if (!mode || mode === 'ask') return false;
-  if (mode === 'all' || mode === 'until-done') return true;
-  if (mode === 'safe') return SAFE_TOOLS.has(toolName);
-  if (mode === 'same-tool') return this.approvedTools.get(sessionId)?.has(toolName) ?? false;
-  return false;
+// In TopicManager or SessionMonitor -- track current known state
+private topicStatusCache = new Map<number, string>(); // threadId -> current prefix
+
+async setTopicStatus(threadId: number, topicName: string, status: TopicStatus): Promise<void> {
+  const prefix = STATUS_PREFIXES[status];
+  const cacheKey = `${threadId}:${prefix}`;
+  if (this.topicStatusCache.get(threadId) === prefix) return; // Already in this state
+  this.topicStatusCache.set(threadId, prefix);
+  await this.editTopicName(threadId, `${prefix} ${topicName}`);
 }
 ```
 
-**No Timeout Change:**
+**Startup Cleanup:**
 
-Current: `approvalTimeoutMs` defaults to 300000 (5 min). Requirement says "wait forever."
+On bot start, before `bot.start()`, iterate all sessions from SessionStore and set their topics to gray/down. This is fire-and-forget -- topics that are already closed will produce API errors which are swallowed. No need to re-open closed topics.
 
-Options:
-1. Set timeout to `Infinity` / remove `setTimeout` entirely
-2. Set very large timeout (24 hours) as safety net
+---
 
-**Recommendation: Option 2** -- use 24-hour timeout as a safety net against leaked promises. HTTP connections can also time out on the client (Claude Code) side, so "wait forever" really means "wait as long as Claude Code keeps the connection open."
+### Feature 2: Sub-Agent Silence by Default
 
-**Keyboard Layout for Approval Messages:**
+**Requirement:** Sub-agent output suppressed by default (no topic, no output). Configurable to re-enable.
 
-```
-[Approve] [Deny]
-[Accept All] [Same Tool] [Safe Only]
-```
+**Current behavior (v3.0):** SubagentStart posts spawn announcement, PostToolUse hooks from subagents post with `[AgentName]` prefix, SubagentStop posts done announcement, sidechain transcript messages post with `[AgentName]` prefix.
 
-callback_data: `aa:{toolUseId}`, `st:{toolUseId}`, `so:{toolUseId}` -- all well within 64 bytes.
-
-On "Same Tool" tap: approve this tool AND add tool_name to session's approvedTools set. On "Accept All" tap: approve this tool AND set session mode to 'all'.
-
-**Stdout Visibility (Local Permission):**
-
-The requirement says "Permissions visible locally via stdout." This means when a PreToolUse arrives, ALSO print to the bot process's stdout. This is trivial -- just add `console.log()` in the PreToolUse callback. No architectural change needed.
-
-### Feature 3: Subagent Visibility
-
-**Requirement:** Subagent output visible with agent name/type/status labels.
+**Target behavior:** Sub-agent events silenced unless explicitly enabled. Config key `SUBAGENT_OUTPUT=show|hide` (default: `hide`).
 
 **Integration Points:**
 
 | Component | Change Type | Description |
 |-----------|-------------|-------------|
-| `transcript-watcher.ts` | **MODIFY** | Stop filtering `isSidechain === true`, instead emit with agent metadata |
-| `types/monitoring.ts` | **MODIFY** | Extend TranscriptEntry type with subagent fields |
-| `hooks/server.ts` | **MODIFY** | Add routes for SubagentStart, SubagentStop hooks |
-| `hooks/handlers.ts` | **MODIFY** | New handlers for SubagentStart/SubagentStop |
-| `types/hooks.ts` | **MODIFY** | Add SubagentStartPayload, SubagentStopPayload types |
-| `formatter.ts` | **MODIFY** | New formatSubagentStart(), formatSubagentStop() |
-| `index.ts` | **MODIFY** | Wire new hook callbacks |
-| New: `types/hooks.ts` additions | **MODIFY** | SubagentStartPayload, SubagentStopPayload |
+| `types/config.ts` | **MODIFY** | Add `subagentOutput: 'show' | 'hide'` field |
+| `src/config.ts` | **MODIFY** | Parse `SUBAGENT_OUTPUT` env var (default `'hide'`) |
+| `index.ts` | **MODIFY** | Gate `onSubagentStart`, `onSubagentStop`, and sidechain transcript handling on `config.subagentOutput === 'show'` |
+| `index.ts` | **MODIFY** | Gate subagent prefix on `PostToolUse` tool display on `config.subagentOutput === 'show'`; if `hide`, suppress the tool call entirely when a subagent is active |
 
-**Two Data Sources for Subagent Visibility:**
-
-1. **SubagentStart/SubagentStop hooks** -- structured events with agent_id, agent_type, agent_transcript_path
-2. **TranscriptWatcher with isSidechain entries** -- the actual text output from subagents
-
-**Architecture Decision: Use hooks for lifecycle, transcript for content.**
-
-The SubagentStart hook provides: `agent_id`, `agent_type` (e.g., "Explore", "Plan", "Bash").
-The SubagentStop hook provides: `agent_id`, `agent_type`, `agent_transcript_path`, `last_assistant_message`.
-
-The transcript entries with `isSidechain === true` contain the subagent's tool calls and text output.
-
-**Recommended approach:**
+**Data Flow (suppress path):**
 
 ```
-SubagentStart hook arrives → Post "Subagent started: [type] [agent_id]" to topic
-                           → Track agent_id in session state
+SubagentStart hook fires
+    ↓
+callbacks.onSubagentStart
+    ↓
+config.subagentOutput === 'hide' → subagentTracker.start() (still track, for lifecycle)
+                                  → skip spawn announcement post
+                                  → skip Telegram message
 
-Transcript entries with isSidechain === true → Post with "[SubagentType]:" prefix
-                                             → Use agent_id to look up type
+PostToolUse fires while subagent active
+    ↓
+callbacks.onToolUse
+    ↓
+config.subagentOutput === 'hide' AND subagentTracker.isSubagentActive(sessionId)
+    → return early (suppress tool display)
+    (still increment tool count for status message)
 
-SubagentStop hook arrives → Post "Subagent finished: [type]" with last_assistant_message summary
-                          → Clean up agent tracking
+TranscriptWatcher.onSidechainMessage fires
+    ↓
+config.subagentOutput === 'hide' → return without posting
+
+SubagentStop fires
+    ↓
+callbacks.onSubagentStop
+    ↓
+subagentTracker.stop() (still clean up state)
+config.subagentOutput === 'hide' → skip done announcement
 ```
 
-**TranscriptWatcher Change:**
+**Why still track in SubagentTracker even when hidden:**
 
-Current code at line 203-208 of transcript-watcher.ts:
+The subagentTracker is needed to correctly attribute PostToolUse events during suppression. If we skip `subagentTracker.start()`, the `isSubagentActive()` check fails and subagent tool calls would incorrectly appear as main-chain output. The tracker is pure in-memory state -- cheap to maintain regardless of display setting.
+
+**Session-Level Override (Optional, deferred):**
+
+Per-session override (e.g., `/verbose subagents`) is out of scope for this milestone. The config-level default covers the primary use case.
+
+---
+
+### Feature 3: Sticky Message Deduplication
+
+**Requirement:** Skip creating a new sticky/pinned message if content matches the existing pinned message.
+
+**Current behavior (v3.0):** `StatusMessage.initialize()` always sends a new message and pins it, even if the previous status message for the session (from a resume or clear) had the same initial content.
+
+**The actual duplication scenario:**
+
+The current `StatusMessage` class already has content deduplication for `requestUpdate()` (skips `editMessageText` if content unchanged). The missing dedup is in `initialize()` on session resume or restart -- a new "Starting..." message is always posted even if one already exists.
+
+**Integration Points:**
+
+| Component | Change Type | Description |
+|-----------|-------------|-------------|
+| `monitoring/status-message.ts` | **MODIFY** | `initialize(existingMessageId?)` -- if an existing message ID is provided, attempt to re-use it instead of sending a new message; verify content via stored `lastSentText` |
+| `index.ts` | **MODIFY** | In `initMonitoring()`, pass `session.statusMessageId` to `StatusMessage` when it is non-zero (resume/restart path); only call `initialize()` for new sessions (statusMessageId === 0) |
+| `sessions/session-store.ts` | No change needed | `statusMessageId` already persisted |
+
+**Dedup Strategy:**
+
+For resume and reconnect flows (where `session.statusMessageId > 0`), instead of calling `initialize()`:
+1. Instantiate `StatusMessage` with the existing `messageId` pre-set
+2. The first `requestUpdate()` call will overwrite in place (existing behavior already works)
+3. Re-pin only if the message is not already pinned (requires a `getChatAdministrators` check OR just swallow the "already pinned" error)
+
+For `/clear` transitions:
+- A fresh status message IS desired (separator was posted, context is reset)
+- Pass `existingMessageId = 0` to force a new message
+
+**Concrete Change:**
+
 ```typescript
-private processEntry(entry: TranscriptEntry): void {
-  // Skip subagent messages
-  if (entry.isSidechain) return;
-```
-
-Change to:
-```typescript
-private processEntry(entry: TranscriptEntry): void {
-  if (entry.isSidechain) {
-    // Emit subagent messages through a different callback
-    this.onSubagentMessage?.(entry);
-    return;
+// StatusMessage (modified)
+async initialize(existingMessageId?: number): Promise<number> {
+  if (existingMessageId && existingMessageId > 0) {
+    // Resume path: adopt existing message, request update to sync content
+    this.messageId = existingMessageId;
+    this.requestUpdate(/* initial status data */);
+    return existingMessageId; // No new message sent, no new pin
   }
-```
-
-**New TranscriptWatcher constructor parameter:**
-```typescript
-constructor(
-  filePath: string,
-  onAssistantMessage: (text: string) => void,
-  onUsageUpdate: (usage: TokenUsage) => void,
-  onSubagentMessage?: (entry: TranscriptEntry) => void,  // NEW
-)
-```
-
-**Agent ID Correlation Problem:**
-
-The transcript's `isSidechain` entries do NOT contain the `agent_type` field. To label messages with the agent type, we need to correlate:
-- SubagentStart hook provides `agent_id` + `agent_type`
-- Transcript entries have `sessionId` but this is the parent session ID
-
-The transcript entries for subagents are written to a separate file: `agent_transcript_path` (e.g., `~/.claude/projects/.../abc123/subagents/agent-def456.jsonl`).
-
-**Key Insight:** Subagent transcript entries go to a SEPARATE JSONL file, not the main session transcript. The main transcript only has tool_use entries for the Agent tool itself. The subagent's actual work is in the subagent transcript file.
-
-**Revised approach:**
-
-Option A: Watch subagent transcript files (complex -- need dynamic file watchers)
-Option B: Use SubagentStop hook's `last_assistant_message` for summary (simpler, less real-time)
-Option C: Parse main transcript's Agent tool_use entries for subagent task context, then show SubagentStop summary
-
-**Recommendation: Option B + SubagentStart/Stop hooks for lifecycle.**
-
-Rationale: Watching N subagent transcript files dynamically adds significant complexity for marginal value. The main session transcript shows the Agent tool call (task description) and the subagent's tool calls still fire PostToolUse hooks. The SubagentStop hook provides the final result. This gives us:
-
-1. SubagentStart hook -> "Agent [type] started: [task description]"
-2. PostToolUse hooks from subagent -> tool calls appear (they already do, they have the same session_id)
-3. SubagentStop hook -> "Agent [type] finished: [summary]"
-
-**Wait -- do subagent PostToolUse hooks fire?** Need to verify. According to the hooks reference, PreToolUse/PostToolUse fire for subagent tool calls too. The hook payload includes the same `session_id` as the parent. So subagent tool calls are ALREADY being posted to Telegram -- they just lack the "[Subagent]" label.
-
-**Verification needed at implementation time:** Whether subagent PostToolUse hooks carry any identifier linking them to the subagent. If not, we need to use timing correlation between SubagentStart and SubagentStop to bracket which tool calls came from subagents.
-
-**Practical Subagent Tracking:**
-
-```typescript
-// Per-session active subagent tracking
-interface ActiveSubagent {
-  agentId: string;
-  agentType: string;
-  startedAt: number;
+  // New session path: send + pin (existing behavior)
+  ...
 }
-
-// In SessionStore or a new SubagentTracker
-activeSubagents: Map<string, ActiveSubagent[]>  // sessionId -> active subagents
 ```
 
-When a SubagentStart arrives: push to active list.
-When a SubagentStop arrives: remove from active list, post summary.
-When formatting PostToolUse during active subagent: prepend "[SubagentType]" label.
+```typescript
+// index.ts - initMonitoring (modified)
+const isResume = session.statusMessageId > 0;
+void statusMsg.initialize(isResume ? session.statusMessageId : undefined)
+  .then((statusMessageId) => {
+    if (!isResume) {
+      sessionStore.updateStatusMessageId(session.sessionId, statusMessageId);
+    }
+  });
+```
 
-**Confidence:** MEDIUM -- the exact behavior of PostToolUse hooks for subagent tool calls needs verification at implementation time. The hooks docs confirm SubagentStart/SubagentStop exist with the documented fields.
+**Edge Case:** Bot restart while Claude session is active. The old pinned message exists. `statusMessageId` is persisted. The new `StatusMessage` adopts it and posts an update edit. The pin is preserved.
 
-### Feature 4: /clear Topic Reuse
+---
 
-**Requirement:** `/clear` reuses existing topic instead of creating a new one. Posts separator message, re-pins fresh status.
+### Feature 4: Settings Topic
+
+**Requirement:** A dedicated Telegram topic for configuring bot settings interactively. Runtime configuration changes without restarting the bot.
+
+**Architecture Pattern: Singleton Settings Topic**
+
+One special topic in the group (not tied to any Claude session) where the user sends commands to change bot settings. The topic is created once by the bot and its ID is persisted. Commands are parsed from messages in that topic.
 
 **Integration Points:**
 
 | Component | Change Type | Description |
 |-----------|-------------|-------------|
-| `hooks/handlers.ts` | **MODIFY** | Detect `source === 'clear'` in handleSessionStart, reuse topic |
-| `index.ts` | **MODIFY** | initMonitoring must handle status message re-creation |
-| `status-message.ts` | **MODIFY** | Support re-initialization (new pinned message in existing topic) |
-| `session-store.ts` | **MODIFY** | Need method to reset session metadata while keeping threadId |
+| New: `settings/settings-store.ts` | **NEW** | Persist settings as JSON alongside session data. Read/write runtime config overrides. |
+| New: `settings/settings-topic.ts` | **NEW** | `SettingsTopic` class: create/find the settings topic, parse commands, apply changes |
+| `types/config.ts` | **MODIFY** | Add `settingsTopicId?: number` -- persisted ID of the settings topic |
+| `src/config.ts` | **MODIFY** | Load `settingsTopicId` from settings store on startup |
+| `bot/bot.ts` | **MODIFY** | Route messages from the settings topic to `SettingsTopic.handleMessage()` |
+| `index.ts` | **MODIFY** | Initialize `SettingsTopic` on startup; create settings topic if not found |
 
-**Architecture: /clear Flow**
+**Settings Topic Lifecycle:**
 
 ```
-User types /clear in Claude Code terminal
+Bot starts
     ↓
-Claude Code fires SessionEnd with reason "clear"
-    ↓ (current: closes topic)
-    ↓ (new: keep topic open, post separator)
-Claude Code fires SessionStart with source "clear"
-    ↓ (current: creates new topic -- wrong)
-    ↓ (new: detect 'clear', reuse topic)
+settingsStore.load() → find settingsTopicId
+    ↓
+if not found: topicManager.createSettingsTopic() → store new threadId
+if found: verify topic still exists (getForumTopicInfo or first message attempt)
+    ↓
+Post "Settings ready" message with current config summary
+    (only on first creation or after bot restart)
+
+User sends message in settings topic:
+    /subagents show|hide
+    /verbosity normal|verbose|quiet
+    /summary on|off
+    (etc.)
+    ↓
+bot.on('message:text') → detect settingsThreadId match
+    ↓
+SettingsTopic.handleCommand(text) → parse + apply + reply
+    ↓
+settingsStore.save() → persist change
+    ↓
+Runtime config object updated in-memory (no restart needed)
 ```
 
-**The tricky part:** SessionEnd fires BEFORE SessionStart. Current onSessionEnd closes the topic. We need to detect that the end reason is "clear" and NOT close the topic.
+**Settings Storage:**
 
-**Hook payload for SessionEnd with reason "clear":** Per the official docs, `SessionEnd` receives a `reason` field. We need to add this to `SessionEndPayload`:
+Store settings as a separate JSON file (e.g., `data/settings.json`) alongside `data/sessions.json`. This separates concerns and makes settings editable independently.
 
 ```typescript
-export interface SessionEndPayload extends HookPayload {
-  hook_event_name: 'SessionEnd';
-  reason: 'clear' | 'logout' | 'prompt_input_exit' | 'bypass_permissions_disabled' | 'other';
+// data/settings.json
+{
+  "settingsTopicId": 12345,
+  "subagentOutput": "hide",
+  "defaultVerbosity": "normal",
+  "summaryIntervalMs": 300000
 }
 ```
 
-**Flow:**
+**Runtime Config Override Mechanism:**
 
-1. SessionEnd with `reason === 'clear'`:
-   - Do NOT close the topic
-   - Do NOT post "Session ended" message
-   - Clean up monitoring (stop transcript watcher, summary timer)
-   - Keep session in store as "pending-clear" state
-   - Destroy old status message
+The `AppConfig` object loaded at startup from env is currently immutable. To support runtime changes:
 
-2. SessionStart with `source === 'clear'`:
-   - Detect pending-clear session by cwd match (same as resume detection)
-   - Reuse existing threadId
-   - Post separator: `"--- Session cleared ---"`
-   - Create new StatusMessage (new pinned message)
-   - Reset session metadata: toolCallCount=0, filesChanged=empty, contextPercent=0
-   - Re-initialize monitoring
-
-**Session ID Change:** Critical -- `/clear` creates a NEW session_id. The old session's data is stale. We need to:
-1. On SessionEnd(clear): mark session as `status: 'clearing'` (not 'closed')
-2. On SessionStart(clear): look up by cwd with status 'clearing', remap to new sessionId, reuse threadId
+- Wrap mutable settings in a `RuntimeSettings` object (separate from `AppConfig`)
+- `RuntimeSettings` holds settings that can change at runtime
+- Components that need these settings read from `RuntimeSettings`, not `AppConfig`
+- `SettingsTopic` writes to `RuntimeSettings` + persists to `settings.json`
 
 ```typescript
-// In handleSessionStart, before existing resume detection:
-if (payload.source === 'clear') {
-  const clearing = this.sessionStore.getClearingByCwd(payload.cwd);
-  if (clearing) {
-    // Remap: reuse topic, new session ID, reset counters
-    this.sessionStore.set(payload.session_id, {
-      ...clearing,
-      sessionId: payload.session_id,
-      transcriptPath: payload.transcript_path,
-      status: 'active',
-      startedAt: new Date().toISOString(),
-      toolCallCount: 0,
-      filesChanged: new Set<string>(),
-      contextPercent: 0,
-      suppressedCounts: {},
-      lastActivityAt: new Date().toISOString(),
-    });
-    // Post separator and re-init
-    await this.callbacks.onSessionClear(this.sessionStore.get(payload.session_id)!);
-    return;
-  }
+// src/settings/runtime-settings.ts
+export class RuntimeSettings {
+  subagentOutput: 'show' | 'hide';
+  defaultVerbosity: VerbosityTier;
+  summaryIntervalMs: number;
+
+  constructor(initial: Partial<RuntimeSettings>) { ... }
+
+  update(key: keyof RuntimeSettings, value: unknown): void { ... }
 }
 ```
 
-**New HookCallback needed:**
-```typescript
-onSessionClear(session: SessionInfo): Promise<void>;
+**Settings Topic Commands (MVP):**
+
+| Command | Effect | Example |
+|---------|--------|---------|
+| `/subagents show` | Enable sub-agent output | Show spawn/done + tool calls |
+| `/subagents hide` | Suppress sub-agent output | Default |
+| `/verbosity verbose\|normal\|quiet` | Set default verbosity for new sessions | `/verbosity quiet` |
+| `/summary on\|off` | Enable/disable periodic summary | `/summary off` |
+| `/status` | Show current settings | Lists all current values |
+
+**Settings Topic vs Session Topics:**
+
+The bot receives messages from all topics. The settings topic is identified by `settingsTopicId`. The text message handler in `bot.ts` needs a priority check:
+
+```
+message arrives in topic X
+    ↓
+if X === settingsTopicId → route to SettingsTopic.handleCommand()
+else → existing session routing (getByThreadId, then inputRouter)
 ```
 
-This posts the separator, creates new StatusMessage, re-pins it.
+---
 
 ## Component Responsibilities (New + Modified)
 
 | Component | Responsibility | Change Type |
 |-----------|---------------|-------------|
-| `content-store.ts` | Store expanded content for callback lookups | **NEW** |
-| `formatter.ts` | Compact tool format, subagent labels, mode keyboards | **MODIFY** |
-| `approval-manager.ts` | Per-session permission modes, auto-accept logic | **MODIFY** |
-| `transcript-watcher.ts` | Emit subagent messages (was: filter them) | **MODIFY** |
-| `hooks/handlers.ts` | SubagentStart/Stop handling, /clear detection | **MODIFY** |
-| `hooks/server.ts` | New routes, remove timeout, PermissionRequest route | **MODIFY** |
-| `types/hooks.ts` | SubagentStartPayload, SubagentStopPayload, reason field | **MODIFY** |
-| `types/sessions.ts` | Permission mode, clearing status | **MODIFY** |
-| `bot.ts` | Expand/collapse callbacks, mode callbacks, /clear handling | **MODIFY** |
-| `topics.ts` | reply_markup support in sendMessage | **MODIFY** |
-| `rate-limiter.ts` | Handle messages with keyboards (no batching) | **MODIFY** |
-| `status-message.ts` | Re-initialization for /clear flow | **MODIFY** |
-| `session-store.ts` | getClearingByCwd, permission mode methods | **MODIFY** |
-| `index.ts` | Wire new callbacks, content store, subagent tracking | **MODIFY** |
+| `bot/topics.ts` | Add `setTopicStatus()` with in-memory dedup, status enum | **MODIFY** |
+| `index.ts` | Wire status updates on PostToolUse/SubagentStart/Stop/SessionEnd; startup cleanup loop; gate subagent output on config; pass statusMessageId to initMonitoring | **MODIFY** |
+| `types/config.ts` | Add `subagentOutput: 'show' | 'hide'` | **MODIFY** |
+| `src/config.ts` | Parse `SUBAGENT_OUTPUT` env var | **MODIFY** |
+| `monitoring/status-message.ts` | `initialize(existingMessageId?)` for resume dedup | **MODIFY** |
+| `types/sessions.ts` | Add `topicStatus: TopicStatus` field | **MODIFY** |
+| `sessions/session-store.ts` | Add `updateTopicStatus()` method | **MODIFY** |
+| New: `settings/settings-store.ts` | Persist runtime settings to JSON | **NEW** |
+| New: `settings/settings-topic.ts` | Settings topic lifecycle, command parsing, runtime config updates | **NEW** |
+| New: `settings/runtime-settings.ts` | Mutable settings object for in-process runtime config | **NEW** |
 
-## Data Flow Changes
+---
 
-### Current Tool Call Flow
+## System Overview (v4.0 Target)
+
 ```
-PostToolUse → HookHandlers → verbosity filter → formatter.formatToolUse() → batcher.enqueue() → topic
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Claude Code Process                          │
+│  Hooks: SessionStart/End, PreToolUse, PostToolUse,                  │
+│         Notification, Stop, SubagentStart, SubagentStop             │
+└──────────────┬──────────────────────────────────┬───────────────────┘
+               │ HTTP POST                        │ JSONL tail
+               ▼                                  ▼
+┌──────────────────────┐           ┌──────────────────────────────────┐
+│  Fastify Hook Server │           │  TranscriptWatcher               │
+│  (unchanged routes)  │           │  (gates sidechain on config)     │
+└──────────┬───────────┘           └──────────────┬───────────────────┘
+           │                                      │
+           ▼                                      ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                      index.ts Wiring Layer                          │
+│  + status indicator updates (busy on tool/agent, ready on stop)     │
+│  + startup gray-out loop                                             │
+│  + subagent output gate (config.subagentOutput)                     │
+│  + statusMessageId dedup in initMonitoring                          │
+│  + RuntimeSettings (live config, updated by SettingsTopic)          │
+└──────────┬───────────────────────────────────────────────────────────┘
+           │
+           ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                         Telegram Layer                              │
+│  Bot (grammY): + settings topic message routing                     │
+│  TopicManager: + setTopicStatus() with name-prefix emoji + dedup    │
+│  StatusMessage: + initialize(existingMessageId?) for dedup          │
+│  SettingsTopic: NEW -- parse commands, update RuntimeSettings        │
+│  SettingsStore: NEW -- persist settings.json                        │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-### New Tool Call Flow (v3.0)
+---
+
+## Data Flows
+
+### Status Indicator Flow
+
 ```
-PostToolUse → HookHandlers → verbosity filter → formatter.formatCompactToolUse()
+PostToolUse arrives (session active, hook event)
     ↓
-    ├─ short output (< 250 chars): batcher.enqueue(text) [no keyboard, batchable]
-    └─ long output (>= 250 chars): contentStore.store(compact, expanded)
-                                    → batcher.enqueueImmediate(compact, keyboard) [not batched]
+callbacks.onToolUse (index.ts)
+    ↓
+subagentOutput === 'hide' AND isSubagentActive? → suppress tool display
+    ↓
+topicManager.setTopicStatus(threadId, topicName, 'busy')
+    ↓ (in TopicManager)
+check topicStatusCache: already 'busy'? → skip editForumTopic (dedup)
+    ↓
+bot.api.editForumTopic(chatId, threadId, { name: '🟡 project-name' })
+
+Stop hook fires (turn complete)
+    ↓
+callbacks.onStop (index.ts)
+    ↓
+topicManager.setTopicStatus(threadId, topicName, 'ready')
+    ↓
+bot.api.editForumTopic(chatId, threadId, { name: '🟢 project-name' })
+
+Bot startup
+    ↓
+for each session in sessionStore.getAllSessions():
+    if session.threadId > 0:
+        topicManager.setTopicStatus(session.threadId, session.topicName, 'down')
+        [best-effort, errors swallowed]
+    ↓
+bot.api.editForumTopic(chatId, threadId, { name: '⬜ project-name' })
 ```
 
-### Current Approval Flow
+### Sub-Agent Suppression Flow
+
 ```
-PreToolUse → server (blocking) → ApprovalManager.waitForDecision() → [timeout or button tap] → HTTP response
+SubagentStart hook fires
+    ↓
+subagentTracker.start(sessionId, agentId, agentType) [always -- for lifecycle tracking]
+    ↓
+config.subagentOutput === 'show'?
+    YES → post spawn announcement to topic
+    NO  → silent (no Telegram message)
+
+PostToolUse fires while subagent is active
+    ↓
+callbacks.onToolUse (index.ts)
+    ↓
+config.subagentOutput === 'hide' AND subagentTracker.isSubagentActive()?
+    YES → increment tool count only, skip Telegram display
+    NO  → display with [AgentName] prefix (existing behavior)
+
+TranscriptWatcher.onSidechainMessage fires
+    ↓
+config.subagentOutput === 'hide' → return (no post)
+
+SubagentStop hook fires
+    ↓
+subagentTracker.stop(agentId) [always -- for lifecycle cleanup]
+    ↓
+config.subagentOutput === 'show'?
+    YES → post done announcement
+    NO  → silent
 ```
 
-### New Approval Flow (v3.0)
+### Sticky Message Dedup Flow
+
 ```
-PreToolUse → server (blocking) → ApprovalManager.shouldAutoAccept()?
-    ├─ YES: return allow immediately (no message sent)
-    └─ NO:  send approval message with mode buttons
-            → ApprovalManager.waitForDecision() [no timeout]
-            → button tap: approve/deny + optionally set mode
-            → HTTP response
+initMonitoring(session) called (new session, resume, or restart)
+    ↓
+session.statusMessageId === 0?
+    YES (new session): statusMsg.initialize() → send + pin → updateStatusMessageId()
+    NO (resume/restart): statusMsg.initialize(session.statusMessageId)
+                          → adopt existing messageId, request content update
+                          → no new message sent, no new pin
 ```
 
-### New Subagent Flow
-```
-SubagentStart hook → post "[AgentType] started" to topic
-                   → track agent in session state
+### Settings Topic Flow
 
-PostToolUse hooks (from subagent, same session_id)
-                   → check if subagent active → prepend "[AgentType]" label
+```
+Bot startup:
+    settingsStore.load() → read data/settings.json
+    → find settingsTopicId
+    if missing: topicManager.createTopic('Settings') → store threadId
+    → runtimeSettings.load(savedSettings) [override env defaults]
 
-SubagentStop hook  → post "[AgentType] finished: summary" to topic
-                   → remove from tracking
+User sends "/subagents hide" in settings topic:
+    bot.on('message:text')
+    → ctx.message.message_thread_id === settingsTopicId?
+    → YES: SettingsTopic.handleCommand(text)
+    → parse: key='subagentOutput', value='hide'
+    → runtimeSettings.subagentOutput = 'hide'
+    → settingsStore.save()
+    → ctx.reply("Sub-agent output: hidden")
 ```
 
-### New /clear Flow
-```
-SessionEnd(reason=clear) → keep topic open, clean up monitors, mark 'clearing'
-SessionStart(source=clear) → find clearing session by cwd
-                           → reuse threadId, reset counters
-                           → post "--- cleared ---" separator
-                           → create new StatusMessage, pin it
-                           → re-init monitoring
-```
+---
 
 ## Recommended Project Structure Changes
 
 ```
 src/
 ├── bot/
-│   ├── bot.ts              # MODIFY: expand/collapse + mode callback handlers
-│   ├── command-registry.ts  # unchanged
-│   ├── content-store.ts     # NEW: server-side content for expand/collapse
-│   ├── formatter.ts         # MODIFY: compact format, subagent labels, mode keyboards
-│   ├── rate-limiter.ts      # MODIFY: keyboard-aware batching
-│   └── topics.ts            # MODIFY: reply_markup support
-├── control/
-│   └── approval-manager.ts  # MODIFY: permission modes, auto-accept, no timeout
-├── hooks/
-│   ├── handlers.ts          # MODIFY: SubagentStart/Stop, /clear detection
-│   └── server.ts            # MODIFY: new routes, timeout removal
+│   ├── bot.ts             # MODIFY: route settings topic messages
+│   ├── topics.ts          # MODIFY: setTopicStatus() + topicStatusCache
+│   └── ... (unchanged)
 ├── monitoring/
-│   ├── status-message.ts    # MODIFY: re-initialization for /clear
-│   ├── summary-timer.ts     # unchanged
-│   ├── transcript-watcher.ts # MODIFY: emit subagent messages
-│   └── verbosity.ts         # unchanged
+│   ├── status-message.ts  # MODIFY: initialize(existingMessageId?)
+│   └── ... (unchanged)
 ├── sessions/
-│   └── session-store.ts     # MODIFY: getClearingByCwd, permission mode
+│   └── session-store.ts   # MODIFY: updateTopicStatus() method
+├── settings/              # NEW directory
+│   ├── settings-store.ts  # NEW: JSON persistence for settings
+│   ├── settings-topic.ts  # NEW: topic lifecycle + command parsing
+│   └── runtime-settings.ts # NEW: mutable config object
 ├── types/
-│   ├── config.ts            # MODIFY: remove approvalTimeoutMs
-│   ├── hooks.ts             # MODIFY: SubagentStart/Stop payloads, reason field
-│   ├── monitoring.ts        # unchanged
-│   └── sessions.ts          # MODIFY: permissionAutoAccept, clearing status
-├── input/                   # unchanged
-├── utils/
-│   └── text.ts              # unchanged
-├── config.ts                # MODIFY: remove timeout config
-└── index.ts                 # MODIFY: wire everything
+│   ├── config.ts          # MODIFY: add subagentOutput field
+│   └── sessions.ts        # MODIFY: add topicStatus field
+├── config.ts              # MODIFY: parse SUBAGENT_OUTPUT env var
+└── index.ts               # MODIFY: status wiring + startup cleanup + settings init
 ```
 
-## Architectural Patterns
-
-### Pattern 1: Server-Side Callback Store
-
-**What:** Store full content server-side, put only a short ID in Telegram callback_data.
-**When to use:** Any time you need expand/collapse, pagination, or multi-step inline interactions.
-**Trade-offs:** Adds memory pressure (mitigated by TTL cleanup). Loses state on bot restart (acceptable -- buttons on old messages just stop working).
-
-```typescript
-// Compact callback_data: "x:a3" (5 bytes) vs UUID (36 bytes)
-// 64-byte limit is never an issue with monotonic counter IDs
-const id = contentStore.store({ compactHtml, expandedHtml, threadId });
-const keyboard = new InlineKeyboard().text('Expand', `x:${id}`);
-```
-
-### Pattern 2: Permission State Machine per Session
-
-**What:** Session-scoped auto-accept mode that progressively reduces permission prompts.
-**When to use:** When the user signals trust ("I approved Bash once, approve it again").
-**Trade-offs:** Reduces safety (mitigated by per-session scope and explicit user choice). "Same Tool" mode accumulates approved tools over session lifetime.
-
-```typescript
-// ApprovalManager checks mode BEFORE creating deferred promise
-if (this.shouldAutoAccept(sessionId, toolName)) {
-  return { allow: true, reason: `Auto-accepted (${mode} mode)` };
-}
-// Only create promise + send Telegram message if NOT auto-accepting
-```
-
-### Pattern 3: Lifecycle Hook for Topic Reuse
-
-**What:** Intercept SessionEnd(clear) + SessionStart(clear) pair to reuse topic instead of creating new one.
-**When to use:** Any command that resets context but should preserve the conversation thread (clear, compact).
-**Trade-offs:** Requires intermediate "clearing" state to bridge the gap between SessionEnd and SessionStart events.
-
-### Pattern 4: Dual-Source Subagent Visibility
-
-**What:** Structured lifecycle from hooks (SubagentStart/Stop) + content from transcript (isSidechain).
-**When to use:** When you need both structured metadata and unstructured content from a subsystem.
-**Trade-offs:** Content may be delayed vs lifecycle events (transcript write vs HTTP hook). Correlation requires tracking active subagents.
-
-## Anti-Patterns
-
-### Anti-Pattern 1: Storing Full Content in callback_data
-
-**What people do:** Try to encode full tool output in Telegram callback_data.
-**Why it's wrong:** 64-byte hard limit. Even base64 encoding won't help for multi-KB content.
-**Do this instead:** Server-side content store with short ID in callback_data.
-
-### Anti-Pattern 2: Batching Messages with Inline Keyboards
-
-**What people do:** Try to combine multiple messages that each have inline keyboards.
-**Why it's wrong:** Each Telegram message can have only ONE inline keyboard (reply_markup). Combining messages loses keyboards.
-**Do this instead:** Send keyboard messages individually (via enqueueImmediate), batch only plain text messages.
-
-### Anti-Pattern 3: Watching N Subagent Transcript Files
-
-**What people do:** Dynamically create a TranscriptWatcher for each subagent's transcript file.
-**Why it's wrong:** O(N) file watchers, complex lifecycle management, most subagents are short-lived.
-**Do this instead:** Use SubagentStart/Stop hooks for lifecycle + last_assistant_message for content. Parse main transcript for subagent tool calls.
-
-### Anti-Pattern 4: Global Permission Mode
-
-**What people do:** Single global "accept all" toggle.
-**Why it's wrong:** Affects all sessions. User approving dangerous ops in one session shouldn't auto-approve in another.
-**Do this instead:** Per-session mode stored in ApprovalManager, cleaned up on session end.
+---
 
 ## Build Order (Dependency-Aware)
 
+### Phase 1: Color-Coded Status Indicators (standalone, high impact)
+
+**Dependencies:** None -- pure extension of existing `TopicManager.editTopicName()` pattern.
+
 ```
-Phase 1: Compact Tool Output (independent, highest visual impact)
-  1a. content-store.ts (new, no deps)
-  1b. formatter.ts compact format (depends on nothing new)
-  1c. topics.ts reply_markup support (small change)
-  1d. rate-limiter.ts keyboard awareness (depends on 1c)
-  1e. bot.ts expand/collapse callbacks (depends on 1a)
-  1f. index.ts wiring (depends on all above)
+1a. types/sessions.ts — add TopicStatus type + topicStatus field
+1b. sessions/session-store.ts — add updateTopicStatus() method
+1c. bot/topics.ts — add setTopicStatus() with cache dedup
+1d. index.ts — wire status updates on PostToolUse, SubagentStart, Stop, SessionEnd
+1e. index.ts — add startup gray-out loop before bot.start()
+```
 
-Phase 2: Permission Modes (independent of Phase 1)
-  2a. types/sessions.ts + session-store.ts permission fields
-  2b. approval-manager.ts mode logic + auto-accept
-  2c. formatter.ts mode keyboard buttons
-  2d. bot.ts mode callback handlers
-  2e. hooks/server.ts timeout removal
-  2f. index.ts wiring + stdout logging
+### Phase 2: Sub-Agent Suppression (standalone, config-gated)
 
-Phase 3: /clear Topic Reuse (depends on understanding Phase 1+2 wiring)
-  3a. types/hooks.ts reason field on SessionEnd
-  3b. hooks/handlers.ts clear detection logic
-  3c. session-store.ts getClearingByCwd + reset methods
-  3d. status-message.ts re-initialization
-  3e. index.ts onSessionClear callback wiring
+**Dependencies:** None -- gates existing behavior on new config key.
 
-Phase 4: Subagent Visibility (most complex, benefits from Phase 1-3 stability)
-  4a. types/hooks.ts SubagentStart/Stop payload types
-  4b. hooks/server.ts new routes
-  4c. hooks/handlers.ts SubagentStart/Stop handlers
-  4d. transcript-watcher.ts emit subagent entries
-  4e. formatter.ts subagent labels
-  4f. index.ts wiring + subagent tracking
+```
+2a. types/config.ts — add subagentOutput field
+2b. src/config.ts — parse SUBAGENT_OUTPUT env var
+2c. index.ts — gate onSubagentStart / onSubagentStop / sidechain / tool display
+```
+
+### Phase 3: Sticky Message Deduplication (depends on understanding Phase 1 status flow)
+
+**Dependencies:** Phase 1 (understand session lifecycle changes before touching StatusMessage).
+
+```
+3a. monitoring/status-message.ts — initialize(existingMessageId?) overload
+3b. index.ts — pass session.statusMessageId to initMonitoring on resume/restart
+```
+
+### Phase 4: Settings Topic (most independent, but complex)
+
+**Dependencies:** Phase 2 (settings topic will expose the subagentOutput setting; better to build Phase 2 first).
+
+```
+4a. settings/runtime-settings.ts — mutable config class
+4b. settings/settings-store.ts — JSON persistence
+4c. settings/settings-topic.ts — topic lifecycle + command handlers
+4d. types/config.ts — add settingsTopicId to persisted settings
+4e. index.ts — initialize SettingsTopic on startup
+4f. bot/bot.ts — route settings topic messages
 ```
 
 **Build order rationale:**
-- Phase 1 first: standalone, highest user-visible impact, establishes the content-store pattern used by other features
-- Phase 2 second: standalone, high usability impact (reduces button-tap fatigue)
-- Phase 3 third: smaller scope, needs stable wiring layer
-- Phase 4 last: most complex, most uncertain (subagent hook behavior needs runtime verification), least critical for day-to-day use
+
+- Phase 1 first: Standalone, immediately visible improvement. No risk to existing behavior -- only adds new `editForumTopic` calls on existing lifecycle events.
+- Phase 2 second: Config-only gate, no structural changes. Quick win to reduce noise.
+- Phase 3 third: Touches `StatusMessage.initialize()` which is called during session start. After Phase 1 stabilizes session lifecycle understanding, Phase 3 is low-risk.
+- Phase 4 last: Most structural (new directory, new classes, new message routing path). Benefits from Phase 2 being done (settings topic can expose and toggle the subagent setting).
+
+---
 
 ## Integration Points Summary
 
-### New Hook Routes Needed
+### Modified `TopicManager` Interface
 
-| Route | Event | Blocking? |
-|-------|-------|-----------|
-| `/hooks/subagent-start` | SubagentStart | No (fire-and-forget) |
-| `/hooks/subagent-stop` | SubagentStop | No (fire-and-forget) |
+| Method | Change | Notes |
+|--------|--------|-------|
+| `setTopicStatus(threadId, topicName, status)` | NEW | In-memory dedup via topicStatusCache |
+| `createTopic(name)` | Unchanged | Still prefixes with `🟢` |
+| `closeTopic(threadId, topicName)` | MODIFY | Use `⬜` prefix instead of `✅`, consistent with status machine |
 
-### New Callback Queries
+### Modified `StatusMessage` Interface
 
-| Pattern | Purpose | Callback Data |
-|---------|---------|--------------|
-| `x:{id}` | Expand tool output | 3-7 bytes |
-| `c:{id}` | Collapse tool output | 3-7 bytes |
-| `aa:{toolUseId}` | Accept All mode | ~40 bytes |
-| `st:{toolUseId}` | Same Tool mode | ~40 bytes |
-| `so:{toolUseId}` | Safe Only mode | ~40 bytes |
+| Method | Change | Notes |
+|--------|--------|-------|
+| `initialize(existingMessageId?)` | MODIFY | If existingMessageId > 0, adopt instead of sending new |
 
-### New HookCallbacks
+### New `RuntimeSettings` Read Paths
 
-| Callback | Trigger |
-|----------|---------|
-| `onSessionClear(session)` | SessionStart with source 'clear' after matching SessionEnd |
-| `onSubagentStart(session, payload)` | SubagentStart hook |
-| `onSubagentStop(session, payload)` | SubagentStop hook |
+Components that need to read `subagentOutput` or `defaultVerbosity` at runtime must read from `RuntimeSettings`, not `AppConfig`. This impacts:
 
-### Modified SessionInfo Fields
+- `index.ts` callbacks (`onSubagentStart`, `onSubagentStop`, `onToolUse`, `onSidechainMessage`)
+- `index.ts` `initMonitoring()` (uses `defaultVerbosity` for new sessions)
 
-| Field | Type | Purpose |
-|-------|------|---------|
-| `permissionAutoAccept` | `'ask' \| 'all' \| 'same-tool' \| 'safe' \| 'until-done'` | Current permission mode |
-| `approvedTools` | `Set<string>` | Tools approved in "same-tool" mode |
-| `status` | add `'clearing'` | Intermediate state for /clear flow |
-| `activeSubagents` | `Map<string, { agentType: string }>` | Currently running subagents |
+### New Message Routing in `bot.ts`
+
+```typescript
+bot.on('message:text', async (ctx) => {
+  const threadId = ctx.message.message_thread_id;
+  if (!threadId) return next();
+
+  // Priority 1: Settings topic
+  if (threadId === runtimeSettings.settingsTopicId) {
+    return settingsTopic.handleCommand(ctx);
+  }
+
+  // Priority 2: Session routing (existing behavior)
+  const session = sessionStore.getByThreadId(threadId);
+  ...
+});
+```
+
+---
+
+## Anti-Patterns
+
+### Anti-Pattern 1: Calling editForumTopic on Every Tool Call
+
+**What people do:** Call `editForumTopic` with `'busy'` on every PostToolUse event.
+**Why it's wrong:** Telegram rate-limits `editForumTopic`. Rapid tool calls (10+ per second) flood the API. "Already modified" errors appear.
+**Do this instead:** Track current topic status in-memory (`topicStatusCache`). Only call `editForumTopic` when status actually changes (ready → busy, busy → ready).
+
+### Anti-Pattern 2: Recreating StatusMessage on Resume
+
+**What people do:** Always call `statusMsg.initialize()` which sends + pins a new message, even when the session already has a pinned status message from a previous run.
+**Why it's wrong:** Creates duplicate pinned messages on resume/restart. Telegram only shows one pin at a time but the old ones clutter the topic.
+**Do this instead:** Check `session.statusMessageId > 0` before initialization; adopt existing message ID.
+
+### Anti-Pattern 3: Changing icon_color After Topic Creation
+
+**What people do:** Try to change topic `icon_color` to reflect status (red circle, green circle via API field).
+**Why it's wrong:** `icon_color` is only settable at topic creation time. `editForumTopic` does NOT accept `icon_color`.
+**Do this instead:** Use unicode circle emoji prefixes in the topic name (`🟢`, `🟡`, `🔴`, `⬜`). This is the only way to change the visible "color" of a topic after creation.
+
+### Anti-Pattern 4: Stopping SubagentTracker Tracking When Suppressing Output
+
+**What people do:** When `subagentOutput === 'hide'`, skip `subagentTracker.start()` to save memory.
+**Why it's wrong:** The tracker is needed to correctly gate PostToolUse display. Without `start()`, `isSubagentActive()` returns false and subagent tool calls leak into main-chain display.
+**Do this instead:** Always call `subagentTracker.start()` and `stop()`. Only skip the Telegram message posting.
+
+### Anti-Pattern 5: Storing Settings in AppConfig
+
+**What people do:** Modify `AppConfig` fields at runtime when the user changes a setting.
+**Why it's wrong:** `AppConfig` is loaded once from env at startup. Mutating it makes the codebase confusing (env var says one thing, runtime says another). TypeScript may prevent mutation if fields are `readonly`.
+**Do this instead:** Introduce a separate `RuntimeSettings` object for mutable settings. `AppConfig` stays immutable (env-derived values). `RuntimeSettings` is initialized from env defaults but can be overridden at runtime by the settings topic.
+
+---
 
 ## Scaling Considerations
 
-| Concern | Current (2-3 sessions) | At 10 sessions | At 50 sessions |
-|---------|------------------------|-----------------|----------------|
-| ContentStore memory | ~100 entries, negligible | ~500 entries, ~5MB | ~2500 entries, ~25MB. Add TTL cleanup |
-| Active subagents | 0-2 per session | 0-5 per session | Consider subagent count limits |
-| Approval mode state | Negligible | Negligible | Negligible |
-| Hook routes | +2 routes, no impact | Same | Same |
+| Concern | Current (2-3 sessions) | At 10 sessions | Notes |
+|---------|------------------------|-----------------|-------|
+| `editForumTopic` rate on busy | 1-2 actual calls per tool burst (dedup) | 5-10 calls per concurrent busy sessions | grammY apiThrottler handles queueing |
+| Startup gray-out loop | 2-3 API calls at boot | 10 API calls at boot | Fire-and-forget, non-blocking |
+| topicStatusCache memory | 3 entries | 10 entries | Negligible |
+| SettingsStore JSON | ~200 bytes | Same (global, not per-session) | Negligible |
+| RuntimeSettings reads | Per hook event | Per hook event | In-process reads, negligible cost |
 
-No scaling concerns for the target scale of 2-3 machines with 2-3 sessions each.
+No scaling concerns for target scale (2-3 machines, 2-3 sessions each).
+
+---
 
 ## Sources
 
-- [Claude Code Hooks Reference](https://code.claude.com/docs/en/hooks) -- SubagentStart/SubagentStop fields, SessionStart source values, SessionEnd reasons, PermissionRequest hook (HIGH confidence, official docs)
-- [grammY Inline Keyboards](https://grammy.dev/plugins/keyboard) -- callback_data usage, editMessageReplyMarkup (HIGH confidence, official docs)
-- [Telegram Bot API](https://core.telegram.org/bots/api) -- 64-byte callback_data limit, editMessageText with reply_markup (HIGH confidence, official docs)
-- [callback-data library](https://github.com/deptyped/callback-data) -- structured callback data patterns for grammY (MEDIUM confidence, community library)
-- [Claude Code Permissions](https://platform.claude.com/docs/en/agent-sdk/permissions) -- permission modes: default, plan, acceptEdits, dontAsk, bypassPermissions (HIGH confidence, official docs)
+- Telegram Bot API -- `createForumTopic`, `editForumTopic`: `icon_color` only settable at creation, `icon_custom_emoji_id` editable post-creation (HIGH confidence, verified from multiple official sources)
+- Telegram Bot API -- `editForumTopic` parameters: only `name` and `icon_custom_emoji_id` are accepted (not `icon_color`) (HIGH confidence)
+- Telegram `createForumTopic` icon_color valid values: 7322096 (#6FB9F0), 16766590 (#FFD67E), 13338331 (#CB86DB), 9367192 (#8EEE98), 16749490 (#FF93B2), 16478047 (#FB6F5F) (MEDIUM confidence, inferred from python-telegram-bot docs + API search results)
+- Existing codebase (`TopicManager` in `src/bot/topics.ts`): confirms current emoji-prefix pattern for topic naming (HIGH confidence, direct code analysis)
+- Existing codebase (`StatusMessage` in `src/monitoring/status-message.ts`): confirms debounce is already implemented for `editMessageText`; same pattern needed for `editForumTopic` (HIGH confidence)
+- Existing codebase (`SubagentTracker` in `src/monitoring/subagent-tracker.ts`): pure in-memory state, no Telegram deps -- safe to always run regardless of display config (HIGH confidence)
+- grammY `apiThrottler` plugin: handles rate limit queueing at API layer; `editForumTopic` calls go through same throttler (HIGH confidence, existing codebase + grammY docs)
 
 ---
-*Architecture research for: Claude Code Telegram Bridge v3.0 UX Overhaul*
-*Researched: 2026-03-01*
+*Architecture research for: Claude Code Telegram Bridge v4.0 Status & Settings*
+*Researched: 2026-03-02*

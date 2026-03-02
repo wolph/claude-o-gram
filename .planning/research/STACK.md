@@ -1,409 +1,342 @@
-# Stack Research: v3.0 UX Overhaul
+# Stack Research: v4.0 Status & Settings
 
-**Domain:** Telegram bot UX features -- compact output, permission modes, subagent visibility, topic reuse
-**Researched:** 2026-03-01
-**Confidence:** HIGH (existing stack, Telegram API capabilities verified against official docs)
+**Domain:** Telegram bot status indicators, sub-agent suppression, message deduplication, interactive settings topic
+**Researched:** 2026-03-02
+**Confidence:** HIGH (existing stack, Telegram API capabilities verified against official docs and aiogram reference)
 
 ## Scope
 
-This research covers ONLY the stack additions and changes needed for v3.0 features. The existing validated stack (grammY, Fastify, JSONL transcript watching, SDK query({ resume }), InlineKeyboard, message batching, debounced status edits) is not re-researched.
-
-## Key Finding: No New Dependencies Needed
-
-All four v3.0 features can be implemented with the existing dependency set. The work is purely application-level: new formatting logic, additional Telegram API method calls already available in grammY, expanded hook endpoints, and state management patterns built on the existing in-memory Map + JSON persistence model.
+This research covers ONLY the stack additions and changes needed for v4.0 features. The validated existing stack (grammY 1.41.0, Fastify 5.x, TypeScript 5.x, @anthropic-ai/claude-agent-sdk, LRU cache, JSONL transcript watching, InlineKeyboard, message batching, debounced status edits) is not re-researched.
 
 ---
 
-## Feature 1: Compact Tool Output with Expand/Collapse Buttons
+## Critical Finding: Telegram API Constraint on Topic Icon Color
+
+**`editForumTopic` does NOT support changing `icon_color` after creation.**
+
+Verified against:
+- [aiogram 3.24 editForumTopic docs](https://docs.aiogram.dev/en/latest/api/methods/edit_forum_topic.html) — parameters: `name` (optional), `icon_custom_emoji_id` (optional). No `icon_color`.
+- [python-telegram-bot ForumTopic constants](https://docs.python-telegram-bot.org/en/v21.6/telegram.forumtopic.html) — icon_color is a read-only attribute set at creation time.
+- [Telegram API method channels.editForumTopic](https://core.telegram.org/method/channels.editForumTopic) — `icon_emoji_id` editable, `icon_color` is NOT listed.
+
+**Implication:** Color-coded status cannot use the Telegram topic icon color field for live status updates. The existing code already solves this correctly: the topic **name** carries a Unicode status emoji prefix (e.g., `\u{1F7E2} project-name`). This is the right approach. The v4.0 work is purely expanding the status emoji vocabulary and defining a consistent mapping.
+
+**`icon_color` at creation time only** — integers map to:
+- `7322096` (0x6FB9F0) — Blue
+- `16766590` (0xFFD67E) — Yellow
+- `13338331` (0xCB86DB) — Purple
+- `9367192` (0x8EEE98) — Green
+- `16749490` (0xFF93B2) — Pink
+- `16478047` (0xFB6F5F) — Red/Orange
+
+These are useful for initial topic creation color, but NOT for live status changes. Do not design around them.
+
+---
+
+## Feature 1: Color-Coded Topic Status (Emoji in Topic Names)
 
 ### What's Needed
 
-Transform the current verbose tool call format into `ToolName(args...)` one-liners with a 250-char limit and an inline "Expand" button that toggles to show full details.
+Replace the inconsistent emoji usage across `topics.ts`, `status-message.ts`, and `index.ts` with a defined `TopicStatus` enum and a single `setTopicStatus()` function. Define four states: ready (green), busy (yellow), error (red), down/gray (closed).
 
 ### Stack Assessment
 
 | Requirement | Existing Capability | Gap | Solution |
 |-------------|---------------------|-----|----------|
-| Compact one-liner formatting | `formatToolUse()` in formatter.ts already has tiered verbosity | Current format includes emoji + bold + code blocks, not `Tool(args...)` | Rewrite formatter to produce compact format |
-| Expand/collapse buttons | `InlineKeyboard` in grammY, `bot.callbackQuery()` handler pattern | No expand/collapse pattern exists | New callback_data pattern + message editing |
-| Store full content for expand | Nothing in-memory for message content | Need to store original full content keyed by message | In-memory Map with TTL cleanup |
-| Edit message on button tap | `editMessageText` used by approval flow and `StatusMessage` | Works, pattern is proven | Reuse same pattern |
+| Change topic name | `editForumTopic(chatId, threadId, { name })` via grammY — already used in `topics.ts` | No unified status model; emojis scattered across code | New `TopicStatus` type + `setTopicStatus()` in `topics.ts` |
+| Status emoji vocabulary | Existing: `\u{1F7E2}` (green), `\u2705` (done), `\u{1F504}` (restart) | No yellow or gray states defined | Add `\u{1F7E1}` (yellow), `\u26AA` (gray), `\u{1F534}` (red) — all standard Unicode |
+| Startup gray sweep | `SessionStore.getAllSessions()` exists | No startup cleanup pass | Loop all sessions with threadId > 0, call `editForumTopic` with gray prefix |
+| Rate limiting on startup sweep | `auto-retry` and `apiThrottler` plugins active | Multiple editForumTopic calls on startup | Throttler handles it; add sequential await pattern in startup sequence |
 
-### Telegram API Constraints (verified)
+### Status Emoji Mapping (No New Libraries)
 
-- **callback_data limit: 1-64 bytes UTF-8.** Current approval buttons use `approve:{toolUseId}` (44 bytes). For expand/collapse, `expand:{messageId}` is sufficient. Message IDs are integers (typically 5-8 digits), so `expand:12345678` = 16 bytes, well within limit.
-- **editMessageText** returns the edited Message object (not for inline messages). Can update both text and reply_markup in a single call. Returns error if text is identical ("message is not modified") -- already handled in TopicManager.editMessage().
-- **editMessageReplyMarkup** can swap an InlineKeyboard independently of text. Available in grammY as `ctx.editMessageReplyMarkup()` or `bot.api.editMessageReplyMarkup()`.
-- **4096 char message limit** applies to expanded content. Long tool outputs already use file attachments; expanded view should do the same truncation.
-- **Rate limit on edits: shared bucket** for editMessageText and editMessageCaption. The existing 3-second debounce on StatusMessage is sufficient protection.
+```typescript
+// src/types/topic-status.ts (new file, ~15 lines)
+export type TopicStatus = 'ready' | 'busy' | 'error' | 'down';
+
+export const STATUS_EMOJI: Record<TopicStatus, string> = {
+  ready: '\u{1F7E2}',   // green circle — waiting for next task
+  busy:  '\u{1F7E1}',   // yellow circle — tool calls in progress
+  error: '\u{1F534}',   // red circle — error / permission blocked
+  down:  '\u26AA',      // gray circle — bot not running / session closed
+};
+```
+
+Startup sweep in `index.ts`:
+```typescript
+// Set all known topics to gray on startup before reconnecting
+for (const session of sessionStore.getAllSessions()) {
+  if (session.threadId > 0) {
+    await topicManager.setTopicStatus(session.threadId, session.topicName, 'down');
+  }
+}
+```
+
+### What NOT to Add
+
+- **No `icon_color` manipulation.** Cannot change color after creation. emoji prefix in the name is the correct approach and is already established in the codebase.
+- **No `icon_custom_emoji_id`.** Custom emoji IDs require calling `getForumTopicIconStickers` to enumerate valid IDs, and the sticker set for default topic icons does not include status-meaningful icons (it's decorative emoji, not status circles). Standard Unicode emoji in the topic name is universally visible and requires zero additional API calls.
+
+---
+
+## Feature 2: Sub-Agent Suppression Configuration
+
+### What's Needed
+
+Add a per-session (or global) flag: `subagentVisible: boolean`. When `false` (the new default), suppress SubagentStart topic creation, SubagentStop announcements, and sub-agent tool output lines. When `true`, maintain current behavior.
+
+### Stack Assessment
+
+| Requirement | Existing Capability | Gap | Solution |
+|-------------|---------------------|-----|----------|
+| Global default flag | `config.ts` reads env vars for feature flags | No subagent visibility flag | Add `SUBAGENT_VISIBLE` env var, default `false` |
+| Per-session override | `SessionInfo` has `verbosity` field pattern | No subagent visibility field | Add `subagentVisible?: boolean` to `SessionInfo` |
+| Suppression in hook handler | `onSubagentStart`, `onSubagentStop`, `onToolUse` already check `activeAgent` | No suppression gate | Add `if (!shouldShowSubagent(session)) return;` guard before posting |
+| Suppression in transcript watcher | `onSidechainMessage` callback in `TranscriptWatcher` | No suppression gate | Guard same callback in `initMonitoring()` |
+
+### Implementation Pattern (No New Libraries)
+
+The suppression logic is a runtime conditional check, not a new component. The `SubagentTracker` continues to track lifecycle state (needed for correct temporal attribution), but Telegram posting is gated on `subagentVisible`.
+
+```typescript
+// Guard in index.ts HookCallbacks
+onSubagentStart: async (session, payload) => {
+  const agent = subagentTracker.start(session.sessionId, payload.agent_id, payload.agent_type);
+  const config = getSessionConfig(session); // reads subagentVisible
+  if (!config.subagentVisible) return;      // suppress — no Telegram post
+  // ... existing posting logic
+},
+```
+
+The `SubagentTracker.start()` / `.stop()` calls happen unconditionally so temporal tool attribution remains correct. Only the Telegram-facing output is suppressed.
+
+### What NOT to Add
+
+- **No separate subagent message queue.** Suppression is a simple boolean gate, not a buffering system.
+- **No settings to hide/show specific agent types.** Per-type filtering is over-engineered for v4.0. A single `subagentVisible` flag covers the stated requirement.
+
+---
+
+## Feature 3: Sticky Message Deduplication
+
+### What's Needed
+
+Before creating a new pinned status message (`StatusMessage.initialize()`), check if the existing pinned message content matches what would be sent. If it matches, skip creating a new one and reuse the existing `messageId`.
+
+### Stack Assessment
+
+| Requirement | Existing Capability | Gap | Solution |
+|-------------|---------------------|-----|----------|
+| Know current pinned content | `StatusMessage` tracks `lastSentText` privately | `lastSentText` not accessible at initialization time | Expose `getLastSentText()` or pass initial content to constructor |
+| Fetch existing pinned message content | `bot.api.getMessage()` / `forwardMessage()` — NOT available in Bot API | **Bot API has no getMessages method** | Must track content ourselves; cannot fetch from Telegram |
+| Reuse existing message ID | `sessionStore.statusMessageId` persists across restarts | `StatusMessage.initialize()` always calls `sendMessage()` | Add early-return path: if `statusMessageId > 0` and content unchanged, skip re-send |
+| Content comparison | `StatusMessage.flush()` already skips identical content on edit | No comparison at initialization | Apply same `lastSentText` comparison in `initialize()` |
+
+### Critical Telegram API Constraint
+
+**`bot.api.getMessage()` does not exist in the Telegram Bot API.** Bots cannot fetch arbitrary messages by ID. Therefore, the only reliable way to know the current sticky content is to track what was last sent in-process (already done via `lastSentText`).
+
+The deduplication strategy is: pass the current `statusMessageId` and last-known `statusContent` into `StatusMessage` at initialization. If both are non-empty and the formatted initial status matches, skip `sendMessage()` and resume with the existing message ID.
 
 ### Implementation Pattern (No New Libraries)
 
 ```typescript
-// callback_data format: "expand:{threadId}:{msgId}" or "collapse:{threadId}:{msgId}"
-// Both fit comfortably within 64-byte limit
+// Modified StatusMessage constructor/initialize signature
+async initialize(existingMessageId?: number, existingContent?: string): Promise<number> {
+  const initialData = buildInitialStatusData();
+  const text = formatStatus(initialData);
 
-// Store expanded content in-memory with auto-cleanup
-const expandableContent = new Map<string, {
-  compact: string;
-  expanded: string;
-  timestamp: number;
-}>();
-
-// grammY callback query handler (same pattern as approval buttons)
-bot.callbackQuery(/^expand:(\d+):(\d+)$/, async (ctx) => {
-  const key = `${ctx.match[1]}:${ctx.match[2]}`;
-  const content = expandableContent.get(key);
-  if (content) {
-    await ctx.editMessageText(content.expanded, {
-      parse_mode: 'HTML',
-      reply_markup: new InlineKeyboard().text('Collapse', `collapse:${key}`),
-    });
+  // Skip re-send if content matches existing pinned message
+  if (existingMessageId && existingContent && text === existingContent) {
+    this.messageId = existingMessageId;
+    this.lastSentText = existingContent;
+    return existingMessageId; // reuse
   }
+
+  // Otherwise send fresh (existing path)
+  const msg = await this.bot.api.sendMessage(...);
+  // ...
+}
+```
+
+The `SessionStore` already persists `statusMessageId`. A new `statusMessageContent` field stores the last known text for comparison on reconnect.
+
+### What NOT to Add
+
+- **No `bot.api.getMessage()`.** This method does not exist in the Telegram Bot API for bots. Any implementation relying on fetching message content from Telegram will not work.
+- **No message history cache beyond the single status message.** The deduplication only applies to the pinned status message, not all messages.
+
+---
+
+## Feature 4: Settings Topic with Interactive Configuration
+
+### What's Needed
+
+A persistent Telegram forum topic named "Settings" that shows current bot configuration as a message with toggle buttons. Pressing a button updates the setting in memory and on disk, then re-renders the message.
+
+### Stack Assessment
+
+| Requirement | Existing Capability | Gap | Solution |
+|-------------|---------------------|-----|----------|
+| Create a dedicated topic | `TopicManager.createTopic()` | No concept of a "settings topic" | Create settings topic at startup if not exists; persist `settingsThreadId` in a config file |
+| Interactive toggle buttons | `InlineKeyboard` + `bot.callbackQuery()` — already used for approvals | No settings-specific keyboard | New settings keyboard builder function |
+| Settings persistence | JSON file via `SessionStore` pattern | No settings data model | New `SettingsStore` using same atomic-write JSON pattern |
+| Settings message edit in place | `TopicManager.editMessage()` | No settings message tracking | Store `settingsMessageId` in `SettingsStore` |
+
+### Settings Topic Architecture (No New Libraries Needed)
+
+The settings topic follows the same `editMessageText` pattern already used for `StatusMessage`. No `@grammyjs/menu` plugin is needed:
+
+- The menu plugin's primary benefit is multi-page navigation and dynamic ranges. Our settings panel is a single-page set of toggles.
+- The existing `InlineKeyboard` + `bot.callbackQuery()` pattern (already proven for 8+ handlers) handles this with less complexity.
+- `@grammyjs/menu` adds a grammY session dependency that requires storage wiring not needed for a single-screen settings panel.
+
+**Settings keyboard pattern:**
+
+```typescript
+// Callback data format: "cfg:{key}" — e.g., "cfg:subagentVisible"
+// Fits comfortably within 64-byte callback_data limit
+function buildSettingsKeyboard(settings: BotSettings): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(
+      settings.subagentVisible ? '🟢 Sub-agents: Visible' : '⚫ Sub-agents: Hidden',
+      'cfg:subagentVisible'
+    )
+    .row()
+    .text(
+      `Verbosity: ${settings.defaultVerbosity}`,
+      'cfg:verbosity'
+    );
+}
+
+bot.callbackQuery(/^cfg:(.+)$/, async (ctx) => {
+  const key = ctx.match[1];
+  settingsStore.toggle(key);
+  const settings = settingsStore.getAll();
+  await ctx.editMessageText(buildSettingsMessage(settings), {
+    parse_mode: 'HTML',
+    reply_markup: buildSettingsKeyboard(settings),
+  });
   await ctx.answerCallbackQuery();
 });
 ```
 
-### What NOT to Add
+### Settings Persistence: Custom SettingsStore (No New Library)
 
-- **No database** for storing expanded content. In-memory Map with TTL (10-15 minute cleanup) is sufficient -- expanded content is ephemeral, and if the bot restarts the "Expand" button gracefully shows "Content no longer available."
-- **No @grammyjs/conversations plugin.** The expand/collapse is a simple stateless toggle, not a multi-step conversation flow.
-- **No @grammyjs/menu plugin.** The built-in InlineKeyboard is simpler and already used for approvals. The menu plugin adds complexity for dynamic menus we do not need.
-
----
-
-## Feature 2: Permission Modes (Accept All, Same Tool, Safe Only, Until Done)
-
-### What's Needed
-
-Replace the binary approve/deny flow with configurable auto-acceptance modes that persist per-session.
-
-### Permission Mode Definitions
-
-| Mode | Behavior | Implementation |
-|------|----------|----------------|
-| **Ask** (default) | Current behavior: show button, wait for decision | No change needed |
-| **Accept All** | Auto-allow everything until mode changes | Return `permissionDecision: "allow"` in PreToolUse handler without sending Telegram message |
-| **Safe Only** | Auto-allow read-only tools (Read, Glob, Grep), ask for others | Check tool name against safe set before deciding to prompt |
-| **Same Tool** | After approving a tool once, auto-allow same tool_name for rest of session | Track approved tool names per session in a Set |
-| **Until Done** | Auto-allow everything for remainder of session (no way back except session end) | Same as Accept All but cannot be changed back |
-
-### Stack Assessment
-
-| Requirement | Existing Capability | Gap | Solution |
-|-------------|---------------------|-----|----------|
-| Per-session mode storage | `SessionInfo` has `permissionMode` field already | Field stores CLI mode, not bot mode | Add new `approvalMode` field to SessionInfo |
-| Mode switching command | `/verbose`, `/normal`, `/quiet` command pattern | No permission mode commands | Add `/approve` command with mode argument |
-| Mode buttons | InlineKeyboard for approve/deny | Need mode selector keyboard | New InlineKeyboard with mode options |
-| Tool classification | `classifyRisk()` in formatter.ts | Classifies for display, not for auto-approval decisions | New `isToolSafe()` function based on Claude Code's own read-only classification |
-| Same-tool tracking | Nothing | Need per-session approved tool set | Add `approvedTools: Set<string>` to session state |
-
-### Claude Code's Permission Classification (verified from official docs)
-
-| Tool Type | Tools | Approval Required |
-|-----------|-------|-------------------|
-| Read-only (safe) | Read, Glob, Grep, WebSearch, WebFetch | No |
-| File modification | Write, Edit, MultiEdit, NotebookEdit | Yes (until session end) |
-| Bash commands | Bash, BashBackground | Yes (permanently per project+command) |
-| Subagent | Agent | Depends on subagent permissions |
-
-The bot should mirror this classification for "Safe Only" mode:
-- **Auto-allow:** Read, Glob, Grep, WebSearch, WebFetch
-- **Still ask:** Bash, BashBackground, Write, Edit, MultiEdit, NotebookEdit, Agent, and any unknown/MCP tools
-
-### Implementation Pattern (No New Libraries)
-
-The decision logic goes into the PreToolUse HTTP handler in `server.ts`, before sending the Telegram message. The existing `ApprovalManager.waitForDecision()` is only called when the mode requires user interaction.
+Settings are simple key-value pairs that change infrequently. The same atomic JSON write pattern from `SessionStore` (write to `.tmp`, rename) is sufficient:
 
 ```typescript
-// New type in types/sessions.ts
-type ApprovalMode = 'ask' | 'accept-all' | 'safe-only' | 'same-tool' | 'until-done';
-
-// Decision logic in PreToolUse handler
-function shouldAutoApprove(
-  mode: ApprovalMode,
-  toolName: string,
-  approvedTools: Set<string>,
-): boolean {
-  switch (mode) {
-    case 'accept-all':
-    case 'until-done':
-      return true;
-    case 'safe-only':
-      return SAFE_TOOLS.has(toolName);
-    case 'same-tool':
-      return approvedTools.has(toolName);
-    case 'ask':
-    default:
-      return false;
-  }
+// src/settings/settings-store.ts (new file, ~80 lines)
+export class SettingsStore {
+  private data: BotSettings;
+  private filePath: string;
+  // load(), save() via atomic JSON write — identical pattern to SessionStore
 }
 ```
+
+`@grammyjs/storage-file` (v2.5.1) was evaluated but adds the grammY session middleware dependency chain. For a plain key-value settings file that is written only on user interaction, the minimal custom store is preferable.
+
+### Settings Topic Initialization
+
+At startup:
+1. Read `settingsThreadId` from `SettingsStore` (persisted).
+2. If `settingsThreadId === 0`, call `createForumTopic('Settings')` and store the returned ID.
+3. If `settingsThreadId > 0`, attempt to post/edit the settings message in the existing topic.
+
+The settings topic is identified by thread ID, not by searching topic names. This is robust to the bot restarting and to the topic being renamed.
 
 ### What NOT to Add
 
-- **No PermissionRequest hook.** The existing PreToolUse hook provides everything needed. PermissionRequest is a separate hook that fires when Claude Code's own permission dialog appears -- our bot intercepts at the PreToolUse level, which is earlier and gives us full control.
-- **No persistent mode storage beyond session lifetime.** Permission modes reset when sessions end. This matches Claude Code's own behavior where `acceptEdits` mode is session-scoped.
-- **No AUTO_APPROVE env var changes.** The existing `AUTO_APPROVE=true` config is a global override. The new modes are per-session, user-selectable, and more granular.
+- **`@grammyjs/menu` (v1.3.1).** The menu plugin's navigation framework (submenus, back buttons, dynamic ranges) is unnecessary for a single-screen settings panel. The existing `InlineKeyboard` + callback handlers are simpler, already proven, and already in the codebase. Re-evaluate if settings grow to require multiple pages.
+- **`@grammyjs/storage-file` (v2.5.1).** Adds grammY session middleware wiring overhead. The `SessionStore` atomic-write pattern covers the same need without session context threading.
+- **`@grammyjs/conversations`.** Settings updates are single-tap interactions, not multi-step dialogues.
+- **Telegram `bot.api.getMessage()`.** Does not exist. Cannot fetch settings message content from Telegram; must track locally.
 
 ---
 
-## Feature 3: Subagent Visibility
+## Recommended Stack (No New Dependencies)
 
-### What's Needed
-
-Show when subagents start/stop, what type they are, and their tool calls, with clear visual labeling distinguishing main agent vs subagent activity.
-
-### Stack Assessment
-
-| Requirement | Existing Capability | Gap | Solution |
-|-------------|---------------------|-----|----------|
-| Detect subagent start | No SubagentStart hook endpoint | Need new HTTP endpoint | Add `/hooks/subagent-start` to Fastify server |
-| Detect subagent stop | No SubagentStop hook endpoint | Need new HTTP endpoint | Add `/hooks/subagent-stop` to Fastify server |
-| Track active subagents | SessionStore tracks sessions, not subagents | Need subagent tracking per session | Add `activeSubagents: Map<string, SubagentInfo>` to session state |
-| Identify which agent made a tool call | Hooks do NOT include agent_id in PreToolUse/PostToolUse | **Cannot determine from hooks alone** | Parse transcript JSONL for `isSidechain` field |
-| Display agent identity in messages | Formatter has no agent context | Need agent label in formatted output | Add optional `agentLabel` parameter to format functions |
-
-### Critical Finding: Hook Limitations for Agent Identity
-
-**The PreToolUse and PostToolUse hooks do NOT include `agent_id`, `agent_type`, or any field identifying which agent made the tool call.** This was confirmed by reviewing:
-- Official hooks documentation (common input fields: session_id, transcript_path, cwd, permission_mode, hook_event_name only)
-- GitHub issue #16126 requesting agent identity in PreToolUse (CLOSED as NOT PLANNED)
-- GitHub issue #21481 requesting agent context fields (CLOSED as COMPLETED, but not visible in current common hook input schema)
-
-**Consequence:** We cannot reliably label individual PostToolUse messages with their originating agent purely from hook data. Two approaches exist:
-
-#### Approach A: SubagentStart/Stop Hooks + Heuristic (RECOMMENDED)
-
-Use SubagentStart and SubagentStop hooks to track active subagent windows. When a subagent is active and a PostToolUse arrives, it *might* be from that subagent, but there is no guarantee (the main agent can also make tool calls while subagents run).
-
-**Advantages:** Simple, no extra parsing, gives start/stop lifecycle messages.
-**Limitations:** Cannot definitively attribute individual tool calls to subagents. Acceptable for v3.0 -- the goal is "see what subagents are doing" not "perfectly attribute every call."
-
-SubagentStart hook payload (verified):
-```json
-{
-  "session_id": "abc123",
-  "hook_event_name": "SubagentStart",
-  "agent_id": "agent-abc123",
-  "agent_type": "Explore"
-}
-```
-
-SubagentStop hook payload (verified):
-```json
-{
-  "session_id": "abc123",
-  "hook_event_name": "SubagentStop",
-  "agent_id": "def456",
-  "agent_type": "Explore",
-  "agent_transcript_path": "~/.claude/projects/.../subagents/agent-def456.jsonl",
-  "last_assistant_message": "Analysis complete..."
-}
-```
-
-#### Approach B: Transcript Parsing for Sidechain Attribution
-
-The existing `TranscriptWatcher` already reads JSONL entries and has access to the `isSidechain` field. Currently it filters OUT sidechain entries (`if (entry.isSidechain) return;`). This could be changed to process sidechain entries separately and emit them with an agent label.
-
-**Advantages:** More accurate attribution.
-**Limitations:** Transcript entries do not reliably include the agent_id or agent_type. The `isSidechain: true` flag tells you it is a subagent, but not which one. Would need to correlate with SubagentStart timing.
-
-#### Recommended Hybrid Approach
-
-1. Add SubagentStart/SubagentStop HTTP hook endpoints to Fastify
-2. Track active subagents per session (agent_id, agent_type, start time)
-3. Post lifecycle messages: "Subagent Explore started", "Subagent Explore finished: {last_assistant_message summary}"
-4. In TranscriptWatcher, process `isSidechain: true` entries and emit them as subagent messages (currently skipped)
-5. Label subagent messages with a visual prefix like `[Explore]` in the Telegram output
-
-### Hook Installation Changes
-
-The `installHooks()` function in `utils/install-hooks.ts` needs two new entries:
-
-```typescript
-SubagentStart: [
-  {
-    matcher: '',
-    hooks: [
-      { type: 'http', url: `${baseUrl}/hooks/subagent-start`, timeout: 10 },
-    ],
-  },
-],
-SubagentStop: [
-  {
-    matcher: '',
-    hooks: [
-      { type: 'http', url: `${baseUrl}/hooks/subagent-stop`, timeout: 10 },
-    ],
-  },
-],
-```
-
-### New Types Needed
-
-```typescript
-// In types/hooks.ts
-interface SubagentStartPayload extends HookPayload {
-  hook_event_name: 'SubagentStart';
-  agent_id: string;
-  agent_type: string;  // 'Bash' | 'Explore' | 'Plan' | custom agent names
-}
-
-interface SubagentStopPayload extends HookPayload {
-  hook_event_name: 'SubagentStop';
-  agent_id: string;
-  agent_type: string;
-  agent_transcript_path: string;
-  last_assistant_message: string;
-  stop_hook_active: boolean;
-}
-
-// In types/sessions.ts or new file
-interface SubagentInfo {
-  agentId: string;
-  agentType: string;
-  startedAt: string;
-}
-```
-
-### What NOT to Add
-
-- **No separate transcript watcher per subagent.** The SubagentStop hook includes `last_assistant_message` which provides the summary. Reading `agent_transcript_path` JSONL files for every subagent would be expensive and complex.
-- **No WebSocket or streaming connection to Claude Code.** The hook-based architecture is sufficient for lifecycle events.
-- **No SDK `canUseTool` callback.** This was explicitly deferred to v2.1 and is out of scope for v3.0.
-
----
-
-## Feature 4: /clear Topic Reuse with New Pinned Status
-
-### What's Needed
-
-When the user runs `/clear` in Claude Code, reuse the existing Telegram topic instead of closing it and creating a new one. Post a visual separator and re-pin a fresh status message.
-
-### Stack Assessment
-
-| Requirement | Existing Capability | Gap | Solution |
-|-------------|---------------------|-----|----------|
-| Detect /clear event | SessionStart hook with `source: "clear"` | Currently treated as new session creation | Add special handling for `source === "clear"` |
-| Send separator message | `TopicManager.sendMessage()` | No separator format | New formatter function for clear separator |
-| Unpin old status | `bot.api.unpinChatMessage()` available in grammY | Not currently used | Add `unpinMessage()` to TopicManager |
-| Pin new status | `StatusMessage.initialize()` creates + pins | Assumes fresh topic | Call initialize() on existing topic's threadId |
-| Reset session counters | SessionStore tracks toolCallCount, filesChanged | No reset method | Add `resetSession()` method to SessionStore |
-
-### Telegram API Methods Needed (already in grammY)
-
-- `unpinChatMessage(chatId, { message_id })` -- unpin the old status message
-- `unpinAllChatMessages(chatId)` -- alternative: clear all pins in topic (simpler but more aggressive)
-- The existing `sendMessage` + `pinChatMessage` flow for the new status message
-
-### SessionStart Source Detection
-
-The SessionStart hook payload already includes `source: "clear"`. The existing `handleSessionStart()` only checks for `source === "resume"`. Adding `source === "clear"` handling follows the same pattern:
-
-```typescript
-if (payload.source === 'clear') {
-  const existing = this.sessionStore.getActiveByCwd(payload.cwd);
-  if (existing) {
-    // Reuse topic: post separator, reset counters, new status message
-    // Do NOT create new topic or close existing one
-  }
-}
-```
-
-### What NOT to Add
-
-- **No topic deletion/recreation.** The entire point is reusing the existing topic.
-- **No message history clearing.** Telegram does not support bulk message deletion in topics by bots. The separator message visually delineates the old vs new context.
-
----
-
-## Recommended Stack (Unchanged Core + Application Changes)
+All four v4.0 features can be implemented with the existing dependency set. The work is purely application-level.
 
 ### Core Technologies (No Changes)
 
-| Technology | Version | Purpose | Status |
-|------------|---------|---------|--------|
-| grammy | ^1.40.1 | Telegram bot framework | KEEP -- provides all needed API methods |
-| @grammyjs/auto-retry | ^2.0.2 | Rate limit handling | KEEP |
+| Technology | Current Version | Purpose | Action |
+|------------|----------------|---------|--------|
+| grammy | ^1.40.1 (1.41.0 available) | Telegram bot framework | KEEP — all needed API methods present; consider bumping to 1.41.0 |
+| @grammyjs/auto-retry | ^2.0.2 | Rate limit retry | KEEP |
 | @grammyjs/transformer-throttler | ^1.2.1 | API request throttling | KEEP |
-| fastify | ^5.7.4 | HTTP hook server | KEEP -- add 2 new endpoints |
+| fastify | ^5.7.4 | HTTP hook server | KEEP |
 | @anthropic-ai/claude-agent-sdk | ^0.2.63 | SDK input delivery | KEEP |
+| lru-cache | ^11.2.6 | Expand/collapse cache | KEEP |
 | typescript | ^5.9.3 | Language | KEEP |
 
 ### Supporting Libraries (No Changes)
 
-| Library | Version | Purpose | Status |
-|---------|---------|---------|--------|
+| Library | Current Version | Purpose | Action |
+|---------|----------------|---------|--------|
 | dotenv | ^17.3.1 | Environment config | KEEP |
 | pino | ^10.3.1 | Structured logging | KEEP |
-| zod | ^4.3.6 | Schema validation | KEEP (not currently used but available) |
+| zod | ^4.3.6 | Schema validation | KEEP |
 
-### What NOT to Add
+### New Application Modules (No New npm Packages)
 
-| Avoid | Why | What to Do Instead |
-|-------|-----|-------------------|
-| Redis / SQLite / any database | Expandable content and subagent state are ephemeral, session-scoped | In-memory Maps with TTL cleanup |
-| @grammyjs/menu | Over-engineered for simple expand/collapse and mode-select keyboards | Built-in InlineKeyboard class |
-| @grammyjs/conversations | No multi-step conversation flows needed | Direct callback query handlers |
-| @grammyjs/hydrate | Adds method shortcuts to message objects; not needed for our patterns | Direct `bot.api.*` calls |
-| @grammyjs/stateless-question | Text input already works via the existing message handler | Keep existing text handler |
-| Any state management library | Session state is simple enough for plain Maps + JSON persistence | SessionStore pattern |
-| WebSocket libraries | Hook architecture is sufficient; no need for persistent connections | HTTP hooks |
-
----
-
-## Installation Commands
-
-```bash
-# No new packages to install. Existing dependencies cover all v3.0 features.
-# Verify current versions are up to date:
-npm outdated
-```
-
----
-
-## Application-Level Changes Summary
-
-### New Files Needed
-
-| File | Purpose |
-|------|---------|
-| `src/types/approval.ts` | ApprovalMode type, SubagentInfo interface, safe tool set |
-
-No new library-level dependencies required.
+| New File | Purpose |
+|----------|---------|
+| `src/types/topic-status.ts` | `TopicStatus` type + `STATUS_EMOJI` map |
+| `src/settings/settings-store.ts` | Atomic JSON persistence for bot settings |
+| `src/settings/settings-topic.ts` | Settings topic creation, message rendering, keyboard builder |
 
 ### Modified Files
 
 | File | Changes |
 |------|---------|
-| `src/types/hooks.ts` | Add SubagentStartPayload, SubagentStopPayload |
-| `src/types/sessions.ts` | Add `approvalMode`, `approvedTools`, `activeSubagents` fields |
-| `src/types/config.ts` | Add `defaultApprovalMode` config option |
-| `src/bot/formatter.ts` | Rewrite tool format to compact one-liner; add expand content generation; add subagent labels |
-| `src/bot/bot.ts` | Add expand/collapse callback query handlers; add `/approve` command handler |
-| `src/hooks/handlers.ts` | Add handleSubagentStart/Stop; modify handleSessionStart for /clear source |
-| `src/hooks/server.ts` | Add `/hooks/subagent-start` and `/hooks/subagent-stop` endpoints |
-| `src/control/approval-manager.ts` | Add approval mode logic to bypass waitForDecision when auto-approving |
-| `src/monitoring/transcript-watcher.ts` | Process `isSidechain: true` entries instead of skipping them |
-| `src/monitoring/status-message.ts` | Add permission mode display to status message |
-| `src/utils/install-hooks.ts` | Add SubagentStart and SubagentStop hook installation |
-| `src/index.ts` | Wire new handlers; add expandable content store; add subagent tracking |
-| `src/sessions/session-store.ts` | Add resetSession(), approval mode methods |
-| `src/config.ts` | Parse DEFAULT_APPROVAL_MODE env var |
-| `src/bot/topics.ts` | Add `unpinMessage()` method for /clear flow |
+| `src/bot/topics.ts` | Add `setTopicStatus(threadId, name, status)` method |
+| `src/types/sessions.ts` | Add `statusMessageContent?: string` for deduplication |
+| `src/types/config.ts` | Add `subagentVisible: boolean`, `settingsThreadId: number` |
+| `src/config.ts` | Parse `SUBAGENT_VISIBLE` env var (default: `false`) |
+| `src/monitoring/status-message.ts` | Add `existingMessageId` + `existingContent` params to `initialize()` |
+| `src/sessions/session-store.ts` | Add `updateStatusMessageContent()` method |
+| `src/index.ts` | Startup gray sweep; subagent suppression gates; settings topic init; wire cfg: callbacks |
+| `src/bot/bot.ts` | Add `cfg:` callback query handler for settings toggles |
 
 ### New Environment Variables
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `DEFAULT_APPROVAL_MODE` | `ask` | Default permission mode for new sessions |
+| `SUBAGENT_VISIBLE` | `false` | Show sub-agent spawn/done/output by default |
 
-### Changed Environment Variable Defaults
+---
 
-| Variable | Old Default | New Default | Reason |
-|----------|-------------|-------------|--------|
-| `APPROVAL_TIMEOUT_MS` | `300000` (5 min) | `0` (infinite) | v3.0 requirement: "No permission timeout -- wait forever" |
+## Installation
+
+```bash
+# No new packages to install for v4.0.
+# All required capabilities exist in the current dependency set.
+
+# Optional: bump grammy to latest (1.41.0 is available, backward-compatible)
+npm install grammy@latest
+```
+
+---
+
+## Alternatives Considered
+
+| Recommended | Alternative | Why Not |
+|-------------|-------------|---------|
+| Unicode emoji prefix in topic name | `editForumTopic icon_color` | Cannot change icon_color after creation — Telegram Bot API limitation (verified) |
+| Unicode emoji prefix in topic name | `editForumTopic icon_custom_emoji_id` | Requires calling `getForumTopicIconStickers` to get valid emoji IDs; default topic icon stickers are decorative emoji, not status-meaningful symbols; adds complexity with no UX benefit over standard Unicode circles |
+| Custom `SettingsStore` (JSON atomic write) | `@grammyjs/storage-file` v2.5.1 | Storage-file requires grammY session middleware wiring; for a plain settings file with ~5 keys written on user tap, a 80-line custom store is simpler and has no middleware chain |
+| `InlineKeyboard` + callback handlers | `@grammyjs/menu` v1.3.1 | Menu plugin is designed for multi-page navigation; settings is a single screen; existing callback handler pattern is already proven for 8+ handlers in the codebase |
+
+## What NOT to Use
+
+| Avoid | Why | Use Instead |
+|-------|-----|-------------|
+| `bot.api.getMessage()` | Does not exist in Telegram Bot API — bots cannot fetch messages by ID | Track last-sent content in memory (`lastSentText` pattern already in `StatusMessage`) |
+| `editForumTopic` with `icon_color` | Not a valid parameter for edit — only valid at creation via `createForumTopic` | Emoji prefix in topic name (already the correct implementation) |
+| `@grammyjs/menu` | Adds multi-page navigation overhead for a single-screen settings panel | `InlineKeyboard` + `bot.callbackQuery(/^cfg:/)` |
+| `@grammyjs/storage-file` | Session middleware overhead for settings that change only on user tap | Custom `SettingsStore` following `SessionStore` atomic-write pattern |
+| Database (SQLite, Redis, etc.) | Settings are 5-10 simple key-value pairs, not relational data | JSON file with atomic write (same as existing `sessions.json`) |
 
 ---
 
@@ -411,10 +344,10 @@ No new library-level dependencies required.
 
 | Package | Compatible With | Notes |
 |---------|-----------------|-------|
-| grammy@^1.40.1 | @grammyjs/auto-retry@^2.0.2, @grammyjs/transformer-throttler@^1.2.1 | All grammY ecosystem packages maintain backward compat within major versions |
-| grammy@^1.40.1 | Telegram Bot API 9.x | grammY 1.x supports all current Bot API features including editMessageReplyMarkup, unpinChatMessage |
-| fastify@^5.7.4 | Node.js >=20.0.0 | Matches project engines requirement |
-| typescript@^5.9.3 | All project dependencies | ESM-first, all deps provide TS types |
+| grammy@1.40–1.41 | @grammyjs/auto-retry@2.0.2 | Confirmed compatible — both in current codebase |
+| grammy@1.40–1.41 | Telegram Bot API 8.x–9.x | grammY 1.x tracks current Bot API; `editForumTopic` with `name` + `icon_custom_emoji_id` available |
+| grammy@1.40–1.41 | @grammyjs/transformer-throttler@1.2.1 | Confirmed compatible — in current codebase |
+| TypeScript@5.9 | All dependencies | All have bundled types or @types packages |
 
 ---
 
@@ -422,26 +355,27 @@ No new library-level dependencies required.
 
 | Area | Confidence | Reason |
 |------|------------|--------|
-| No new dependencies needed | HIGH | Verified all required Telegram API methods exist in grammY; all patterns are variations of existing code |
-| Expand/collapse buttons | HIGH | Verified callback_data limits (64 bytes), editMessageText behavior, InlineKeyboard patterns -- all work |
-| Permission modes | HIGH | PreToolUse hook provides full control; tool classification verified against Claude Code official docs |
-| Subagent visibility | MEDIUM | SubagentStart/SubagentStop hooks verified and well-documented; agent attribution for individual tool calls is LIMITED by hook design -- agent_id is not included in PostToolUse payloads |
-| /clear topic reuse | HIGH | SessionStart `source: "clear"` verified in hooks docs; topic reuse is straightforward Telegram API |
-| Infinite approval timeout | HIGH | Change default from 300000 to 0 and adjust timeout logic to treat 0 as "no timeout" |
+| `editForumTopic` cannot change `icon_color` | HIGH | Verified against aiogram 3.24 docs (authoritative Bot API mirror), Telegram API method spec, python-telegram-bot constants |
+| Emoji prefix in topic name works for status | HIGH | Already implemented in the codebase (`\u{1F7E2}` prefix on create, edit on close/reopen) |
+| No new npm packages needed | HIGH | Mapped every feature to existing grammY API methods + existing code patterns |
+| `@grammyjs/menu` not needed | HIGH | Settings panel is single-screen; `InlineKeyboard` + `callbackQuery` pattern is already proven for 8+ handlers |
+| Sub-agent suppression via boolean gate | HIGH | SubagentTracker already tracks state; suppression is a posting-layer gate, not a tracker change |
+| Sticky message deduplication via content tracking | HIGH | `StatusMessage.lastSentText` already tracks content; extend to initialization path |
+| Settings persistence via custom JSON store | HIGH | Identical pattern to `SessionStore` which is proven in production |
+
+---
 
 ## Sources
 
-- [Telegram Bot API official documentation](https://core.telegram.org/bots/api) -- callback_data 1-64 byte limit, editMessageText, message limits
-- [Telegram API limits](https://limits.tginfo.me/en) -- rate limits for edit operations
-- [grammY InlineKeyboard plugin docs](https://grammy.dev/plugins/keyboard) -- keyboard builder API, callback query handling
-- [grammY API reference](https://grammy.dev/ref/core/api) -- editMessageText, editMessageReplyMarkup return types
-- [Claude Code Hooks reference](https://code.claude.com/docs/en/hooks) -- SubagentStart/SubagentStop schemas, common input fields, PreToolUse decision control
-- [Claude Code Permissions documentation](https://code.claude.com/docs/en/permissions) -- permission modes (default, acceptEdits, plan, dontAsk, bypassPermissions), tool type classification
-- [GitHub issue #16126](https://github.com/anthropics/claude-code/issues/16126) -- agent identity NOT available in PreToolUse hooks (closed as NOT PLANNED)
-- [GitHub issue #21481](https://github.com/anthropics/claude-code/issues/21481) -- agent context fields request (closed as COMPLETED but not in current common hook input)
-- [GitHub issue #7881](https://github.com/anthropics/claude-code/issues/7881) -- SubagentStop shared session_id limitation
-- [GitHub issue #13326](https://github.com/anthropics/claude-code/issues/13326) -- sidechain transcript format, isSidechain field behavior
+- [aiogram 3.24 editForumTopic](https://docs.aiogram.dev/en/latest/api/methods/edit_forum_topic.html) — confirmed `icon_color` NOT a parameter for edit
+- [python-telegram-bot ForumTopic v21.6](https://docs.python-telegram-bot.org/en/v21.6/telegram.forumtopic.html) — `ForumIconColor` constants: BLUE=7322096, GREEN=9367192, YELLOW=16766590, RED=16478047, PURPLE=13338331, PINK=16749490
+- [Telegram API channels.editForumTopic](https://core.telegram.org/method/channels.editForumTopic) — MTProto-level confirmation of editable fields
+- [grammY Menu plugin](https://grammy.dev/plugins/menu) — evaluated; single-screen settings does not benefit from navigation framework
+- [grammY InlineKeyboard docs](https://grammy.dev/plugins/keyboard) — confirmed callbackQuery pattern; 64-byte callback_data limit
+- [@grammyjs/menu npm](https://www.npmjs.com/package/@grammyjs/menu) — v1.3.1 confirmed current (npm info)
+- [@grammyjs/storage-file npm](https://www.npmjs.com/package/@grammyjs/storage-file) — v2.5.1 confirmed current; evaluated and rejected for simple settings use case
+- Existing codebase review: `src/bot/topics.ts`, `src/monitoring/status-message.ts`, `src/sessions/session-store.ts`, `src/monitoring/subagent-tracker.ts`, `src/index.ts` — confirmed all integration points
 
 ---
-*Stack research for: Claude Code Telegram Bridge v3.0 UX Overhaul*
-*Researched: 2026-03-01*
+*Stack research for: Claude Code Telegram Bridge v4.0 Status & Settings*
+*Researched: 2026-03-02*
