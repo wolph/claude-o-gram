@@ -1,4 +1,4 @@
-import type { Bot } from 'grammy';
+import { type Bot, InlineKeyboard } from 'grammy';
 import type { StatusData } from '../types/monitoring.js';
 import { escapeHtml } from '../utils/text.js';
 
@@ -20,6 +20,7 @@ export class StatusMessage {
   private lastSentText: string = '';
   private lastUpdateTime: number = 0;
   private updateTimer: ReturnType<typeof setTimeout> | null = null;
+  private activeKeyboard: InlineKeyboard | undefined = undefined;
 
   /** Minimum milliseconds between editMessageText calls */
   private static readonly MIN_UPDATE_INTERVAL_MS = 3000;
@@ -92,6 +93,25 @@ export class StatusMessage {
   }
 
   /**
+   * Set or clear the reply markup (inline keyboard) on the status message.
+   * Used for the Stop button when a permission mode is active.
+   */
+  setKeyboard(keyboard: InlineKeyboard | undefined): void {
+    this.activeKeyboard = keyboard;
+    // Trigger an immediate flush if we have pending data, or force a re-send
+    if (this.pendingData) {
+      void this.flush();
+    } else if (this.messageId && this.lastSentText) {
+      // No pending text change, but need to update the reply_markup
+      void this.bot.api.editMessageReplyMarkup(this.chatId, this.messageId, {
+        reply_markup: keyboard ?? { inline_keyboard: [] },
+      }).catch(err => {
+        console.warn('StatusMessage: failed to update reply markup:', err instanceof Error ? err.message : err);
+      });
+    }
+  }
+
+  /**
    * Flush the pending status data to Telegram.
    *
    * Skips the API call if the formatted text is identical to the last
@@ -116,7 +136,9 @@ export class StatusMessage {
     if (text === this.lastSentText) return;
 
     try {
-      await this.bot.api.editMessageText(this.chatId, this.messageId, text);
+      await this.bot.api.editMessageText(this.chatId, this.messageId, text, {
+        reply_markup: this.activeKeyboard ?? undefined,
+      });
       this.lastSentText = text;
     } catch (err) {
       // Ignore "message is not modified" errors
@@ -183,6 +205,7 @@ export class StatusMessage {
     }
 
     this.pendingData = null;
+    this.activeKeyboard = undefined;
   }
 }
 

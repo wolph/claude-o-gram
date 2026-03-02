@@ -4,6 +4,7 @@ import { SessionStore } from './sessions/session-store.js';
 import { createHookHandlers, type HookCallbacks } from './hooks/handlers.js';
 import { createHookServer } from './hooks/server.js';
 import { createBot, makeApprovalKeyboard } from './bot/bot.js';
+import { PermissionModeManager, isDangerous } from './control/permission-modes.js';
 import { TopicManager } from './bot/topics.js';
 import { MessageBatcher } from './bot/rate-limiter.js';
 import {
@@ -12,6 +13,8 @@ import {
   formatToolCompact,
   formatNotification,
   formatApprovalRequest,
+  formatAutoApproved,
+  formatDangerousPrompt,
 } from './bot/formatter.js';
 import { installHooks } from './utils/install-hooks.js';
 import { TranscriptWatcher, calculateContextPercentage } from './monitoring/transcript-watcher.js';
@@ -85,6 +88,7 @@ export async function main(): Promise<void> {
 
   // 4. Create control managers and input router
   const approvalManager = new ApprovalManager();
+  const permissionModeManager = new PermissionModeManager();
   const inputRouter = new InputRouter();
 
   // 4b. Discover Claude Code commands for Telegram autocomplete
@@ -93,7 +97,7 @@ export async function main(): Promise<void> {
   console.log(`Discovered ${commandRegistry.getEntries().length} Claude Code commands`);
 
   // 5. Create bot instance (with plugins, not yet started)
-  const bot = await createBot(config, sessionStore, approvalManager, inputRouter, commandRegistry);
+  const bot = await createBot(config, sessionStore, approvalManager, inputRouter, commandRegistry, permissionModeManager, updateModeStatus);
 
   // 6. Create topic manager wired to bot
   const topicManager = new TopicManager(bot, config.telegramChatId);
@@ -233,6 +237,7 @@ export async function main(): Promise<void> {
         monitors.delete(oldSession.sessionId);
       }
       approvalManager.cleanupSession(oldSession.sessionId);
+      permissionModeManager.cleanup(oldSession.sessionId);
       inputRouter.cleanup(oldSession.sessionId);
       if (oldSession.status === 'active') {
         sessionStore.updateStatus(oldSession.sessionId, 'closed');
@@ -267,8 +272,8 @@ export async function main(): Promise<void> {
     });
   }
 
-  // Phase 3: Track original message text for approval result edits
-  const approvalMessageTexts = new Map<string, string>();
+  // Phase 7: Track auto-approved tool_use_ids for PostToolUse dedup
+  const autoApprovedToolUseIds = new Set<string>();
 
   /**
    * Initialize monitoring components for a session.
@@ -369,6 +374,27 @@ export async function main(): Promise<void> {
     summaryTimer.start();
   }
 
+  /**
+   * Update the status message's Stop button based on the current permission mode.
+   * Called when a mode is activated or deactivated (via mode selection or Stop button).
+   */
+  function updateModeStatus(sessionId: string): void {
+    const monitor = monitors.get(sessionId);
+    if (!monitor) return;
+    const state = permissionModeManager.getMode(sessionId);
+    const session = sessionStore.get(sessionId);
+    if (!session) return;
+
+    if (state.mode !== 'manual') {
+      // Show Stop button on status message
+      const stopKeyboard = new InlineKeyboard().text('\u26D4 Stop Auto-Accept', `stop:${session.threadId}`);
+      monitor.statusMessage.setKeyboard(stopKeyboard);
+    } else {
+      // Remove Stop button
+      monitor.statusMessage.setKeyboard(undefined);
+    }
+  }
+
   // 8. Define HookCallbacks -- THE CRITICAL WIRING
   //    This connects session lifecycle events to Telegram forum topic actions.
   const callbacks: HookCallbacks = {
@@ -409,6 +435,7 @@ export async function main(): Promise<void> {
 
               // Also clean up control state for the old session
               approvalManager.cleanupSession(oldSessionId);
+              permissionModeManager.cleanup(oldSessionId);
               inputRouter.cleanup(oldSessionId);
 
               // Mark old session as closed since SessionEnd never did it
@@ -494,6 +521,7 @@ export async function main(): Promise<void> {
 
         // Clean up control state
         approvalManager.cleanupSession(session.sessionId);
+        permissionModeManager.cleanup(session.sessionId);
         inputRouter.cleanup(session.sessionId);
 
         // Store threadId for the upcoming SessionStart(source=clear)
@@ -522,8 +550,9 @@ export async function main(): Promise<void> {
         monitors.delete(session.sessionId);
       }
 
-      // Clean up control state and input router
+      // Clean up control state, permission modes, and input router
       approvalManager.cleanupSession(session.sessionId);
+      permissionModeManager.cleanup(session.sessionId);
       inputRouter.cleanup(session.sessionId);
 
       const summary = formatSessionEnd(latest, 'completed');
@@ -534,6 +563,20 @@ export async function main(): Promise<void> {
     },
 
     onToolUse: async (session, payload) => {
+      // Skip display for auto-approved tools (already shown as lightning line)
+      if (autoApprovedToolUseIds.has(payload.tool_use_id)) {
+        autoApprovedToolUseIds.delete(payload.tool_use_id);
+        // Still update status message with current tool
+        const monitor = monitors.get(session.sessionId);
+        if (monitor) {
+          const latestSession = sessionStore.get(session.sessionId);
+          if (latestSession) {
+            monitor.statusMessage.requestUpdate(buildStatusData(latestSession, payload.tool_name));
+          }
+        }
+        return;
+      }
+
       const result = formatToolCompact(payload);
 
       // Track expand data for this thread's pending batch
@@ -578,10 +621,17 @@ export async function main(): Promise<void> {
       await batcher.enqueueImmediate(session.threadId, summary);
     },
 
-    // Phase 3: PreToolUse approval handler
+    // Phase 3+7: PreToolUse approval handler (with dangerous command formatting)
     onPreToolUse: async (session, payload: PreToolUsePayload) => {
-      // Format the approval request message
-      const approvalHtml = formatApprovalRequest(payload);
+      // Use warning-styled prompt for dangerous commands
+      const dangerous = isDangerous(payload.tool_name, payload.tool_input);
+      const approvalHtml = dangerous
+        ? formatDangerousPrompt(payload)
+        : formatApprovalRequest(payload);
+
+      // PERM-08: Log to stdout
+      console.log(`[PERM] Awaiting user decision for ${payload.tool_name} (dangerous: ${dangerous})`);
+
       const keyboard = makeApprovalKeyboard(payload.tool_use_id);
 
       // Send approval message with inline keyboard to the session topic
@@ -591,10 +641,7 @@ export async function main(): Promise<void> {
         reply_markup: keyboard,
       });
 
-      // Store original text for expiry editing
-      approvalMessageTexts.set(payload.tool_use_id, approvalHtml);
-
-      // Wait for user decision or timeout -- THIS BLOCKS THE HTTP RESPONSE
+      // Wait for user decision -- THIS BLOCKS THE HTTP RESPONSE (PERM-01: no timeout)
       const decision = await approvalManager.waitForDecision(
         payload.tool_use_id,
         session.sessionId,
@@ -602,9 +649,6 @@ export async function main(): Promise<void> {
         msg.message_id,
         payload.tool_name,
       );
-
-      // Clean up stored text (may already be cleaned by timeout callback)
-      approvalMessageTexts.delete(payload.tool_use_id);
 
       // Build the hook response
       if (decision === 'allow') {
@@ -626,9 +670,16 @@ export async function main(): Promise<void> {
       };
     },
 
-    onStop: async (_session, _payload) => {
-      // Stub: Plan 02 will wire this to reset "Until Done" mode
-      // and update the status message.
+    onStop: async (session, _payload) => {
+      const state = permissionModeManager.getMode(session.sessionId);
+      if (state.mode === 'until-done') {
+        permissionModeManager.resetToManual(session.sessionId);
+        console.log(`[PERM] Until Done mode expired for session ${session.sessionId} (Stop hook)`);
+        // Update status message to remove Stop button
+        updateModeStatus(session.sessionId);
+        // Post brief announcement
+        batcher.enqueueImmediate(session.threadId, '\u26D4 Until Done mode ended (turn complete)');
+      }
     },
   };
 
@@ -636,7 +687,18 @@ export async function main(): Promise<void> {
   const handlers = createHookHandlers(sessionStore, callbacks);
 
   // 10. Create Fastify hook server (configured but not listening)
-  const server = await createHookServer(config, handlers);
+  const server = await createHookServer(config, handlers, permissionModeManager, (sessionId, toolName, toolInput, toolUseId) => {
+    // PERM-07: Post auto-approved lightning line immediately (not batched)
+    const session = sessionStore.get(sessionId);
+    if (session) {
+      const lightningLine = formatAutoApproved(toolName, toolInput);
+      batcher.enqueueImmediate(session.threadId, lightningLine);
+      // Track for PostToolUse dedup
+      autoApprovedToolUseIds.add(toolUseId);
+      // Update status message Stop button
+      updateModeStatus(sessionId);
+    }
+  });
 
   // 11. Reconnect to existing sessions on restart
   //     Per user decision: "reconnect to existing topics from saved session map
@@ -714,8 +776,12 @@ export async function main(): Promise<void> {
       detector.stop();
     }
     clearDetectors.clear();
-    // Phase 3: Clean up control managers
+    // Phase 3+7: Clean up control managers
     approvalManager.shutdown();
+    // Clean up permission mode state for all sessions
+    for (const session of sessionStore.getActiveSessions()) {
+      permissionModeManager.cleanup(session.sessionId);
+    }
     batcher.shutdown();
     bot.stop();
     await server.close();
