@@ -323,8 +323,9 @@ type RiskLevel = 'safe' | 'caution' | 'danger';
 /**
  * Classify a tool's risk level for the approval message.
  * Per user decision: show risk indicator (safe/caution/danger based on tool type).
+ * Exported for PermissionModeManager safe-only mode check.
  */
-function classifyRisk(toolName: string): RiskLevel {
+export function classifyRisk(toolName: string): RiskLevel {
   // Danger: tools that execute arbitrary commands or delete things
   const dangerTools = new Set(['Bash', 'BashBackground']);
   if (dangerTools.has(toolName)) return 'danger';
@@ -383,8 +384,9 @@ export function formatApprovalRequest(payload: PreToolUsePayload): string {
 /**
  * Build a compact preview of the tool input for the approval message.
  * Truncated to ~200 chars per user decision.
+ * Exported for formatDangerousPrompt reuse.
  */
-function buildToolPreview(toolName: string, input: Record<string, unknown>): string {
+export function buildToolPreview(toolName: string, input: Record<string, unknown>): string {
   switch (toolName) {
     case 'Bash':
     case 'BashBackground': {
@@ -478,6 +480,91 @@ export function formatApprovalExpired(
 ): string {
   const minutes = Math.round(timeoutMs / 60000);
   return `${originalText}\n\n\u23F0 <b>Expired</b> \u2014 auto-denied after ${minutes}m`;
+}
+
+// ---------------------------------------------------------------------------
+// Auto-approval formatting
+// ---------------------------------------------------------------------------
+
+/**
+ * Format a compact one-liner for an auto-approved tool call.
+ * Lightning prefix indicates the tool was auto-approved by the active permission mode.
+ * Format: "\u26A1 Bash(npm test)" or "\u26A1 Read(src/index.ts)"
+ * Max 250 chars total.
+ */
+export function formatAutoApproved(toolName: string, toolInput: Record<string, unknown>): string {
+  let preview: string;
+
+  switch (toolName) {
+    case 'Bash':
+    case 'BashBackground': {
+      const command = shortenCommand((toolInput.command as string) || '');
+      const commandPreview = command.split('\n')[0].slice(0, 200);
+      preview = `${toolName}(${commandPreview})`;
+      break;
+    }
+    case 'Read': {
+      const filePath = (toolInput.file_path as string) || (toolInput.path as string) || 'unknown';
+      preview = `Read(${smartPath(filePath)})`;
+      break;
+    }
+    case 'Glob': {
+      const pattern = (toolInput.pattern as string) || '*';
+      preview = `Glob("${pattern}")`;
+      break;
+    }
+    case 'Grep': {
+      const pattern = (toolInput.pattern as string) || '';
+      const path = (toolInput.path as string) || '';
+      const pathPart = path ? `, ${smartPath(path)}` : '';
+      preview = `Grep("${pattern}"${pathPart})`;
+      break;
+    }
+    case 'Write': {
+      const filePath = (toolInput.file_path as string) || (toolInput.path as string) || 'unknown';
+      preview = `Write(${smartPath(filePath)})`;
+      break;
+    }
+    case 'Edit':
+    case 'MultiEdit': {
+      const filePath = (toolInput.file_path as string) || (toolInput.path as string) || 'unknown';
+      preview = `Edit(${smartPath(filePath)})`;
+      break;
+    }
+    default: {
+      let argsPreview = '';
+      try {
+        argsPreview = JSON.stringify(toolInput);
+      } catch {
+        argsPreview = String(toolInput);
+      }
+      if (argsPreview.length > 150) {
+        argsPreview = argsPreview.slice(0, 150) + '\u2026';
+      }
+      preview = `${toolName}(${argsPreview})`;
+      break;
+    }
+  }
+
+  return truncCompact(`\u26A1 ${preview}`);
+}
+
+/**
+ * Format a warning-styled approval prompt for dangerous commands.
+ * Visually distinct from normal prompts per CONTEXT.md locked decision.
+ * Uses bold warning prefix and the existing buildToolPreview for command detail.
+ */
+export function formatDangerousPrompt(payload: PreToolUsePayload): string {
+  const parts: string[] = [
+    `\u26A0\uFE0F <b>DANGEROUS COMMAND</b>`,
+  ];
+
+  const preview = buildToolPreview(payload.tool_name, payload.tool_input);
+  if (preview) {
+    parts.push(preview);
+  }
+
+  return parts.join('\n');
 }
 
 // ---------------------------------------------------------------------------
