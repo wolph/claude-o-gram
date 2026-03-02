@@ -20,13 +20,13 @@ Requirements for v3.0 UX Overhaul. Each maps to roadmap phases.
 ### Permissions
 
 - [x] **PERM-01**: No permission timeout -- wait indefinitely for user decision
-- [ ] **PERM-02**: Accept All mode -- auto-approve everything until manually stopped
-- [ ] **PERM-03**: Same Tool mode -- auto-approve only matching tool name until stopped
-- [ ] **PERM-04**: Safe Only mode -- auto-approve green-risk tools, prompt for yellow/red
-- [ ] **PERM-05**: Until Done mode -- auto-approve everything until Claude's turn ends
-- [ ] **PERM-06**: Sticky control message with Stop button when any auto-accept mode is active
-- [ ] **PERM-07**: Auto-approved permissions shown as compact `lightning Tool(args...)` line
-- [ ] **PERM-08**: Permissions visible locally via stdout before and after decision
+- [x] **PERM-02**: Accept All mode -- auto-approve everything until manually stopped
+- [x] **PERM-03**: Same Tool mode -- auto-approve only matching tool name until stopped
+- [x] **PERM-04**: Safe Only mode -- auto-approve green-risk tools, prompt for yellow/red
+- [x] **PERM-05**: Until Done mode -- auto-approve everything until Claude's turn ends
+- [x] **PERM-06**: Sticky control message with Stop button when any auto-accept mode is active
+- [x] **PERM-07**: Auto-approved permissions shown as compact `lightning Tool(args...)` line
+- [x] **PERM-08**: Permissions visible locally via stdout before and after decision
 - [x] **PERM-09**: Dangerous command blocklist prevents auto-accept of destructive patterns (rm -rf, sudo, curl|bash)
 
 ### Session Management
@@ -97,13 +97,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SESS-05 | Phase 6 | Complete |
 | SESS-06 | Phase 6 | Complete |
 | PERM-01 | Phase 7 | Complete |
-| PERM-02 | Phase 7 | Pending |
-| PERM-03 | Phase 7 | Pending |
-| PERM-04 | Phase 7 | Pending |
-| PERM-05 | Phase 7 | Pending |
-| PERM-06 | Phase 7 | Pending |
-| PERM-07 | Phase 7 | Pending |
-| PERM-08 | Phase 7 | Pending |
+| PERM-02 | Phase 7 | Complete |
+| PERM-03 | Phase 7 | Complete |
+| PERM-04 | Phase 7 | Complete |
+| PERM-05 | Phase 7 | Complete |
+| PERM-06 | Phase 7 | Complete |
+| PERM-07 | Phase 7 | Complete |
+| PERM-08 | Phase 7 | Complete |
 | PERM-09 | Phase 7 | Complete |
 | AGENT-01 | Phase 8 | Pending |
 | AGENT-02 | Phase 8 | Pending |
