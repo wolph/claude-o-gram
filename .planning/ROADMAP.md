@@ -41,7 +41,7 @@
 
 - [x] **Phase 9: Color-Coded Topic Status** (2/2 plans) - Emoji status prefixes in topic names with startup cleanup and debounced updates
 - [x] **Phase 10: Sub-Agent Suppression** (1/1 plans) - Sub-agent output silenced by default with toggleable visibility (completed 2026-03-02)
-- [ ] **Phase 11: Sticky Message Dedup** - Reuse existing pinned messages on /clear and bot restart
+- [x] **Phase 11: Sticky Message Dedup** - Reuse existing pinned messages on /clear and bot restart (completed 2026-03-02)
 - [ ] **Phase 12: Settings Topic** - Dedicated Telegram topic for interactive runtime configuration
 
 ## Phase Details
@@ -110,5 +110,5 @@ Recommended: 9 -> 10 -> 11 -> 12
 | 8. Subagent Visibility | v3.0 | 2/2 | Complete | 2026-03-02 |
 | 9. Color-Coded Topic Status | v4.0 | 2/2 | Complete | 2026-03-02 |
 | 10. Sub-Agent Suppression | v4.0 | 1/1 | Complete | 2026-03-02 |
-| 11. Sticky Message Dedup | v4.0 | 0/? | Not started | - |
+| 11. Sticky Message Dedup | 1/1 | Complete   | 2026-03-02 | - |
 | 12. Settings Topic | v4.0 | 0/? | Not started | - |
