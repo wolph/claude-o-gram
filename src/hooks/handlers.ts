@@ -8,6 +8,7 @@ import type {
   PostToolUsePayload,
   NotificationPayload,
   PreToolUsePayload,
+  StopPayload,
 } from '../types/hooks.js';
 import type { SessionStore } from '../sessions/session-store.js';
 import type { TranscriptEntry, ContentBlock } from '../types/monitoring.js';
@@ -25,6 +26,7 @@ export interface HookCallbacks {
   onToolUse(session: SessionInfo, payload: PostToolUsePayload): Promise<void>;
   onNotification(session: SessionInfo, payload: NotificationPayload): Promise<void>;
   onPreToolUse(session: SessionInfo, payload: PreToolUsePayload): Promise<Record<string, unknown>>;
+  onStop(session: SessionInfo, payload: StopPayload): Promise<void>;
   onBackfillSummary(session: SessionInfo, summary: string): Promise<void>;
 }
 
@@ -357,7 +359,7 @@ export class HookHandlers {
   /**
    * Handle a PreToolUse hook event.
    * BLOCKING: Returns the response body that becomes the HTTP response.
-   * The connection stays open until the user decides or timeout fires.
+   * The connection stays open until the user decides.
    */
   async handlePreToolUse(payload: PreToolUsePayload): Promise<Record<string, unknown>> {
     const session = await this.ensureSession(payload);
@@ -373,6 +375,18 @@ export class HookHandlers {
     }
     this.sessionStore.updateLastActivity(payload.session_id);
     return this.callbacks.onPreToolUse(session, payload);
+  }
+
+  /**
+   * Handle a Stop hook event.
+   * Fires when Claude finishes responding (turn ends).
+   * Used to expire "Until Done" permission mode.
+   */
+  async handleStop(payload: StopPayload): Promise<void> {
+    const session = this.sessionStore.get(payload.session_id);
+    if (!session) return;
+    this.sessionStore.updateLastActivity(payload.session_id);
+    await this.callbacks.onStop(session, payload);
   }
 }
 

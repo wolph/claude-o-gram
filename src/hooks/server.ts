@@ -6,6 +6,7 @@ import type {
   PostToolUsePayload,
   NotificationPayload,
   PreToolUsePayload,
+  StopPayload,
 } from '../types/hooks.js';
 import type { HookHandlers } from './handlers.js';
 
@@ -76,6 +77,18 @@ export async function createHookServer(
         .catch((err) => {
           request.log.error(err, 'Error handling notification hook');
         });
+      return {};
+    }
+  );
+
+  // POST /hooks/stop
+  // Fire and forget: process asynchronously when Claude finishes responding
+  fastify.post<{ Body: StopPayload }>(
+    '/hooks/stop',
+    async (request) => {
+      handlers.handleStop(request.body as StopPayload).catch((err) => {
+        request.log.error(err, 'Error handling stop hook');
+      });
       return {};
     }
   );

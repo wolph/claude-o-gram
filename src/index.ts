@@ -12,7 +12,6 @@ import {
   formatToolCompact,
   formatNotification,
   formatApprovalRequest,
-  formatApprovalExpired,
 } from './bot/formatter.js';
 import { installHooks } from './utils/install-hooks.js';
 import { TranscriptWatcher, calculateContextPercentage } from './monitoring/transcript-watcher.js';
@@ -85,7 +84,7 @@ export async function main(): Promise<void> {
   );
 
   // 4. Create control managers and input router
-  const approvalManager = new ApprovalManager(config.approvalTimeoutMs);
+  const approvalManager = new ApprovalManager();
   const inputRouter = new InputRouter();
 
   // 4b. Discover Claude Code commands for Telegram autocomplete
@@ -268,28 +267,8 @@ export async function main(): Promise<void> {
     });
   }
 
-  // Phase 3: Track original message text for approval expiry edits
+  // Phase 3: Track original message text for approval result edits
   const approvalMessageTexts = new Map<string, string>();
-  // Track whether denials were caused by timeout (vs user button press)
-  const timeoutDenials = new Set<string>();
-
-  // Phase 3: Set up approval timeout callback
-  approvalManager.setTimeoutCallback(async (toolUseId, pending) => {
-    timeoutDenials.add(toolUseId);
-    const originalText = approvalMessageTexts.get(toolUseId) || '';
-    approvalMessageTexts.delete(toolUseId);
-    try {
-      const expiredText = formatApprovalExpired(originalText, config.approvalTimeoutMs);
-      await bot.api.editMessageText(
-        config.telegramChatId,
-        pending.messageId,
-        expiredText,
-        { parse_mode: 'HTML', reply_markup: undefined },
-      );
-    } catch (err) {
-      console.warn('Failed to edit expired approval message:', err instanceof Error ? err.message : err);
-    }
-  });
 
   /**
    * Initialize monitoring components for a session.
@@ -638,20 +617,18 @@ export async function main(): Promise<void> {
         };
       }
 
-      // Determine if denial was user-initiated or timeout
-      const isTimeout = timeoutDenials.has(payload.tool_use_id);
-      timeoutDenials.delete(payload.tool_use_id);
-      const reason = isTimeout
-        ? 'Auto-denied: approval timeout'
-        : 'Denied by user via Telegram';
-
       return {
         hookSpecificOutput: {
           hookEventName: 'PreToolUse',
           permissionDecision: 'deny',
-          permissionDecisionReason: reason,
+          permissionDecisionReason: 'Denied by user via Telegram',
         },
       };
+    },
+
+    onStop: async (_session, _payload) => {
+      // Stub: Plan 02 will wire this to reset "Until Done" mode
+      // and update the status message.
     },
   };
 

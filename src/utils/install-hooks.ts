@@ -36,13 +36,13 @@ export function installHooks(port: number): void {
     }
   }
 
-  // Calculate PreToolUse hook timeout: must exceed APPROVAL_TIMEOUT_MS
-  // Default APPROVAL_TIMEOUT_MS is 300000 (5 min = 300s), so hook timeout = 360s
-  const approvalTimeoutMs = parseInt(process.env.APPROVAL_TIMEOUT_MS || '300000', 10);
-  const preToolUseTimeoutSec = Math.ceil(approvalTimeoutMs / 1000) + 60;
-
   // Define hook configuration for our hook events
   const baseUrl = `http://127.0.0.1:${port}`;
+
+  // PERM-01: PreToolUse timeout set to 24 hours (86400s) for indefinite wait.
+  // Approval prompts wait until user decides -- no auto-deny timeout.
+  const preToolUseTimeoutSec = 86400;
+
   const hookConfig: Record<string, unknown> = {
     SessionStart: [
       {
@@ -81,6 +81,14 @@ export function installHooks(port: number): void {
         matcher: '',
         hooks: [
           { type: 'http', url: `${baseUrl}/hooks/pre-tool-use`, timeout: preToolUseTimeoutSec },
+        ],
+      },
+    ],
+    Stop: [
+      {
+        matcher: '',
+        hooks: [
+          { type: 'http', url: `${baseUrl}/hooks/stop`, timeout: 10 },
         ],
       },
     ],

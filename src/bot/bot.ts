@@ -9,7 +9,6 @@ import type { InputRouter } from '../input/input-router.js';
 import type { CommandRegistry } from './command-registry.js';
 import {
   formatApprovalResult,
-  formatApprovalExpired,
 } from './formatter.js';
 import { expandCache, cacheKey, buildExpandedHtml } from './expand-cache.js';
 
@@ -300,6 +299,11 @@ export async function createBot(
         { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
       );
     }
+  });
+
+  // Global error handler -- prevent unhandled errors from crashing the bot
+  bot.catch((err) => {
+    console.error('Bot error:', err.message || err);
   });
 
   return bot;

@@ -47,3 +47,10 @@ export interface NotificationPayload extends HookPayload {
   message: string;
   title?: string;
 }
+
+/** Payload for Stop hook event (fires when Claude finishes responding) */
+export interface StopPayload extends HookPayload {
+  hook_event_name: 'Stop';
+  stop_hook_active: boolean;
+  last_assistant_message: string;
+}
