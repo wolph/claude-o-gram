@@ -19,7 +19,7 @@ Requirements for v3.0 UX Overhaul. Each maps to roadmap phases.
 
 ### Permissions
 
-- [ ] **PERM-01**: No permission timeout -- wait indefinitely for user decision
+- [x] **PERM-01**: No permission timeout -- wait indefinitely for user decision
 - [ ] **PERM-02**: Accept All mode -- auto-approve everything until manually stopped
 - [ ] **PERM-03**: Same Tool mode -- auto-approve only matching tool name until stopped
 - [ ] **PERM-04**: Safe Only mode -- auto-approve green-risk tools, prompt for yellow/red
@@ -27,7 +27,7 @@ Requirements for v3.0 UX Overhaul. Each maps to roadmap phases.
 - [ ] **PERM-06**: Sticky control message with Stop button when any auto-accept mode is active
 - [ ] **PERM-07**: Auto-approved permissions shown as compact `lightning Tool(args...)` line
 - [ ] **PERM-08**: Permissions visible locally via stdout before and after decision
-- [ ] **PERM-09**: Dangerous command blocklist prevents auto-accept of destructive patterns (rm -rf, sudo, curl|bash)
+- [x] **PERM-09**: Dangerous command blocklist prevents auto-accept of destructive patterns (rm -rf, sudo, curl|bash)
 
 ### Session Management
 
@@ -96,7 +96,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SESS-04 | Phase 6 | Removed (user decision) |
 | SESS-05 | Phase 6 | Complete |
 | SESS-06 | Phase 6 | Complete |
-| PERM-01 | Phase 7 | Pending |
+| PERM-01 | Phase 7 | Complete |
 | PERM-02 | Phase 7 | Pending |
 | PERM-03 | Phase 7 | Pending |
 | PERM-04 | Phase 7 | Pending |
@@ -104,7 +104,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PERM-06 | Phase 7 | Pending |
 | PERM-07 | Phase 7 | Pending |
 | PERM-08 | Phase 7 | Pending |
-| PERM-09 | Phase 7 | Pending |
+| PERM-09 | Phase 7 | Complete |
 | AGENT-01 | Phase 8 | Pending |
 | AGENT-02 | Phase 8 | Pending |
 | AGENT-03 | Phase 8 | Pending |

@@ -51,7 +51,7 @@ Plans:
 - [x] 06-01-PLAN.md -- Compact formatter, expand cache module, batcher upgrade
 - [x] 06-02-PLAN.md -- Expand/collapse wiring, bot commentary cleanup, compact status
 - [x] 06-03-PLAN.md -- /clear session lifecycle with topic reuse
-- [ ] 06-04-PLAN.md -- Gap closure: fix /clear to work without SessionEnd (upstream bug #6428)
+- [x] 06-04-PLAN.md -- Gap closure: fix /clear to work without SessionEnd (upstream bug #6428)
 
 ### Phase 7: Permission Modes
 **Goal**: Users control how aggressively permissions are auto-approved, eliminating button-tap fatigue for trusted workflows
@@ -66,7 +66,7 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
-- [ ] 07-01-PLAN.md -- Contracts and infrastructure: PermissionModeManager state machine, isDangerous blocklist, formatter additions, Stop hook, approval timeout removal
+- [x] 07-01-PLAN.md -- Contracts and infrastructure: PermissionModeManager state machine, isDangerous blocklist, formatter additions, Stop hook, approval timeout removal
 - [ ] 07-02-PLAN.md -- Mode UX and wiring: keyboard expansion, mode callbacks, auto-approve short-circuit, lightning display, Status Stop button, lifecycle management
 
 ### Phase 8: Subagent Visibility
@@ -96,6 +96,6 @@ Phases execute in numeric order: 6 -> 7 -> 8
 | 3. Control | v1.0 | 2/2 | Complete | 2026-03-01 |
 | 4. SDK Resume Input | v2.0 | 2/2 | Complete | 2026-03-01 |
 | 5. tmux Cleanup | v2.0 | 1/1 | Complete | 2026-03-01 |
-| 6. Compact Output & Session UX | v3.0 | 3/4 | Gap closure | - |
-| 7. Permission Modes | v3.0 | 0/2 | Planned | - |
+| 6. Compact Output & Session UX | v3.0 | 4/4 | Complete | 2026-03-02 |
+| 7. Permission Modes | v3.0 | 1/2 | In Progress | - |
 | 8. Subagent Visibility | v3.0 | 0/? | Not started | - |
