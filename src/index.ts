@@ -277,28 +277,60 @@ export async function main(): Promise<void> {
   const callbacks: HookCallbacks = {
     onSessionStart: async (session, source) => {
       if (source === 'clear') {
-        // /clear transition: reuse existing topic
+        // /clear transition: reuse existing topic.
+        // The session object already has threadId and statusMessageId
+        // from the prior session (copied via spread in handlers.ts).
+        //
+        // Two paths get us here:
+        // 1. SessionEnd never fired (upstream bug #6428) -- prior session was active,
+        //    handlers.ts found it via getActiveByCwd. threadId/statusMessageId are
+        //    directly on the session object.
+        // 2. SessionEnd fired first (future fix) -- clearPending was populated.
+        //    handlers.ts found the closed session via getRecentlyClosedByCwd.
+        //    threadId/statusMessageId are also on the session object.
+        //
+        // Either way, session.threadId and session.statusMessageId are valid.
+
+        // Also check clearPending as an additional source (for future-proofing
+        // when SessionEnd fires first and has already cleaned up the old session).
         const pending = clearPending.get(session.cwd);
         if (pending) {
           clearPending.delete(session.cwd);
-
-          // Post timestamped separator (SESS-02)
-          const now = new Date();
-          const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-          const separator = `\u2500\u2500\u2500 context cleared at ${timeStr} \u2500\u2500\u2500`;
-          await batcher.enqueueImmediate(session.threadId, separator);
-
-          // Unpin old status message (SESS-04)
-          if (pending.statusMessageId > 0) {
-            await topicManager.unpinMessage(pending.statusMessageId);
-          }
-
-          // Reset session counters (SESS-05) -- already reset in handlers.ts set()
-          // but call resetCounters to be safe
-          sessionStore.resetCounters(session.sessionId);
         }
 
-        // Initialize monitoring (creates new StatusMessage, pins it) (SESS-03)
+        // Clean up OLD monitoring for the previous session ID.
+        // Since SessionEnd may not have fired, the old monitor may still be running.
+        // Find it by matching cwd (not sessionId, since the new session has a different ID).
+        for (const [oldSessionId, monitor] of monitors) {
+          if (oldSessionId !== session.sessionId) {
+            const oldSession = sessionStore.get(oldSessionId);
+            if (oldSession && oldSession.cwd === session.cwd) {
+              monitor.transcriptWatcher.stop();
+              monitor.summaryTimer.stop();
+              monitor.statusMessage.destroy();
+              monitors.delete(oldSessionId);
+
+              // Also clean up control state for the old session
+              approvalManager.cleanupSession(oldSessionId);
+              inputRouter.cleanup(oldSessionId);
+
+              // Mark old session as closed since SessionEnd never did it
+              sessionStore.updateStatus(oldSessionId, 'closed');
+              break;
+            }
+          }
+        }
+
+        // Post timestamped separator (SESS-02)
+        const now = new Date();
+        const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+        const separator = `\u2500\u2500\u2500 context cleared at ${timeStr} \u2500\u2500\u2500`;
+        await batcher.enqueueImmediate(session.threadId, separator);
+
+        // Reset session counters (SESS-05)
+        sessionStore.resetCounters(session.sessionId);
+
+        // Initialize fresh monitoring (creates new StatusMessage, pins it) (SESS-03)
         initMonitoring(session);
 
         // Re-detect input method
