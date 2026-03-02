@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A per-machine Telegram bot that bridges Claude Code sessions to a shared Telegram group, giving you full remote visibility and bidirectional control over Claude Code from any device. Each machine runs its own bot (appearing as a separate group member), and each active Claude Code session gets its own topic thread in the group. Output is compact and terminal-faithful, permissions are controllable via tiered modes, and subagent activity is fully visible.
+A per-machine Telegram bot that bridges Claude Code sessions to a shared Telegram group, giving you full remote visibility and bidirectional control over Claude Code from any device. Each machine runs its own bot (appearing as a separate group member), and each active Claude Code session gets its own topic thread in the group. Output is compact and terminal-faithful, permissions are controllable via tiered modes, session state is visible at a glance via color-coded topic indicators, and bot settings are configurable directly from Telegram.
 
 ## Core Value
 
@@ -10,10 +10,10 @@ See what Claude Code is doing and respond to its questions from anywhere, withou
 
 ## Current State
 
-**Shipped:** v3.0 UX Overhaul (2026-03-02)
+**Shipped:** v4.0 Status & Settings (2026-03-02)
 **Tech stack:** TypeScript, grammY, Fastify, @anthropic-ai/claude-agent-sdk
-**Codebase:** ~5,760 LOC TypeScript
-**Architecture:** HTTP hook server + transcript watcher + SDK resume input + permission mode manager + subagent tracker
+**Codebase:** ~6,500 LOC TypeScript
+**Architecture:** HTTP hook server + transcript watcher + SDK resume input + permission mode manager + subagent tracker + topic status manager + settings topic with runtime config
 
 ## Requirements
 
@@ -41,19 +41,17 @@ See what Claude Code is doing and respond to its questions from anywhere, withou
 - ✓ No permission timeout (wait indefinitely for user decision) — v3.0
 - ✓ Permissions visible locally via stdout with [PERM] prefix — v3.0
 - ✓ Subagent visibility: spawn/done announcements, agent-prefixed output — v3.0
+- ✓ Color-coded topic status: green=ready, yellow=busy, red=error, gray=down emoji prefixes — v4.0
+- ✓ Startup gray sweep: all existing topics set to gray on bot startup — v4.0
+- ✓ Sub-agent suppression: zero output by default, toggleable via settings — v4.0
+- ✓ Sticky message dedup: reuse existing pinned messages on /clear and restart — v4.0
+- ✓ Settings topic: dedicated Telegram topic with inline keyboard for runtime configuration — v4.0
+- ✓ Runtime settings persist to disk and survive bot restarts — v4.0
+- ✓ BOT_OWNER_ID auth guard on settings — v4.0
 
 ### Active
 
-#### Current Milestone: v4.0 Status & Settings
-
-**Goal:** Replace text-based status messages with color-coded topic indicators, suppress sub-agent noise by default, deduplicate sticky messages, and add a Telegram-native settings topic for runtime configuration.
-
-**Target features:**
-- Color-coded status bubbles in topic titles (green=ready, yellow=busy, red=error, gray=down)
-- Startup cleanup: set all old topics to gray on bot startup
-- Sub-agent silence by default: no topic, no output unless configured
-- Sticky message deduplication: skip creating new sticky if content matches existing
-- Settings topic: dedicated Telegram topic for configuring bot settings interactively
+(No active requirements — planning next milestone)
 
 ### Out of Scope
 
@@ -74,6 +72,9 @@ See what Claude Code is doing and respond to its questions from anywhere, withou
 - v2.0+ uses SDK `query({ resume })` for text input — one-shot per message, per-session serialized, 5-min timeout
 - v3.0 added SubagentStart (command hook → shell script bridge → HTTP) and SubagentStop (HTTP hook) for agent lifecycle tracking
 - v3.0 added PermissionModeManager with 5 modes and dangerous command blocklist
+- v4.0 added TopicStatusManager with debounced 4-state topic status (green/yellow/red/gray)
+- v4.0 added BotStateStore + RuntimeSettings for mutable config persisted to bot-state.json
+- v4.0 added SettingsTopic with inline keyboard for sub-agent toggle and permission mode selection
 - Telegram supergroups support "Topics" (forum mode) which map perfectly to per-session threads
 - Target scale is 2-3 machines, each potentially running multiple concurrent Claude Code sessions
 - Known SDK limitation: double-turn bug (#207) prevents streaming input mode, one-shot+resume is the workaround
@@ -102,6 +103,11 @@ See what Claude Code is doing and respond to its questions from anywhere, withou
 | Full subagent visibility (v3.0) | Users need to see what subagents are doing, not just main chain | ✓ Good — agent-prefixed output works well |
 | Shell script bridge for SubagentStart (v3.0) | Command hooks can't POST to HTTP directly; shell script reads stdin JSON and curls | ✓ Good — reliable bridging pattern |
 | /clear via filesystem watcher (v3.0) | Upstream hook bug #6428 prevents SessionEnd from firing on /clear | ✓ Good — workaround confirmed working |
+| Emoji prefix in topic name for status (v4.0) | Telegram editForumTopic doesn't support changing icon_color after creation | ✓ Good — emoji prefix is reliable and visible |
+| Per-topic debounced editForumTopic (v4.0) | Rapid status changes during tool bursts would hit rate limits | ✓ Good — 3s debounce + no-op cache eliminates rate limit risk |
+| RuntimeSettings mutable layer (v4.0) | AppConfig is immutable from env; settings topic needs runtime changes | ✓ Good — clean separation of immutable defaults and mutable state |
+| BotStateStore separate from SessionStore (v4.0) | Bot-level state (settings, topic IDs) has different lifecycle than session state | ✓ Good — separate concerns, same atomic write pattern |
+| Sub-agent suppression via 5 gated call sites (v4.0) | SubagentTracker must always run for tool attribution; only Telegram output gated | ✓ Good — clean separation of tracking and display |
 
 ---
-*Last updated: 2026-03-02 after v4.0 milestone start*
+*Last updated: 2026-03-03 after v4.0 milestone completion*

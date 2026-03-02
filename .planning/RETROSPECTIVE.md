@@ -43,6 +43,48 @@
 
 ---
 
+## Milestone: v4.0 — Status & Settings
+
+**Shipped:** 2026-03-02
+**Phases:** 4 | **Plans:** 6 | **Commits:** 10 feat
+
+### What Was Built
+- TopicStatusManager with four-state color-coded topic status (green/yellow/red/gray) and per-topic debounced editForumTopic calls
+- Startup gray sweep setting all existing session topics to gray before reconnect
+- Sub-agent suppression with 5 gated call sites silencing all output by default
+- StatusMessage.reconnect() for adopting existing pinned messages on /clear and restart
+- Settings topic with inline keyboard for sub-agent toggle and permission mode selection
+- BotStateStore + RuntimeSettings mutable config layer with atomic JSON persistence
+
+### What Worked
+- Auto-advance (--auto) pipeline: discuss → plan → execute chained cleanly for all 4 phases with zero manual intervention
+- Research phase discovered the critical editForumTopic icon_color limitation early — informed the emoji-prefix-in-name approach before any code was written
+- Phase dependency graph (9→11, 10→12) kept each phase small and focused — no phase exceeded 2 plans
+- Integration checker at audit caught no issues — phases wired together correctly on first pass
+- Separation of concerns: TopicStatusManager, BotStateStore, RuntimeSettings, and SettingsTopic are each independent modules with clear boundaries
+
+### What Was Inefficient
+- UAT was skipped for phases 9-12 — color-coded status and settings topic require live bot testing that couldn't be automated in this session
+- Phase 12 ROADMAP.md entry had a formatting inconsistency in the progress table (missing milestone column) — caught during audit but should have been caught by the executor
+- REQUIREMENTS.md SETT-01..07 checkboxes weren't updated during Phase 12 execution — documentation gap caught at audit
+
+### Patterns Established
+- Mutable config pattern: RuntimeSettings wraps BotStateStore, AppConfig provides immutable defaults, BotStateStore persists mutations
+- Settings callback pattern: `set_<prefix>:<action>` callback data format, auth guard before handler, inline edit for feedback
+- Topic status pattern: debounced per-topic editForumTopic with in-memory cache for no-op elimination and sticky states (red doesn't get overridden by green/yellow)
+
+### Key Lessons
+1. Telegram API constraints must be discovered during research — editForumTopic limitations changed the entire approach from icon_color to emoji prefixes
+2. Mutable vs immutable config needs explicit separation — mixing runtime-changeable settings into AppConfig would create confusion about what can change
+3. Small focused phases (1-2 plans each) execute faster and integrate more cleanly than large multi-plan phases
+
+### Cost Observations
+- Model mix: ~70% opus (discuss + execute), ~30% sonnet (research + verification + integration check)
+- 6 plans executed in ~20min total wall time
+- Notable: --auto flag eliminated all user interaction overhead — entire milestone from discuss to audit ran in a single session
+
+---
+
 ## Cross-Milestone Trends
 
 ### Process Evolution
@@ -52,9 +94,11 @@
 | v1.0 | 3 | 9 | Initial MVP — established hook server + transcript watcher architecture |
 | v2.0 | 2 | 3 | SDK migration — replaced tmux with Agent SDK resume input |
 | v3.0 | 3 | 8 | UX overhaul — compact output, permission modes, subagent visibility |
+| v4.0 | 4 | 6 | Status & settings — color-coded topics, sub-agent suppression, settings topic |
 
 ### Top Lessons (Verified Across Milestones)
 
-1. Incremental migration reduces risk — v2.0 only replaced input (not output), v3.0 only changed display (not transport)
-2. UAT catches real issues that automated verification misses — both v2.0 and v3.0 had UAT-driven fixes
+1. Incremental migration reduces risk — v2.0 only replaced input (not output), v3.0 only changed display (not transport), v4.0 added new capabilities without changing existing flows
+2. UAT catches real issues that automated verification misses — both v2.0 and v3.0 had UAT-driven fixes (v4.0 deferred UAT to live testing)
 3. Workarounds for upstream bugs are sometimes the right long-term solution (tmux double-turn bug → resume, hook bug #6428 → filesystem watcher)
+4. API constraint discovery during research is critical — v4.0's editForumTopic icon_color limitation changed the entire approach before coding started
