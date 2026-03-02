@@ -229,7 +229,7 @@ export async function main(): Promise<void> {
       toolCallCount: 0,
       filesChanged: new Set<string>(),
       verbosity: oldSession?.verbosity ?? config.defaultVerbosity,
-      statusMessageId: 0,
+      statusMessageId: oldSession?.statusMessageId ?? pending?.statusMessageId ?? 0,
       suppressedCounts: {},
       contextPercent: 0,
       lastActivityAt: clearNow,
@@ -394,14 +394,26 @@ export async function main(): Promise<void> {
       warned95: false,
     });
 
-    // Start async initialization (status message send + pin) then start watchers
-    void statusMsg.initialize().then((statusMessageId) => {
-      sessionStore.updateStatusMessageId(session.sessionId, statusMessageId);
-      // Set default verbosity from config
-      sessionStore.updateVerbosity(session.sessionId, config.defaultVerbosity);
-    }).catch((err) => {
-      console.warn('Failed to initialize status message:', err instanceof Error ? err.message : err);
-    });
+    // Start async initialization: reconnect to existing message or create new one
+    if (session.statusMessageId > 0) {
+      // Phase 11: Dedup — adopt existing pinned message (on /clear or bot restart)
+      void statusMsg.reconnect(session.statusMessageId).then(() => {
+        // Trigger immediate update to refresh stale content with reset counters
+        const latestSession = sessionStore.get(session.sessionId);
+        if (latestSession) {
+          statusMsg.requestUpdate(buildStatusData(latestSession, 'Starting...'));
+        }
+      });
+    } else {
+      // Brand new session: send + pin a new status message
+      void statusMsg.initialize().then((statusMessageId) => {
+        sessionStore.updateStatusMessageId(session.sessionId, statusMessageId);
+        // Set default verbosity from config
+        sessionStore.updateVerbosity(session.sessionId, config.defaultVerbosity);
+      }).catch((err) => {
+        console.warn('Failed to initialize status message:', err instanceof Error ? err.message : err);
+      });
+    }
 
     transcriptWatcher.start();
     summaryTimer.start();
