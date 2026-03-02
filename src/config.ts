@@ -48,5 +48,6 @@ export function loadConfig(): AppConfig {
     approvalTimeoutMs: parseInt(process.env.APPROVAL_TIMEOUT_MS || '300000', 10),
     autoApprove: process.env.AUTO_APPROVE === 'true',
     subagentOutput: process.env.SUBAGENT_VISIBLE === 'true',
+    botOwnerId: process.env.BOT_OWNER_ID ? parseInt(process.env.BOT_OWNER_ID, 10) : undefined,
   };
 }

@@ -34,4 +34,8 @@ export interface AppConfig {
   /** When true, sub-agent output (spawn/done, tools, text) is shown in Telegram. Default false. */
   subagentOutput: boolean;
 
+  // --- Phase 12 settings config ---
+
+  /** Telegram user ID of the bot owner. If set, only this user can change settings. */
+  botOwnerId?: number;
 }
