@@ -78,7 +78,8 @@
   1. Running /clear in a session topic reuses the existing pinned message if content matches
   2. After bot restart, the existing pinned message is adopted from stored state instead of creating a new one
   3. New sticky messages are only created for brand-new sessions or when content has actually changed
-**Plans**: TBD
+**Plans**: 1/1 complete
+  - Plan 01: StatusMessage.reconnect() method with conditional initMonitoring path
 
 ### Phase 12: Settings Topic
 **Goal**: Users can change bot settings from Telegram without editing .env files or restarting the bot
@@ -110,5 +111,5 @@ Recommended: 9 -> 10 -> 11 -> 12
 | 8. Subagent Visibility | v3.0 | 2/2 | Complete | 2026-03-02 |
 | 9. Color-Coded Topic Status | v4.0 | 2/2 | Complete | 2026-03-02 |
 | 10. Sub-Agent Suppression | v4.0 | 1/1 | Complete | 2026-03-02 |
-| 11. Sticky Message Dedup | 1/1 | Complete    | 2026-03-02 | - |
+| 11. Sticky Message Dedup | v4.0 | 1/1 | Complete | 2026-03-02 |
 | 12. Settings Topic | v4.0 | 0/? | Not started | - |
