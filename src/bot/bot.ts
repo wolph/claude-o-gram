@@ -7,10 +7,12 @@ import type { VerbosityTier } from '../types/monitoring.js';
 import type { ApprovalManager } from '../control/approval-manager.js';
 import type { InputRouter } from '../input/input-router.js';
 import type { CommandRegistry } from './command-registry.js';
+import { PermissionModeManager, type PermissionMode } from '../control/permission-modes.js';
 import {
   formatApprovalResult,
 } from './formatter.js';
 import { expandCache, cacheKey, buildExpandedHtml } from './expand-cache.js';
+import { escapeHtml } from '../utils/text.js';
 
 /** Bot context type alias for use across the bot module */
 export type BotContext = Context;
@@ -31,6 +33,8 @@ export async function createBot(
   approvalManager: ApprovalManager,
   inputRouter: InputRouter,
   commandRegistry: CommandRegistry,
+  permissionModeManager: PermissionModeManager,
+  onModeChange?: (sessionId: string) => void,
 ): Promise<Bot<BotContext>> {
   const bot = new Bot<BotContext>(config.telegramBotToken);
 
@@ -118,6 +122,7 @@ export async function createBot(
     const toolUseId = ctx.match[1];
     const pending = approvalManager.decide(toolUseId, 'allow');
     if (pending) {
+      console.log(`[PERM] User approved ${toolUseId}`);
       await ctx.answerCallbackQuery(); // Dismiss loading spinner
       const who = ctx.from?.username
         ? `@${ctx.from.username}`
@@ -149,6 +154,7 @@ export async function createBot(
     const toolUseId = ctx.match[1];
     const pending = approvalManager.decide(toolUseId, 'deny');
     if (pending) {
+      console.log(`[PERM] User denied ${toolUseId}`);
       await ctx.answerCallbackQuery(); // Dismiss loading spinner
       const who = ctx.from?.username
         ? `@${ctx.from.username}`
@@ -171,6 +177,104 @@ export async function createBot(
         text: 'This approval has already expired.',
         show_alert: true,
       });
+    }
+  });
+
+  // --- Phase 7: Permission mode callback query handlers ---
+
+  /**
+   * Shared handler for mode selection buttons (ma:, ms:, mf:, mu:).
+   * Approves the current tool call AND activates the selected mode.
+   */
+  async function handleModeSelection(
+    ctx: Context,
+    toolUseId: string,
+    mode: PermissionMode,
+  ): Promise<void> {
+    // Approve the current tool call AND activate mode
+    const pending = approvalManager.decide(toolUseId, 'allow');
+    if (!pending) {
+      await ctx.answerCallbackQuery({ text: 'This approval has already expired.', show_alert: true });
+      return;
+    }
+
+    // For same-tool, pass the tool name from the pending approval
+    const toolName = mode === 'same-tool' ? pending.toolName : undefined;
+    permissionModeManager.setMode(pending.sessionId, mode, toolName);
+
+    // PERM-08: Log mode activation
+    console.log(`[PERM] Mode activated: ${mode}${toolName ? ` (${toolName})` : ''} for session ${pending.sessionId}`);
+
+    await ctx.answerCallbackQuery();
+
+    // Notify index.ts of mode change (triggers Stop button on status message)
+    onModeChange?.(pending.sessionId);
+
+    // Edit message to show mode activation result
+    const who = ctx.from?.username ? `@${escapeHtml(ctx.from.username)}` : escapeHtml(ctx.from?.first_name || 'User');
+    const modeLabel: Record<string, string> = {
+      'accept-all': 'Accept All',
+      'same-tool': `Same Tool (${pending.toolName})`,
+      'safe-only': 'Safe Only',
+      'until-done': 'Until Done',
+    };
+    const originalText = ctx.callbackQuery?.message?.text || '';
+    const updatedText = `${originalText}\n\n\u26A1 <b>${modeLabel[mode]}</b> activated by ${who}`;
+    try {
+      await ctx.editMessageText(updatedText, {
+        parse_mode: 'HTML',
+        reply_markup: undefined,
+      });
+    } catch (err) {
+      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+        console.warn('Failed to edit mode activation message:', err instanceof Error ? err.message : err);
+      }
+    }
+  }
+
+  // Mode expand: show the full mode selection row
+  bot.callbackQuery(/^mexp:(.+)$/, async (ctx) => {
+    const toolUseId = ctx.match[1];
+    await ctx.answerCallbackQuery();
+    try {
+      await ctx.editMessageReplyMarkup({
+        reply_markup: makeExpandedModeKeyboard(toolUseId),
+      });
+    } catch (err) {
+      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+        console.warn('Failed to expand mode keyboard:', err instanceof Error ? err.message : err);
+      }
+    }
+  });
+
+  // Mode selection handlers
+  bot.callbackQuery(/^ma:(.+)$/, async (ctx) => handleModeSelection(ctx, ctx.match[1], 'accept-all'));
+  bot.callbackQuery(/^ms:(.+)$/, async (ctx) => handleModeSelection(ctx, ctx.match[1], 'same-tool'));
+  bot.callbackQuery(/^mf:(.+)$/, async (ctx) => handleModeSelection(ctx, ctx.match[1], 'safe-only'));
+  bot.callbackQuery(/^mu:(.+)$/, async (ctx) => handleModeSelection(ctx, ctx.match[1], 'until-done'));
+
+  // Stop auto-accept button handler
+  bot.callbackQuery(/^stop:(\d+)$/, async (ctx) => {
+    const threadId = parseInt(ctx.match[1]);
+    const session = sessionStore.getByThreadId(threadId);
+    if (!session) {
+      await ctx.answerCallbackQuery({ text: 'Session not found', show_alert: true });
+      return;
+    }
+    permissionModeManager.resetToManual(session.sessionId);
+    console.log(`[PERM] Auto-accept stopped for session ${session.sessionId}`);
+    await ctx.answerCallbackQuery({ text: 'Auto-accept stopped' });
+
+    // Notify index.ts to update status message (remove Stop button)
+    onModeChange?.(session.sessionId);
+
+    // Post a brief announcement to the topic
+    try {
+      await ctx.api.sendMessage(config.telegramChatId, '\u26D4 Auto-accept stopped', {
+        message_thread_id: threadId,
+      });
+    } catch (err) {
+      console.warn('Failed to post stop message:', err instanceof Error ? err.message : err);
     }
   });
 
@@ -310,12 +414,36 @@ export async function createBot(
 }
 
 /**
- * Create an InlineKeyboard with Approve and Deny buttons.
- * callback_data format: "approve:{toolUseId}" / "deny:{toolUseId}"
- * tool_use_id is a UUID (36 chars), prefix is 8 chars = 44 bytes total (within 64 byte limit).
+ * Create an InlineKeyboard with Approve, Deny, and Mode buttons.
+ * callback_data format: "approve:{toolUseId}" / "deny:{toolUseId}" / "mexp:{toolUseId}"
+ * tool_use_id is a UUID (36 chars), prefix is 8 chars max = 44 bytes total (within 64 byte limit).
  */
 export function makeApprovalKeyboard(toolUseId: string): InlineKeyboard {
   return new InlineKeyboard()
-    .text('\u2705 Approve', `approve:${toolUseId}`)
-    .text('\u274C Deny', `deny:${toolUseId}`);
+    .text('\u2705 Accept', `approve:${toolUseId}`)
+    .text('\u274C Deny', `deny:${toolUseId}`)
+    .text('\u2699 Mode...', `mexp:${toolUseId}`);
+}
+
+/**
+ * Create an expanded InlineKeyboard with mode selection options on a second row.
+ * Shown when user taps [Mode...] on an approval prompt.
+ *
+ * Callback data prefixes (all within 64-byte Telegram limit):
+ * - mexp: mode expand (5 + 36 UUID = 41 bytes)
+ * - ma: mode accept-all (3 + 36 = 39 bytes)
+ * - ms: mode same-tool (3 + 36 = 39 bytes)
+ * - mf: mode safe-only (3 + 36 = 39 bytes)
+ * - mu: mode until-done (3 + 36 = 39 bytes)
+ */
+export function makeExpandedModeKeyboard(toolUseId: string): InlineKeyboard {
+  return new InlineKeyboard()
+    .text('\u2705 Accept', `approve:${toolUseId}`)
+    .text('\u274C Deny', `deny:${toolUseId}`)
+    .text('\u2699 Mode...', `mexp:${toolUseId}`)
+    .row()
+    .text('All', `ma:${toolUseId}`)
+    .text('Same Tool', `ms:${toolUseId}`)
+    .text('Safe Only', `mf:${toolUseId}`)
+    .text('Until Done', `mu:${toolUseId}`);
 }
