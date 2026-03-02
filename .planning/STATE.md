@@ -1,14 +1,14 @@
 ---
 gsd_state_version: 1.0
-milestone: v3.0
-milestone_name: UX Overhaul
-status: complete
-last_updated: "2026-03-02T19:00:00Z"
+milestone: v4.0
+milestone_name: Status & Settings
+status: defining_requirements
+last_updated: "2026-03-02T20:00:00Z"
 progress:
-  total_phases: 8
-  completed_phases: 8
-  total_plans: 20
-  completed_plans: 20
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
 ---
 
 # Project State
@@ -18,14 +18,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-02)
 
 **Core value:** See what Claude Code is doing and respond to its questions from anywhere, without needing to be at the terminal.
-**Current focus:** v3.0 UX Overhaul complete — ready for next milestone
+**Current focus:** v4.0 Status & Settings — defining requirements
 
 ## Current Position
 
-Milestone: v3.0 UX Overhaul — SHIPPED
-All 8 phases, 20 plans complete across 3 milestones.
-
-Progress: [##########] 100%
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-03-02 — Milestone v4.0 started
 
 ## Performance Metrics
 
@@ -69,5 +69,5 @@ None active.
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: Completed v3.0 milestone — all phases shipped, audit passed, UAT verified
+Stopped at: Starting v4.0 milestone — defining requirements
 Resume file: None

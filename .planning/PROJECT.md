@@ -44,7 +44,16 @@ See what Claude Code is doing and respond to its questions from anywhere, withou
 
 ### Active
 
-(None — ready for next milestone requirements)
+#### Current Milestone: v4.0 Status & Settings
+
+**Goal:** Replace text-based status messages with color-coded topic indicators, suppress sub-agent noise by default, deduplicate sticky messages, and add a Telegram-native settings topic for runtime configuration.
+
+**Target features:**
+- Color-coded status bubbles in topic titles (green=ready, yellow=busy, red=error, gray=down)
+- Startup cleanup: set all old topics to gray on bot startup
+- Sub-agent silence by default: no topic, no output unless configured
+- Sticky message deduplication: skip creating new sticky if content matches existing
+- Settings topic: dedicated Telegram topic for configuring bot settings interactively
 
 ### Out of Scope
 
@@ -95,4 +104,4 @@ See what Claude Code is doing and respond to its questions from anywhere, withou
 | /clear via filesystem watcher (v3.0) | Upstream hook bug #6428 prevents SessionEnd from firing on /clear | ✓ Good — workaround confirmed working |
 
 ---
-*Last updated: 2026-03-02 after v3.0 milestone completion*
+*Last updated: 2026-03-02 after v4.0 milestone start*
