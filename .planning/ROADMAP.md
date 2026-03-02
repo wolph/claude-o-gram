@@ -110,5 +110,5 @@ Recommended: 9 -> 10 -> 11 -> 12
 | 8. Subagent Visibility | v3.0 | 2/2 | Complete | 2026-03-02 |
 | 9. Color-Coded Topic Status | v4.0 | 2/2 | Complete | 2026-03-02 |
 | 10. Sub-Agent Suppression | v4.0 | 1/1 | Complete | 2026-03-02 |
-| 11. Sticky Message Dedup | 1/1 | Complete   | 2026-03-02 | - |
+| 11. Sticky Message Dedup | 1/1 | Complete    | 2026-03-02 | - |
 | 12. Settings Topic | v4.0 | 0/? | Not started | - |

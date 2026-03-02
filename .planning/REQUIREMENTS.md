@@ -24,9 +24,9 @@ Requirements for v4.0 Status & Settings. Each maps to roadmap phases.
 
 ### Sticky Messages
 
-- [ ] **STKY-01**: On /clear, existing pinned message is reused if content matches
-- [ ] **STKY-02**: On bot restart/reconnect, existing pinned message is adopted from stored statusMessageId
-- [ ] **STKY-03**: New sticky messages are only created for brand new sessions or when content differs
+- [x] **STKY-01**: On /clear, existing pinned message is reused if content matches
+- [x] **STKY-02**: On bot restart/reconnect, existing pinned message is adopted from stored statusMessageId
+- [x] **STKY-03**: New sticky messages are only created for brand new sessions or when content differs
 
 ### Settings
 
@@ -78,9 +78,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AGNT-01 | Phase 10 | Complete |
 | AGNT-02 | Phase 10 | Complete |
 | AGNT-03 | Phase 10 | Complete |
-| STKY-01 | Phase 11 | Pending |
-| STKY-02 | Phase 11 | Pending |
-| STKY-03 | Phase 11 | Pending |
+| STKY-01 | Phase 11 | Complete |
+| STKY-02 | Phase 11 | Complete |
+| STKY-03 | Phase 11 | Complete |
 | SETT-01 | Phase 12 | Pending |
 | SETT-02 | Phase 12 | Pending |
 | SETT-03 | Phase 12 | Pending |
