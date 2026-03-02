@@ -9,10 +9,10 @@ Requirements for v4.0 Status & Settings. Each maps to roadmap phases.
 
 ### Status Indicators
 
-- [ ] **STAT-01**: Active/ready sessions display green emoji prefix (🟢) in topic name
-- [ ] **STAT-02**: Down/offline sessions display gray emoji prefix (⚪) in topic name
-- [ ] **STAT-03**: Busy sessions display yellow emoji prefix (🟡) when processing tools
-- [ ] **STAT-04**: Error sessions display red emoji prefix (🔴) in topic name
+- [ ] **STAT-01**: Active/ready sessions display green emoji prefix in topic name
+- [ ] **STAT-02**: Down/offline sessions display gray emoji prefix in topic name
+- [ ] **STAT-03**: Busy sessions display yellow emoji prefix when processing tools
+- [ ] **STAT-04**: Error sessions display red emoji prefix in topic name
 - [ ] **STAT-05**: On bot startup, all existing session topics are set to gray status
 - [ ] **STAT-06**: Status emoji changes are debounced to prevent editForumTopic rate limits
 
@@ -69,31 +69,31 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| STAT-01 | — | Pending |
-| STAT-02 | — | Pending |
-| STAT-03 | — | Pending |
-| STAT-04 | — | Pending |
-| STAT-05 | — | Pending |
-| STAT-06 | — | Pending |
-| AGNT-01 | — | Pending |
-| AGNT-02 | — | Pending |
-| AGNT-03 | — | Pending |
-| STKY-01 | — | Pending |
-| STKY-02 | — | Pending |
-| STKY-03 | — | Pending |
-| SETT-01 | — | Pending |
-| SETT-02 | — | Pending |
-| SETT-03 | — | Pending |
-| SETT-04 | — | Pending |
-| SETT-05 | — | Pending |
-| SETT-06 | — | Pending |
-| SETT-07 | — | Pending |
+| STAT-01 | Phase 9 | Pending |
+| STAT-02 | Phase 9 | Pending |
+| STAT-03 | Phase 9 | Pending |
+| STAT-04 | Phase 9 | Pending |
+| STAT-05 | Phase 9 | Pending |
+| STAT-06 | Phase 9 | Pending |
+| AGNT-01 | Phase 10 | Pending |
+| AGNT-02 | Phase 10 | Pending |
+| AGNT-03 | Phase 10 | Pending |
+| STKY-01 | Phase 11 | Pending |
+| STKY-02 | Phase 11 | Pending |
+| STKY-03 | Phase 11 | Pending |
+| SETT-01 | Phase 12 | Pending |
+| SETT-02 | Phase 12 | Pending |
+| SETT-03 | Phase 12 | Pending |
+| SETT-04 | Phase 12 | Pending |
+| SETT-05 | Phase 12 | Pending |
+| SETT-06 | Phase 12 | Pending |
+| SETT-07 | Phase 12 | Pending |
 
 **Coverage:**
 - v4.0 requirements: 19 total
-- Mapped to phases: 0
-- Unmapped: 19 ⚠️
+- Mapped to phases: 19
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-02*
-*Last updated: 2026-03-02 after initial definition*
+*Last updated: 2026-03-02 after roadmap creation*
