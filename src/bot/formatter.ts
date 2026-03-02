@@ -568,6 +568,42 @@ export function formatDangerousPrompt(payload: PreToolUsePayload): string {
 }
 
 // ---------------------------------------------------------------------------
+// Subagent formatting
+// ---------------------------------------------------------------------------
+
+/**
+ * Format a subagent spawn announcement.
+ * Per CONTEXT.md: inline text, symbol >, agent name, description.
+ * indent = "  " per depth level (0 = no indent).
+ */
+export function formatSubagentSpawn(
+  agentName: string,
+  description: string,
+  indent: string,
+): string {
+  const escapedName = escapeHtml(agentName);
+  const escapedDesc = escapeHtml(truncateText(description, 150));
+  const prefix = indent ? escapeHtml(indent) : '';
+  return `${prefix}\u25B6 <b>Agent(${escapedName})</b> spawned \u2014 "${escapedDesc}"`;
+}
+
+/**
+ * Format a subagent completion announcement.
+ * Per CONTEXT.md: inline text, symbol checkmark, agent name, duration.
+ * indent = "  " per depth level (0 = no indent).
+ */
+export function formatSubagentDone(
+  agentName: string,
+  durationMs: number,
+  indent: string,
+): string {
+  const escapedName = escapeHtml(agentName);
+  const durationStr = formatDuration(durationMs);
+  const prefix = indent ? escapeHtml(indent) : '';
+  return `${prefix}\u2713 <b>Agent(${escapedName})</b> done (${durationStr})`;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

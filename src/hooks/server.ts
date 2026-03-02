@@ -7,6 +7,8 @@ import type {
   NotificationPayload,
   PreToolUsePayload,
   StopPayload,
+  SubagentStartPayload,
+  SubagentStopPayload,
 } from '../types/hooks.js';
 import type { HookHandlers } from './handlers.js';
 import type { PermissionModeManager } from '../control/permission-modes.js';
@@ -171,6 +173,31 @@ export async function createHookServer(
           },
         };
       }
+    }
+  );
+
+  // POST /hooks/subagent-start (fire-and-forget)
+  // SubagentStart arrives via command hook bridge (shell script -> curl -> here)
+  fastify.post<{ Body: SubagentStartPayload }>(
+    '/hooks/subagent-start',
+    async (request) => {
+      handlers.handleSubagentStart(request.body as SubagentStartPayload)
+        .catch((err) => {
+          request.log.error(err, 'Error handling subagent-start hook');
+        });
+      return {};
+    }
+  );
+
+  // POST /hooks/subagent-stop (fire-and-forget)
+  fastify.post<{ Body: SubagentStopPayload }>(
+    '/hooks/subagent-stop',
+    async (request) => {
+      handlers.handleSubagentStop(request.body as SubagentStopPayload)
+        .catch((err) => {
+          request.log.error(err, 'Error handling subagent-stop hook');
+        });
+      return {};
     }
   );
 

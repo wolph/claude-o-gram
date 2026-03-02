@@ -9,6 +9,8 @@ import type {
   NotificationPayload,
   PreToolUsePayload,
   StopPayload,
+  SubagentStartPayload,
+  SubagentStopPayload,
 } from '../types/hooks.js';
 import type { SessionStore } from '../sessions/session-store.js';
 import type { TranscriptEntry, ContentBlock } from '../types/monitoring.js';
@@ -28,6 +30,8 @@ export interface HookCallbacks {
   onPreToolUse(session: SessionInfo, payload: PreToolUsePayload): Promise<Record<string, unknown>>;
   onStop(session: SessionInfo, payload: StopPayload): Promise<void>;
   onBackfillSummary(session: SessionInfo, summary: string): Promise<void>;
+  onSubagentStart(session: SessionInfo, payload: SubagentStartPayload): Promise<void>;
+  onSubagentStop(session: SessionInfo, payload: SubagentStopPayload): Promise<void>;
 }
 
 /** Tool names that modify files (used to track changed files) */
@@ -387,6 +391,28 @@ export class HookHandlers {
     if (!session) return;
     this.sessionStore.updateLastActivity(payload.session_id);
     await this.callbacks.onStop(session, payload);
+  }
+
+  /**
+   * Handle a SubagentStart hook event (fire-and-forget).
+   * Fires when a subagent spawns. Delegates to onSubagentStart callback.
+   */
+  async handleSubagentStart(payload: SubagentStartPayload): Promise<void> {
+    const session = await this.ensureSession(payload);
+    if (!session) return;
+    this.sessionStore.updateLastActivity(payload.session_id);
+    await this.callbacks.onSubagentStart(session, payload);
+  }
+
+  /**
+   * Handle a SubagentStop hook event (fire-and-forget).
+   * Fires when a subagent completes. Delegates to onSubagentStop callback.
+   */
+  async handleSubagentStop(payload: SubagentStopPayload): Promise<void> {
+    const session = await this.ensureSession(payload);
+    if (!session) return;
+    this.sessionStore.updateLastActivity(payload.session_id);
+    await this.callbacks.onSubagentStop(session, payload);
   }
 }
 

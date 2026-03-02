@@ -21,6 +21,21 @@ export function installHooks(port: number): void {
     mkdirSync(claudeDir, { recursive: true });
   }
 
+  // Write shell script bridge for SubagentStart (command-only hook)
+  const hookDir = join(homedir(), '.claude-o-gram', 'hooks');
+  if (!existsSync(hookDir)) {
+    mkdirSync(hookDir, { recursive: true });
+  }
+  const scriptPath = join(hookDir, 'subagent-start.sh');
+  const scriptContent = `#!/bin/bash
+# Bridge: SubagentStart command hook -> HTTP server
+curl -s --max-time 5 -X POST "http://127.0.0.1:${port}/hooks/subagent-start" \\
+  -H "Content-Type: application/json" \\
+  -d @- < /dev/stdin
+exit 0
+`;
+  writeFileSync(scriptPath, scriptContent, { mode: 0o755 });
+
   // Read existing settings.json or start with empty object
   let settings: Record<string, unknown> = {};
   if (existsSync(settingsPath)) {
@@ -89,6 +104,22 @@ export function installHooks(port: number): void {
         matcher: '',
         hooks: [
           { type: 'http', url: `${baseUrl}/hooks/stop`, timeout: 10 },
+        ],
+      },
+    ],
+    SubagentStart: [
+      {
+        matcher: '',
+        hooks: [
+          { type: 'command', command: scriptPath, timeout: 10 },
+        ],
+      },
+    ],
+    SubagentStop: [
+      {
+        matcher: '',
+        hooks: [
+          { type: 'http', url: `${baseUrl}/hooks/subagent-stop`, timeout: 10 },
         ],
       },
     ],
