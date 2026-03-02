@@ -13,6 +13,8 @@ import {
 } from './formatter.js';
 import { expandCache, cacheKey, buildExpandedHtml } from './expand-cache.js';
 import { escapeHtml } from '../utils/text.js';
+import type { RuntimeSettings } from '../settings/runtime-settings.js';
+import { buildSettingsKeyboard, formatSettingsMessage } from '../settings/settings-topic.js';
 
 /** Bot context type alias for use across the bot module */
 export type BotContext = Context;
@@ -34,6 +36,7 @@ export async function createBot(
   inputRouter: InputRouter,
   commandRegistry: CommandRegistry,
   permissionModeManager: PermissionModeManager,
+  runtimeSettings: RuntimeSettings,
   onModeChange?: (sessionId: string) => void,
 ): Promise<Bot<BotContext>> {
   const bot = new Bot<BotContext>(config.telegramBotToken);
@@ -232,21 +235,6 @@ export async function createBot(
     }
   }
 
-  // Mode expand: show the full mode selection row
-  bot.callbackQuery(/^mexp:(.+)$/, async (ctx) => {
-    const toolUseId = ctx.match[1];
-    await ctx.answerCallbackQuery();
-    try {
-      await ctx.editMessageReplyMarkup({
-        reply_markup: makeExpandedModeKeyboard(toolUseId),
-      });
-    } catch (err) {
-      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
-        console.warn('Failed to expand mode keyboard:', err instanceof Error ? err.message : err);
-      }
-    }
-  });
-
   // Mode selection handlers
   bot.callbackQuery(/^ma:(.+)$/, async (ctx) => handleModeSelection(ctx, ctx.match[1], 'accept-all'));
   bot.callbackQuery(/^ms:(.+)$/, async (ctx) => handleModeSelection(ctx, ctx.match[1], 'same-tool'));
@@ -327,6 +315,87 @@ export async function createBot(
     }
   });
 
+  // --- Phase 12: Settings callback query handlers ---
+
+  /** Check if the user is authorized to change settings */
+  function isSettingsAuthorized(ctx: Context): boolean {
+    if (!config.botOwnerId) return true; // No owner configured -- allow all
+    return ctx.from?.id === config.botOwnerId;
+  }
+
+  // Sub-agent visibility toggle
+  bot.callbackQuery(/^set_sa:(.+)$/, async (ctx) => {
+    if (!isSettingsAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({
+        text: 'Only the bot owner can change settings',
+        show_alert: true,
+      });
+      return;
+    }
+    // Toggle sub-agent visibility
+    runtimeSettings.subagentOutput = !runtimeSettings.subagentOutput;
+    console.log(`[SETTINGS] Sub-agent output: ${runtimeSettings.subagentOutput ? 'visible' : 'hidden'}`);
+    await ctx.answerCallbackQuery();
+    // Edit settings message in-place
+    const text = formatSettingsMessage(
+      runtimeSettings.subagentOutput,
+      runtimeSettings.defaultPermissionMode,
+    );
+    const keyboard = buildSettingsKeyboard(
+      runtimeSettings.subagentOutput,
+      runtimeSettings.defaultPermissionMode,
+    );
+    try {
+      await ctx.editMessageText(text, {
+        parse_mode: 'HTML',
+        reply_markup: keyboard,
+      });
+    } catch (err) {
+      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+        console.warn('Failed to edit settings message:', err instanceof Error ? err.message : err);
+      }
+    }
+  });
+
+  // Default permission mode selection
+  bot.callbackQuery(/^set_pm:(.+)$/, async (ctx) => {
+    if (!isSettingsAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({
+        text: 'Only the bot owner can change settings',
+        show_alert: true,
+      });
+      return;
+    }
+    const newMode = ctx.match[1];
+    const validModes = ['manual', 'safe-only', 'accept-all', 'until-done'];
+    if (!validModes.includes(newMode)) {
+      await ctx.answerCallbackQuery({ text: 'Unknown mode', show_alert: true });
+      return;
+    }
+    runtimeSettings.defaultPermissionMode = newMode;
+    console.log(`[SETTINGS] Default permission mode: ${newMode}`);
+    await ctx.answerCallbackQuery();
+    // Edit settings message in-place
+    const text = formatSettingsMessage(
+      runtimeSettings.subagentOutput,
+      runtimeSettings.defaultPermissionMode,
+    );
+    const keyboard = buildSettingsKeyboard(
+      runtimeSettings.subagentOutput,
+      runtimeSettings.defaultPermissionMode,
+    );
+    try {
+      await ctx.editMessageText(text, {
+        parse_mode: 'HTML',
+        reply_markup: keyboard,
+      });
+    } catch (err) {
+      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+        console.warn('Failed to edit settings message:', err instanceof Error ? err.message : err);
+      }
+    }
+  });
+
   // --- CLI command forwarding (catch-all for non-bot-native commands) ---
   bot.on('message:text', async (ctx, next) => {
     const text = ctx.message.text;
@@ -334,6 +403,9 @@ export async function createBot(
 
     const threadId = ctx.message.message_thread_id;
     if (!threadId) return next(); // Not in a forum topic
+
+    // Phase 12: Ignore commands in settings topic
+    if (threadId === runtimeSettings.settingsTopicId) return next();
 
     const session = sessionStore.getByThreadId(threadId);
     if (!session || session.status !== 'active') return next();
@@ -377,6 +449,9 @@ export async function createBot(
     const threadId = ctx.message.message_thread_id;
     if (!threadId) return; // Not in a forum topic
 
+    // Phase 12: Ignore text messages in settings topic
+    if (threadId === runtimeSettings.settingsTopicId) return;
+
     // Find session for this topic
     const session = sessionStore.getByThreadId(threadId);
     if (!session) return; // Not a managed session topic
@@ -414,33 +489,21 @@ export async function createBot(
 }
 
 /**
- * Create an InlineKeyboard with Approve, Deny, and Mode buttons.
- * callback_data format: "approve:{toolUseId}" / "deny:{toolUseId}" / "mexp:{toolUseId}"
- * tool_use_id is a UUID (36 chars), prefix is 8 chars max = 44 bytes total (within 64 byte limit).
- */
-export function makeApprovalKeyboard(toolUseId: string): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('\u2705 Accept', `approve:${toolUseId}`)
-    .text('\u274C Deny', `deny:${toolUseId}`)
-    .text('\u2699 Mode...', `mexp:${toolUseId}`);
-}
-
-/**
- * Create an expanded InlineKeyboard with mode selection options on a second row.
- * Shown when user taps [Mode...] on an approval prompt.
+ * Create an InlineKeyboard with Approve/Deny on row 1 and mode buttons on row 2.
+ * All buttons visible by default — no expansion step needed.
  *
  * Callback data prefixes (all within 64-byte Telegram limit):
- * - mexp: mode expand (5 + 36 UUID = 41 bytes)
+ * - approve: (8 + 36 UUID = 44 bytes)
+ * - deny: (5 + 36 = 41 bytes)
  * - ma: mode accept-all (3 + 36 = 39 bytes)
  * - ms: mode same-tool (3 + 36 = 39 bytes)
  * - mf: mode safe-only (3 + 36 = 39 bytes)
  * - mu: mode until-done (3 + 36 = 39 bytes)
  */
-export function makeExpandedModeKeyboard(toolUseId: string): InlineKeyboard {
+export function makeApprovalKeyboard(toolUseId: string): InlineKeyboard {
   return new InlineKeyboard()
     .text('\u2705 Accept', `approve:${toolUseId}`)
     .text('\u274C Deny', `deny:${toolUseId}`)
-    .text('\u2699 Mode...', `mexp:${toolUseId}`)
     .row()
     .text('All', `ma:${toolUseId}`)
     .text('Same Tool', `ms:${toolUseId}`)

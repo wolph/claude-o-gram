@@ -31,6 +31,9 @@ import { InputRouter } from './input/input-router.js';
 import { CommandRegistry } from './bot/command-registry.js';
 import { expandCache, cacheKey } from './bot/expand-cache.js';
 import { InlineKeyboard } from 'grammy';
+import { BotStateStore } from './settings/bot-state-store.js';
+import { RuntimeSettings } from './settings/runtime-settings.js';
+import { SettingsTopic } from './settings/settings-topic.js';
 import type { SessionInfo } from './types/sessions.js';
 import type { StatusData } from './types/monitoring.js';
 import type { PreToolUsePayload, PostToolUsePayload } from './types/hooks.js';
@@ -90,6 +93,18 @@ export async function main(): Promise<void> {
     join(config.dataDir, 'sessions.json'),
   );
 
+  // 3b. Initialize bot-level state store and runtime settings
+  const botStateStore = new BotStateStore(
+    join(config.dataDir, 'bot-state.json'),
+    {
+      settingsTopicId: 0,
+      settingsMessageId: 0,
+      subagentOutput: config.subagentOutput,
+      defaultPermissionMode: 'manual',
+    },
+  );
+  const runtimeSettings = new RuntimeSettings(botStateStore);
+
   // 4. Create control managers and input router
   const approvalManager = new ApprovalManager();
   const permissionModeManager = new PermissionModeManager();
@@ -104,7 +119,7 @@ export async function main(): Promise<void> {
   console.log(`Discovered ${commandRegistry.getEntries().length} Claude Code commands`);
 
   // 5. Create bot instance (with plugins, not yet started)
-  const bot = await createBot(config, sessionStore, approvalManager, inputRouter, commandRegistry, permissionModeManager, updateModeStatus);
+  const bot = await createBot(config, sessionStore, approvalManager, inputRouter, commandRegistry, permissionModeManager, runtimeSettings, updateModeStatus);
 
   // 6. Create topic manager wired to bot
   const topicManager = new TopicManager(bot, config.telegramChatId);
@@ -342,7 +357,7 @@ export async function main(): Promise<void> {
       },
       // onSidechainMessage: subagent text output (suppressed when subagentOutput is false)
       (rawText) => {
-        if (!config.subagentOutput) return;
+        if (!runtimeSettings.subagentOutput) return;
 
         const activeAgent = subagentTracker.getActiveAgent(session.sessionId);
         if (!activeAgent) return; // No active agent -- skip (defensive)
@@ -656,7 +671,7 @@ export async function main(): Promise<void> {
       const activeAgent = subagentTracker.getActiveAgent(session.sessionId);
       let displayLine: string;
       if (activeAgent) {
-        if (!config.subagentOutput) {
+        if (!runtimeSettings.subagentOutput) {
           // Suppressed: skip display and expand data, but still update status message
           const monitor = monitors.get(session.sessionId);
           if (monitor) {
@@ -805,7 +820,7 @@ export async function main(): Promise<void> {
       );
 
       // Post spawn announcement as inline message (suppressed when subagentOutput is false)
-      if (config.subagentOutput) {
+      if (runtimeSettings.subagentOutput) {
         const indent = subagentTracker.getIndent(agent.agentId);
         const spawnHtml = formatSubagentSpawn(agent.displayName, agent.description, indent);
         await batcher.enqueueImmediate(session.threadId, spawnHtml);
@@ -822,7 +837,7 @@ export async function main(): Promise<void> {
       }
 
       // Post done announcement as inline message (suppressed when subagentOutput is false)
-      if (config.subagentOutput) {
+      if (runtimeSettings.subagentOutput) {
         // Note: stop() already removed the agent from the map, so getIndent won't work.
         // Use depth directly from the returned agent instead.
         const indentStr = '  '.repeat(Math.min(result.agent.depth, 2));
@@ -845,7 +860,7 @@ export async function main(): Promise<void> {
       const activeAgent = subagentTracker.getActiveAgent(sessionId);
       if (activeAgent) {
         // Subagent auto-approved: show as [name] Tool(args) (suppressed when subagentOutput is false)
-        if (config.subagentOutput) {
+        if (runtimeSettings.subagentOutput) {
           const result = formatToolCompact({ tool_name: toolName, tool_input: toolInput } as PostToolUsePayload);
           const indent = subagentTracker.getIndent(activeAgent.agentId);
           const prefixedLine = `${indent}[${escapeHtml(activeAgent.displayName)}] ${result.compact}`;
@@ -916,6 +931,16 @@ export async function main(): Promise<void> {
     console.log(
       `Reconnected to ${activeSessions.length} active session(s)`,
     );
+  }
+
+  // 11c. Phase 12: Initialize settings topic
+  const settingsTopic = new SettingsTopic(bot, config.telegramChatId, runtimeSettings);
+  try {
+    const settingsThreadId = await settingsTopic.init();
+    console.log(`Settings topic ready: thread ${settingsThreadId}`);
+  } catch (err) {
+    console.error('Failed to initialize settings topic:', err instanceof Error ? err.message : err);
+    // Non-fatal: bot continues without settings topic
   }
 
   // 12. Start both servers
