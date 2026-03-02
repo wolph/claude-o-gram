@@ -72,6 +72,21 @@ export class StatusMessage {
   }
 
   /**
+   * Reconnect to an existing status message by ID.
+   * Adopts the message without sending or pinning a new one.
+   * The next requestUpdate() will edit this message in-place.
+   *
+   * Used on /clear (reuse prior message) and bot restart (adopt stored message).
+   */
+  async reconnect(existingMessageId: number): Promise<number> {
+    this.messageId = existingMessageId;
+    this.lastUpdateTime = Date.now();
+    // Don't set lastSentText — forces the first requestUpdate() to actually
+    // send an edit, refreshing any stale content from the prior session.
+    return this.messageId;
+  }
+
+  /**
    * Request a status update with new data.
    *
    * If enough time has elapsed since the last update (>= 3 seconds),
