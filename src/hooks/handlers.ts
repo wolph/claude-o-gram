@@ -221,14 +221,22 @@ export class HookHandlers {
       }
     }
 
-    // /clear detection: reuse topic from recently closed session
+    // /clear detection: reuse topic from active or recently closed session
     if (payload.source === 'clear') {
-      const recentClosed = this.sessionStore.getRecentlyClosedByCwd(payload.cwd);
-      if (recentClosed) {
+      // Primary path: find the ACTIVE session for this cwd.
+      // Claude Code bug #6428: SessionEnd does NOT fire on /clear,
+      // so the session is still active when SessionStart(source=clear) arrives.
+      const existing = this.sessionStore.getActiveByCwd(payload.cwd);
+
+      // Fallback: if upstream bug is fixed in future, SessionEnd may have
+      // already closed the session before this fires.
+      const prior = existing ?? this.sessionStore.getRecentlyClosedByCwd(payload.cwd);
+
+      if (prior) {
         // Reuse the topic: create new session entry with old threadId
         const clearNow = new Date().toISOString();
         this.sessionStore.set(payload.session_id, {
-          ...recentClosed,
+          ...prior,
           sessionId: payload.session_id,
           transcriptPath: payload.transcript_path,
           status: 'active',
@@ -238,7 +246,7 @@ export class HookHandlers {
           filesChanged: new Set<string>(),
           suppressedCounts: {},
           contextPercent: 0,
-          permissionMode: payload.permission_mode ?? recentClosed.permissionMode,
+          permissionMode: payload.permission_mode ?? prior.permissionMode,
         });
         await this.callbacks.onSessionStart(
           this.sessionStore.get(payload.session_id)!,
@@ -246,7 +254,7 @@ export class HookHandlers {
         );
         return;
       }
-      // Fallback: if no recently closed session found, treat as new session
+      // Fallback: if no session found at all, treat as new session
       // (handles edge cases where the bot restarted between clear events)
     }
 
