@@ -19,10 +19,6 @@ export function loadConfig(): AppConfig {
   if (!process.env.TELEGRAM_CHAT_ID) {
     missing.push('TELEGRAM_CHAT_ID');
   }
-  if (!process.env.ANTHROPIC_API_KEY) {
-    missing.push('ANTHROPIC_API_KEY');
-  }
-
   if (missing.length > 0) {
     console.error('');
     console.error('ERROR: Missing required environment variables:');
@@ -51,6 +47,6 @@ export function loadConfig(): AppConfig {
     summaryIntervalMs: parseInt(process.env.SUMMARY_INTERVAL_MS || '300000', 10),
     approvalTimeoutMs: parseInt(process.env.APPROVAL_TIMEOUT_MS || '300000', 10),
     autoApprove: process.env.AUTO_APPROVE === 'true',
-    anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
+    subagentOutput: process.env.SUBAGENT_VISIBLE === 'true',
   };
 }

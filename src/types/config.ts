@@ -29,8 +29,9 @@ export interface AppConfig {
   /** When true, bypass all approval prompts and auto-allow (default: false) */
   autoApprove: boolean;
 
-  // --- Phase 4 SDK config ---
+  // --- Phase 10 sub-agent suppression config ---
 
-  /** Anthropic API key for SDK query() calls (required for text input delivery) */
-  anthropicApiKey: string;
+  /** When true, sub-agent output (spawn/done, tools, text) is shown in Telegram. Default false. */
+  subagentOutput: boolean;
+
 }
