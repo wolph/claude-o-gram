@@ -43,8 +43,8 @@ Requirements for v3.0 UX Overhaul. Each maps to roadmap phases.
 - [x] **AGENT-01**: SubagentStart/SubagentStop hooks registered in hook installer
 - [x] **AGENT-02**: Subagent spawn shown: `> Agent(name) spawned -- "description"` with type
 - [x] **AGENT-03**: Subagent completion shown: `checkmark Agent(name) done`
-- [ ] **AGENT-04**: Subagent tool calls tagged with agent prefix: `> [name] Tool(args...)`
-- [ ] **AGENT-05**: Subagent text output tagged with agent prefix: `> [name] text...`
+- [x] **AGENT-04**: Subagent tool calls tagged with agent prefix: `> [name] Tool(args...)`
+- [x] **AGENT-05**: Subagent text output tagged with agent prefix: `> [name] text...`
 - [x] **AGENT-06**: Nested subagents use stacked prefix: `>> [inner]` (max 2 levels)
 
 ## Future Requirements
@@ -108,8 +108,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AGENT-01 | Phase 8 | Complete |
 | AGENT-02 | Phase 8 | Complete |
 | AGENT-03 | Phase 8 | Complete |
-| AGENT-04 | Phase 8 | Pending |
-| AGENT-05 | Phase 8 | Pending |
+| AGENT-04 | Phase 8 | Complete |
+| AGENT-05 | Phase 8 | Complete |
 | AGENT-06 | Phase 8 | Complete |
 
 **Coverage:**
