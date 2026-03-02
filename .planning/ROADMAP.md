@@ -63,11 +63,11 @@ Plans:
   3. A persistent Stop button is visible whenever any auto-accept mode is active, and tapping it returns to manual approval
   4. Auto-approved tool calls appear as compact `lightning Tool(args...)` lines (not silent) so the user sees what was approved; destructive commands (rm -rf, sudo, curl|bash) always prompt regardless of mode
   5. Permissions are visible locally via stdout before and after the decision
-**Plans**: TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] 07-01: TBD
-- [ ] 07-02: TBD
+- [ ] 07-01-PLAN.md -- Contracts and infrastructure: PermissionModeManager state machine, isDangerous blocklist, formatter additions, Stop hook, approval timeout removal
+- [ ] 07-02-PLAN.md -- Mode UX and wiring: keyboard expansion, mode callbacks, auto-approve short-circuit, lightning display, Status Stop button, lifecycle management
 
 ### Phase 8: Subagent Visibility
 **Goal**: Users see when subagents spawn, what they do, and when they finish -- no more invisible background work
@@ -97,5 +97,5 @@ Phases execute in numeric order: 6 -> 7 -> 8
 | 4. SDK Resume Input | v2.0 | 2/2 | Complete | 2026-03-01 |
 | 5. tmux Cleanup | v2.0 | 1/1 | Complete | 2026-03-01 |
 | 6. Compact Output & Session UX | v3.0 | 3/4 | Gap closure | - |
-| 7. Permission Modes | v3.0 | 0/? | Not started | - |
+| 7. Permission Modes | v3.0 | 0/2 | Planned | - |
 | 8. Subagent Visibility | v3.0 | 0/? | Not started | - |
