@@ -9,12 +9,12 @@ Requirements for v4.0 Status & Settings. Each maps to roadmap phases.
 
 ### Status Indicators
 
-- [ ] **STAT-01**: Active/ready sessions display green emoji prefix in topic name
-- [ ] **STAT-02**: Down/offline sessions display gray emoji prefix in topic name
-- [ ] **STAT-03**: Busy sessions display yellow emoji prefix when processing tools
-- [ ] **STAT-04**: Error sessions display red emoji prefix in topic name
-- [ ] **STAT-05**: On bot startup, all existing session topics are set to gray status
-- [ ] **STAT-06**: Status emoji changes are debounced to prevent editForumTopic rate limits
+- [x] **STAT-01**: Active/ready sessions display green emoji prefix in topic name
+- [x] **STAT-02**: Down/offline sessions display gray emoji prefix in topic name
+- [x] **STAT-03**: Busy sessions display yellow emoji prefix when processing tools
+- [x] **STAT-04**: Error sessions display red emoji prefix in topic name
+- [x] **STAT-05**: On bot startup, all existing session topics are set to gray status
+- [x] **STAT-06**: Status emoji changes are debounced to prevent editForumTopic rate limits
 
 ### Sub-Agent Control
 
@@ -69,12 +69,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| STAT-01 | Phase 9 | Pending |
-| STAT-02 | Phase 9 | Pending |
-| STAT-03 | Phase 9 | Pending |
-| STAT-04 | Phase 9 | Pending |
-| STAT-05 | Phase 9 | Pending |
-| STAT-06 | Phase 9 | Pending |
+| STAT-01 | Phase 9 | Complete |
+| STAT-02 | Phase 9 | Complete |
+| STAT-03 | Phase 9 | Complete |
+| STAT-04 | Phase 9 | Complete |
+| STAT-05 | Phase 9 | Complete |
+| STAT-06 | Phase 9 | Complete |
 | AGNT-01 | Phase 10 | Pending |
 | AGNT-02 | Phase 10 | Pending |
 | AGNT-03 | Phase 10 | Pending |

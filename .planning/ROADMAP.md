@@ -39,7 +39,7 @@
 
 **Milestone Goal:** Replace text-based status messages with color-coded topic indicators, suppress sub-agent noise by default, deduplicate sticky messages, and add a Telegram-native settings topic for runtime configuration.
 
-- [ ] **Phase 9: Color-Coded Topic Status** - Emoji status prefixes in topic names with startup cleanup and debounced updates
+- [x] **Phase 9: Color-Coded Topic Status** (2/2 plans) - Emoji status prefixes in topic names with startup cleanup and debounced updates
 - [ ] **Phase 10: Sub-Agent Suppression** - Sub-agent output silenced by default with toggleable visibility
 - [ ] **Phase 11: Sticky Message Dedup** - Reuse existing pinned messages on /clear and bot restart
 - [ ] **Phase 12: Settings Topic** - Dedicated Telegram topic for interactive runtime configuration
@@ -55,7 +55,9 @@
   2. When a session is processing tools, its topic name shows a yellow prefix; errors show red
   3. On bot startup, all previously-active session topics switch to gray status
   4. Rapid status changes (e.g., tool bursts) do not produce Telegram API rate limit errors
-**Plans**: TBD
+**Plans**: 2/2 complete
+  - Plan 01: TopicStatusManager class with debounced status, STATUS_EMOJIS constant, clean TopicManager
+  - Plan 02: Wire into hook callbacks, startup gray sweep, shutdown cleanup
 
 ### Phase 10: Sub-Agent Suppression
 **Goal**: Users see only main-chain output by default, with sub-agent noise eliminated unless explicitly enabled
@@ -105,7 +107,7 @@ Recommended: 9 -> 10 -> 11 -> 12
 | 6. Compact Output & Session UX | v3.0 | 4/4 | Complete | 2026-03-02 |
 | 7. Permission Modes | v3.0 | 2/2 | Complete | 2026-03-02 |
 | 8. Subagent Visibility | v3.0 | 2/2 | Complete | 2026-03-02 |
-| 9. Color-Coded Topic Status | v4.0 | 0/? | Not started | - |
+| 9. Color-Coded Topic Status | v4.0 | 2/2 | Complete | 2026-03-02 |
 | 10. Sub-Agent Suppression | v4.0 | 0/? | Not started | - |
 | 11. Sticky Message Dedup | v4.0 | 0/? | Not started | - |
 | 12. Settings Topic | v4.0 | 0/? | Not started | - |
