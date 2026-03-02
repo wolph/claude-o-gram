@@ -1,9 +1,9 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
+milestone: v3.0
 milestone_name: UX Overhaul
-status: unknown
-last_updated: "2026-03-02T15:42:57.263Z"
+status: complete
+last_updated: "2026-03-02T19:00:00Z"
 progress:
   total_phases: 8
   completed_phases: 8
@@ -15,17 +15,15 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-03-01)
+See: .planning/PROJECT.md (updated 2026-03-02)
 
 **Core value:** See what Claude Code is doing and respond to its questions from anywhere, without needing to be at the terminal.
-**Current focus:** v3.0 UX Overhaul -- Phase 8: Subagent Visibility (COMPLETE)
+**Current focus:** v3.0 UX Overhaul complete — ready for next milestone
 
 ## Current Position
 
-Phase: 8 of 8 (Subagent Visibility)
-Plan: 2 of 2 (all plans complete)
-Status: Complete
-Last activity: 2026-03-02 -- Completed Plan 02 (subagent visibility wiring)
+Milestone: v3.0 UX Overhaul — SHIPPED
+All 8 phases, 20 plans complete across 3 milestones.
 
 Progress: [##########] 100%
 
@@ -41,7 +39,7 @@ Progress: [##########] 100%
 
 **Velocity (v3.0):**
 - Total plans completed: 8
-- Phases: 3 complete
+- Phases: 3
 
 | Phase | Plan | Duration | Tasks | Files |
 |-------|------|----------|-------|-------|
@@ -60,34 +58,16 @@ Progress: [##########] 100%
 
 See PROJECT.md Key Decisions table for full log.
 
-Recent: Consolidated 4-phase v3.0 roadmap into 3 phases -- merged /clear topic reuse (SESS-*) into Phase 6 alongside compact output (OUT-*). Permission modes and subagent visibility remain separate phases.
-
-06-01: Formatter is pure function returning data; caching done by caller. Batcher uses onFlush callback pattern (keeps batcher generic). Wired batcher to sendMessageRaw for message_id tracking.
-
-06-02: Expand button added post-flush via editMessageText (message ID not known until after send). pendingExpandData per-thread map cleared on flush. Status format uses plain "claude-o-gram" branding, no emoji.
-
-06-03: clearPending Map bridges SessionEnd(reason=clear) and SessionStart(source=clear) -- keyed by cwd to handle timing between two HTTP requests. onSessionStart uses source union type ('new' | 'resume' | 'clear') instead of boolean. Separator uses Unicode box-drawing chars.
-
-06-04: getActiveByCwd is primary lookup for /clear (not getRecentlyClosedByCwd) since SessionEnd never fires due to upstream bug #6428. Old monitor cleaned up by cwd match. clearPending bridge retained for future-proofing but no longer required. Unpin logic removed per UAT feedback.
-
-07-01: classifyRisk exported from formatter.ts for PermissionModeManager safe-only mode reuse. ApprovalManager constructor takes no args (removed timeoutMs entirely). onStop callback stub added to index.ts for Plan 02 wiring. PermissionModeManager uses in-memory Map with manual default when no entry exists.
-
-07-02: Mode keyboard uses 3-button first row (Accept/Deny/Mode...) with 4-button expansion row. Mode selection both approves current tool AND activates mode. Auto-approved dedup via Set<toolUseId>. updateModeStatus helper centralizes Stop button lifecycle. onModeChange callback for cross-module status sync.
-
-08-01: SubagentTracker uses separate class (not in SessionInfo) with per-session agent stack. Description stash uses 30s auto-expiry setTimeout to prevent memory leaks. Depth capped at 2 with 2-space indent per level. Shell script bridge written to ~/.claude-o-gram/hooks/ (dedicated bot dir).
-
-08-02: Sidechain callback is 4th optional param on TranscriptWatcher (backward-compatible). Agent-prefixed auto-approved tools use batched enqueue (not immediate). onAgentToolDetected is 5th param on createHookServer for auto-approve path description stashing. Subagent done uses depth from returned agent (not getIndent) since stop() already removed from tracker.
-
 ### Pending Todos
 
 None.
 
 ### Blockers/Concerns
 
-- Phase 8 (Subagent): PostToolUse hooks do not contain agent_id -- per-tool-call attribution uses temporal heuristic only. May need runtime verification.
+None active.
 
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: Completed 08-02-PLAN.md (subagent visibility wiring) -- Phase 8 complete, all v3.0 phases done
+Stopped at: Completed v3.0 milestone — all phases shipped, audit passed, UAT verified
 Resume file: None

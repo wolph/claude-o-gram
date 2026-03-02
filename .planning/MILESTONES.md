@@ -1,5 +1,23 @@
 # Milestones
 
+## v3.0 UX Overhaul (Shipped: 2026-03-02)
+
+**Phases:** 6-8 (3 phases, 8 plans, 16 feat commits)
+**Audit:** Passed — 28/28 requirements, 5/5 E2E flows
+**UAT:** Phase 7 (10/10 pass), Phase 8 (6/6 pass)
+**Stats:** 45 files changed, +7,461/-408 lines, 5,760 LOC TypeScript
+
+**Key accomplishments:**
+- Compact tool format with expand/collapse: tool calls display as `Tool(args...)` one-liners with LRU-cached expand/collapse buttons
+- Terminal-fidelity output: removed all bot commentary, emoji labels, and verbose formatting
+- /clear topic reuse: running /clear reuses existing topic with separator, new pin, and reset counters (works around upstream hook bug #6428)
+- Permission modes: Accept All, Same Tool, Safe Only, Until Done with persistent Stop button and dangerous command blocklist
+- Subagent visibility: spawn/done announcements, agent-prefixed tool calls and text output, nested subagent support up to 2 levels
+
+**Archive:** [milestones/v3.0-ROADMAP.md](milestones/v3.0-ROADMAP.md)
+
+---
+
 ## v2.0 SDK Input Migration (Shipped: 2026-03-01)
 
 **Phases:** 4-5 (2 phases, 3 plans, 6 tasks)
