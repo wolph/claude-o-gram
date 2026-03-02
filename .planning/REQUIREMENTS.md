@@ -18,9 +18,9 @@ Requirements for v4.0 Status & Settings. Each maps to roadmap phases.
 
 ### Sub-Agent Control
 
-- [ ] **AGNT-01**: Sub-agent output is suppressed by default (no spawn/done announcements, no tool calls, no text)
-- [ ] **AGNT-02**: Sub-agents do not create their own Telegram topics by default
-- [ ] **AGNT-03**: Sub-agent visibility is toggleable via settings topic
+- [x] **AGNT-01**: Sub-agent output is suppressed by default (no spawn/done announcements, no tool calls, no text)
+- [x] **AGNT-02**: Sub-agents do not create their own Telegram topics by default
+- [x] **AGNT-03**: Sub-agent visibility is toggleable via settings topic
 
 ### Sticky Messages
 
@@ -75,9 +75,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STAT-04 | Phase 9 | Complete |
 | STAT-05 | Phase 9 | Complete |
 | STAT-06 | Phase 9 | Complete |
-| AGNT-01 | Phase 10 | Pending |
-| AGNT-02 | Phase 10 | Pending |
-| AGNT-03 | Phase 10 | Pending |
+| AGNT-01 | Phase 10 | Complete |
+| AGNT-02 | Phase 10 | Complete |
+| AGNT-03 | Phase 10 | Complete |
 | STKY-01 | Phase 11 | Pending |
 | STKY-02 | Phase 11 | Pending |
 | STKY-03 | Phase 11 | Pending |
