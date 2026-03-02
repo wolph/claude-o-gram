@@ -40,7 +40,7 @@
 **Milestone Goal:** Replace text-based status messages with color-coded topic indicators, suppress sub-agent noise by default, deduplicate sticky messages, and add a Telegram-native settings topic for runtime configuration.
 
 - [x] **Phase 9: Color-Coded Topic Status** (2/2 plans) - Emoji status prefixes in topic names with startup cleanup and debounced updates
-- [ ] **Phase 10: Sub-Agent Suppression** - Sub-agent output silenced by default with toggleable visibility
+- [ ] **Phase 10: Sub-Agent Suppression** (0/1 plans) - Sub-agent output silenced by default with toggleable visibility
 - [ ] **Phase 11: Sticky Message Dedup** - Reuse existing pinned messages on /clear and bot restart
 - [ ] **Phase 12: Settings Topic** - Dedicated Telegram topic for interactive runtime configuration
 
@@ -67,7 +67,8 @@
   1. Sub-agent spawn/done announcements, tool calls, and text output do not appear in the session topic by default
   2. Sub-agents do not create their own Telegram topics by default
   3. Sub-agent visibility can be toggled on (verified after Phase 12 delivers settings UI)
-**Plans**: TBD
+**Plans**: 1 plan
+  - Plan 01: Config field + 5 gated call sites for sub-agent output suppression
 
 ### Phase 11: Sticky Message Dedup
 **Goal**: Users never see duplicate pinned status messages after /clear or bot restart
@@ -108,6 +109,6 @@ Recommended: 9 -> 10 -> 11 -> 12
 | 7. Permission Modes | v3.0 | 2/2 | Complete | 2026-03-02 |
 | 8. Subagent Visibility | v3.0 | 2/2 | Complete | 2026-03-02 |
 | 9. Color-Coded Topic Status | v4.0 | 2/2 | Complete | 2026-03-02 |
-| 10. Sub-Agent Suppression | v4.0 | 0/? | Not started | - |
+| 10. Sub-Agent Suppression | v4.0 | 0/1 | Planned | - |
 | 11. Sticky Message Dedup | v4.0 | 0/? | Not started | - |
 | 12. Settings Topic | v4.0 | 0/? | Not started | - |
