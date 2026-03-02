@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: UX Overhaul
-status: unknown
-last_updated: "2026-03-02T14:08:09.485Z"
+status: in-progress
+last_updated: "2026-03-02T15:29:00Z"
 progress:
-  total_phases: 7
+  total_phases: 8
   completed_phases: 7
-  total_plans: 18
-  completed_plans: 18
+  total_plans: 20
+  completed_plans: 19
 ---
 
 # Project State
@@ -18,16 +18,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-01)
 
 **Core value:** See what Claude Code is doing and respond to its questions from anywhere, without needing to be at the terminal.
-**Current focus:** v3.0 UX Overhaul -- Phase 7: Permission Modes (COMPLETE)
+**Current focus:** v3.0 UX Overhaul -- Phase 8: Subagent Visibility (IN PROGRESS)
 
 ## Current Position
 
-Phase: 7 of 8 (Permission Modes) -- COMPLETE
-Plan: 2 of 2 (All plans complete)
-Status: Phase Complete
-Last activity: 2026-03-02 -- Completed Plan 02 (permission modes UX wiring)
+Phase: 8 of 8 (Subagent Visibility)
+Plan: 1 of 2 (Plan 01 complete, Plan 02 pending)
+Status: In Progress
+Last activity: 2026-03-02 -- Completed Plan 01 (subagent visibility infrastructure)
 
-Progress: [##########] 100%
+Progress: [#########-] 95%
 
 ## Performance Metrics
 
@@ -40,8 +40,8 @@ Progress: [##########] 100%
 - Phases: 2
 
 **Velocity (v3.0):**
-- Total plans completed: 6
-- Phases: 2 complete
+- Total plans completed: 7
+- Phases: 2 complete, 1 in progress
 
 | Phase | Plan | Duration | Tasks | Files |
 |-------|------|----------|-------|-------|
@@ -51,6 +51,7 @@ Progress: [##########] 100%
 | 06    | 04   | 2min     | 2     | 2     |
 | 07    | 01   | 5min     | 2     | 9     |
 | 07    | 02   | 6min     | 2     | 4     |
+| 08    | 01   | 3min     | 2     | 6     |
 
 ## Accumulated Context
 
@@ -72,6 +73,8 @@ Recent: Consolidated 4-phase v3.0 roadmap into 3 phases -- merged /clear topic r
 
 07-02: Mode keyboard uses 3-button first row (Accept/Deny/Mode...) with 4-button expansion row. Mode selection both approves current tool AND activates mode. Auto-approved dedup via Set<toolUseId>. updateModeStatus helper centralizes Stop button lifecycle. onModeChange callback for cross-module status sync.
 
+08-01: SubagentTracker uses separate class (not in SessionInfo) with per-session agent stack. Description stash uses 30s auto-expiry setTimeout to prevent memory leaks. Depth capped at 2 with 2-space indent per level. Shell script bridge written to ~/.claude-o-gram/hooks/ (dedicated bot dir).
+
 ### Pending Todos
 
 None.
@@ -83,5 +86,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: Completed 07-02-PLAN.md (permission modes UX wiring -- Phase 7 complete)
+Stopped at: Completed 08-01-PLAN.md (subagent visibility infrastructure)
 Resume file: None
