@@ -22,6 +22,7 @@ import { SubagentTracker } from './monitoring/subagent-tracker.js';
 import { installHooks } from './utils/install-hooks.js';
 import { TranscriptWatcher, calculateContextPercentage } from './monitoring/transcript-watcher.js';
 import { StatusMessage } from './monitoring/status-message.js';
+import { TopicStatusManager } from './monitoring/topic-status.js';
 import { SummaryTimer } from './monitoring/summary-timer.js';
 import { ClearDetector } from './monitoring/clear-detector.js';
 import { escapeHtml, markdownToHtml, isProceduralNarration, convertCommandsForTelegram } from './utils/text.js';
@@ -107,6 +108,9 @@ export async function main(): Promise<void> {
 
   // 6. Create topic manager wired to bot
   const topicManager = new TopicManager(bot, config.telegramChatId);
+
+  // 6b. Create topic status manager (Phase 9: color-coded status emoji prefixes)
+  const topicStatusManager = new TopicStatusManager(bot, config.telegramChatId);
 
   // 7. Create message batcher wired to topic manager
   //    sendFn uses sendMessageRaw (returns message_id) for expand cache support
@@ -325,6 +329,7 @@ export async function main(): Promise<void> {
           if (monitor) {
             if (percent >= 95 && !monitor.warned95) {
               monitor.warned95 = true;
+              topicStatusManager.setStatus(session.threadId, 'red');
               batcher.enqueue(session.threadId,
                 '\u26A0\uFE0F <b>Context window at 95%!</b> Session may need to compact soon.');
             } else if (percent >= 80 && !monitor.warned80) {
@@ -398,6 +403,10 @@ export async function main(): Promise<void> {
 
     transcriptWatcher.start();
     summaryTimer.start();
+
+    // Phase 9: Register topic for status tracking and set initial green status
+    topicStatusManager.registerTopic(session.threadId, session.topicName);
+    topicStatusManager.setStatus(session.threadId, 'green');
   }
 
   /**
@@ -501,6 +510,9 @@ export async function main(): Promise<void> {
       if (source === 'resume' && session.threadId > 0) {
         // Resume: reopen existing topic and post resume message
         await topicManager.reopenTopic(session.threadId, session.topicName);
+        // Register topic and set green status immediately after reopen
+        topicStatusManager.registerTopic(session.threadId, session.topicName);
+        await topicStatusManager.setStatusImmediate(session.threadId, 'green', session.topicName);
         await batcher.enqueueImmediate(
           session.threadId,
           formatSessionStart(session, true),
@@ -511,6 +523,8 @@ export async function main(): Promise<void> {
         sessionStore.updateThreadId(session.sessionId, threadId);
         // Update local session object for the rest of this callback
         session.threadId = threadId;
+        // Set green status immediately after topic creation
+        await topicStatusManager.setStatusImmediate(threadId, 'green', session.topicName);
         await batcher.enqueueImmediate(
           threadId,
           formatSessionStart(session, false),
@@ -587,6 +601,8 @@ export async function main(): Promise<void> {
       const summary = formatSessionEnd(latest, 'completed');
       // Send immediately (not batched) -- this is a lifecycle event
       await batcher.enqueueImmediate(latest.threadId, summary);
+      // Unregister topic from status tracking before closing
+      topicStatusManager.unregisterTopic(latest.threadId);
       // Close the topic
       await topicManager.closeTopic(latest.threadId, latest.topicName);
     },
@@ -605,6 +621,9 @@ export async function main(): Promise<void> {
         }
         return;
       }
+
+      // Set topic to yellow (processing) -- debounced, won't spam API
+      topicStatusManager.setStatus(session.threadId, 'yellow');
 
       const result = formatToolCompact(payload);
 
@@ -696,6 +715,9 @@ export async function main(): Promise<void> {
         reply_markup: keyboard,
       });
 
+      // Set topic to green -- blocked waiting for user approval (= waiting for input)
+      topicStatusManager.setStatus(session.threadId, 'green');
+
       // Wait for user decision -- THIS BLOCKS THE HTTP RESPONSE (PERM-01: no timeout)
       const decision = await approvalManager.waitForDecision(
         payload.tool_use_id,
@@ -704,6 +726,9 @@ export async function main(): Promise<void> {
         msg.message_id,
         payload.tool_name,
       );
+
+      // Decision received -- back to processing
+      topicStatusManager.setStatus(session.threadId, 'yellow');
 
       // Build the hook response
       if (decision === 'allow') {
@@ -735,6 +760,11 @@ export async function main(): Promise<void> {
         // Post brief announcement
         batcher.enqueueImmediate(session.threadId, '\u26D4 Until Done mode ended (turn complete)');
       }
+
+      // Turn complete -- set topic back to green (waiting for input)
+      topicStatusManager.setStatus(session.threadId, 'green');
+      // Clear sticky red if set -- new turn means user has seen the warning
+      topicStatusManager.clearStickyRed(session.threadId);
     },
 
     // Phase 8: Subagent lifecycle callbacks
@@ -805,9 +835,31 @@ export async function main(): Promise<void> {
     subagentTracker.stashDescription(sessionId, (toolInput.subagent_type as string) || 'unknown', desc);
   });
 
-  // 11. Reconnect to existing sessions on restart
-  //     Per user decision: "reconnect to existing topics from saved session map
-  //     + post 'Bot restarted' notification"
+  // 11. Phase 9: Startup gray sweep -- mark all active sessions as offline
+  //     Sequential with delay to avoid editForumTopic rate limits.
+  //     Runs BEFORE reconnect loop so users see gray while bot reconnects.
+  const sessionsToSweep = sessionStore.getActiveSessions();
+  for (const session of sessionsToSweep) {
+    if (session.threadId > 0) {
+      try {
+        await topicStatusManager.setStatusImmediate(session.threadId, 'gray', session.topicName);
+      } catch (err) {
+        console.warn(
+          `Gray sweep: failed to update topic ${session.threadId}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+      // Brief delay between calls to avoid rate limits
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
+  if (sessionsToSweep.length > 0) {
+    console.log(`Gray sweep: marked ${sessionsToSweep.length} topic(s) as offline`);
+  }
+
+  // 11b. Reconnect to existing sessions on restart
+  //      Per user decision: "reconnect to existing topics from saved session map
+  //      + post 'Bot restarted' notification"
   const activeSessions = sessionStore.getActiveSessions();
   for (const session of activeSessions) {
     if (session.threadId > 0) {
@@ -876,6 +928,8 @@ export async function main(): Promise<void> {
     }
     monitors.clear();
     clearPending.clear();
+    // Phase 9: Clean up topic status manager (cancels debounce timers)
+    topicStatusManager.destroy();
     // Stop all clear detectors
     for (const [, detector] of clearDetectors) {
       detector.stop();
