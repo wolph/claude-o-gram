@@ -340,8 +340,10 @@ export async function main(): Promise<void> {
           }
         }
       },
-      // onSidechainMessage: subagent text output
+      // onSidechainMessage: subagent text output (suppressed when subagentOutput is false)
       (rawText) => {
+        if (!config.subagentOutput) return;
+
         const activeAgent = subagentTracker.getActiveAgent(session.sessionId);
         if (!activeAgent) return; // No active agent -- skip (defensive)
 
@@ -638,9 +640,23 @@ export async function main(): Promise<void> {
       }
 
       // Subagent prefix: if a subagent is active, prepend [agentName]
+      // Suppressed when subagentOutput is false — skip display and expand data
       const activeAgent = subagentTracker.getActiveAgent(session.sessionId);
       let displayLine: string;
       if (activeAgent) {
+        if (!config.subagentOutput) {
+          // Suppressed: skip display and expand data, but still update status message
+          const monitor = monitors.get(session.sessionId);
+          if (monitor) {
+            const latestSession = sessionStore.get(session.sessionId);
+            if (latestSession) {
+              monitor.statusMessage.requestUpdate(
+                buildStatusData(latestSession, payload.tool_name),
+              );
+            }
+          }
+          return;
+        }
         const indent = subagentTracker.getIndent(activeAgent.agentId);
         const prefix = `${indent}[${escapeHtml(activeAgent.displayName)}] `;
         displayLine = prefix + result.compact;
@@ -776,10 +792,12 @@ export async function main(): Promise<void> {
         payload.agent_type,
       );
 
-      // Post spawn announcement as inline message
-      const indent = subagentTracker.getIndent(agent.agentId);
-      const spawnHtml = formatSubagentSpawn(agent.displayName, agent.description, indent);
-      await batcher.enqueueImmediate(session.threadId, spawnHtml);
+      // Post spawn announcement as inline message (suppressed when subagentOutput is false)
+      if (config.subagentOutput) {
+        const indent = subagentTracker.getIndent(agent.agentId);
+        const spawnHtml = formatSubagentSpawn(agent.displayName, agent.description, indent);
+        await batcher.enqueueImmediate(session.threadId, spawnHtml);
+      }
 
       console.log(`[AGENT] Subagent ${agent.displayName} (${payload.agent_id}) spawned for session ${session.sessionId} (depth ${agent.depth})`);
     },
@@ -791,12 +809,14 @@ export async function main(): Promise<void> {
         return;
       }
 
-      // Post done announcement as inline message
-      // Note: stop() already removed the agent from the map, so getIndent won't work.
-      // Use depth directly from the returned agent instead.
-      const indentStr = '  '.repeat(Math.min(result.agent.depth, 2));
-      const doneHtml = formatSubagentDone(result.agent.displayName, result.durationMs, indentStr);
-      await batcher.enqueueImmediate(session.threadId, doneHtml);
+      // Post done announcement as inline message (suppressed when subagentOutput is false)
+      if (config.subagentOutput) {
+        // Note: stop() already removed the agent from the map, so getIndent won't work.
+        // Use depth directly from the returned agent instead.
+        const indentStr = '  '.repeat(Math.min(result.agent.depth, 2));
+        const doneHtml = formatSubagentDone(result.agent.displayName, result.durationMs, indentStr);
+        await batcher.enqueueImmediate(session.threadId, doneHtml);
+      }
 
       console.log(`[AGENT] Subagent ${result.agent.displayName} (${payload.agent_id}) done after ${Math.round(result.durationMs / 1000)}s`);
     },
@@ -812,12 +832,14 @@ export async function main(): Promise<void> {
     if (session) {
       const activeAgent = subagentTracker.getActiveAgent(sessionId);
       if (activeAgent) {
-        // Subagent auto-approved: show as [name] Tool(args) NOT lightning
-        const result = formatToolCompact({ tool_name: toolName, tool_input: toolInput } as PostToolUsePayload);
-        const indent = subagentTracker.getIndent(activeAgent.agentId);
-        const prefixedLine = `${indent}[${escapeHtml(activeAgent.displayName)}] ${result.compact}`;
-        batcher.enqueue(session.threadId, prefixedLine);
-        // Track for PostToolUse dedup (same as before)
+        // Subagent auto-approved: show as [name] Tool(args) (suppressed when subagentOutput is false)
+        if (config.subagentOutput) {
+          const result = formatToolCompact({ tool_name: toolName, tool_input: toolInput } as PostToolUsePayload);
+          const indent = subagentTracker.getIndent(activeAgent.agentId);
+          const prefixedLine = `${indent}[${escapeHtml(activeAgent.displayName)}] ${result.compact}`;
+          batcher.enqueue(session.threadId, prefixedLine);
+        }
+        // Always track for PostToolUse dedup regardless of display
         autoApprovedToolUseIds.add(toolUseId);
       } else {
         // Main agent auto-approved: lightning display (existing behavior)
