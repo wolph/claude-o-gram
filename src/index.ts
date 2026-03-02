@@ -15,7 +15,10 @@ import {
   formatApprovalRequest,
   formatAutoApproved,
   formatDangerousPrompt,
+  formatSubagentSpawn,
+  formatSubagentDone,
 } from './bot/formatter.js';
+import { SubagentTracker } from './monitoring/subagent-tracker.js';
 import { installHooks } from './utils/install-hooks.js';
 import { TranscriptWatcher, calculateContextPercentage } from './monitoring/transcript-watcher.js';
 import { StatusMessage } from './monitoring/status-message.js';
@@ -29,7 +32,7 @@ import { expandCache, cacheKey } from './bot/expand-cache.js';
 import { InlineKeyboard } from 'grammy';
 import type { SessionInfo } from './types/sessions.js';
 import type { StatusData } from './types/monitoring.js';
-import type { PreToolUsePayload } from './types/hooks.js';
+import type { PreToolUsePayload, PostToolUsePayload } from './types/hooks.js';
 
 /** Per-session monitoring instances */
 interface SessionMonitor {
@@ -90,6 +93,9 @@ export async function main(): Promise<void> {
   const approvalManager = new ApprovalManager();
   const permissionModeManager = new PermissionModeManager();
   const inputRouter = new InputRouter();
+
+  // 4c. Subagent lifecycle tracker
+  const subagentTracker = new SubagentTracker();
 
   // 4b. Discover Claude Code commands for Telegram autocomplete
   const commandRegistry = new CommandRegistry();
@@ -239,6 +245,7 @@ export async function main(): Promise<void> {
       approvalManager.cleanupSession(oldSession.sessionId);
       permissionModeManager.cleanup(oldSession.sessionId);
       inputRouter.cleanup(oldSession.sessionId);
+      subagentTracker.cleanup(oldSession.sessionId);
       if (oldSession.status === 'active') {
         sessionStore.updateStatus(oldSession.sessionId, 'closed');
       }
@@ -326,6 +333,25 @@ export async function main(): Promise<void> {
                 '\u{1F7E1} <b>Context window at 80%.</b> Consider wrapping up current task.');
             }
           }
+        }
+      },
+      // onSidechainMessage: subagent text output
+      (rawText) => {
+        const activeAgent = subagentTracker.getActiveAgent(session.sessionId);
+        if (!activeAgent) return; // No active agent -- skip (defensive)
+
+        // Filter procedural narration same as main chain
+        if (isProceduralNarration(rawText)) return;
+
+        const text = convertCommandsForTelegram(rawText);
+        const indent = subagentTracker.getIndent(activeAgent.agentId);
+        const prefix = `${indent}[${escapeHtml(activeAgent.displayName)}] `;
+
+        if (text.length > 3000) {
+          const truncated = text.slice(0, 1500) + '\n... (truncated)';
+          batcher.enqueue(session.threadId, prefix + markdownToHtml(truncated));
+        } else {
+          batcher.enqueue(session.threadId, prefix + markdownToHtml(text));
         }
       },
     );
@@ -437,6 +463,7 @@ export async function main(): Promise<void> {
               approvalManager.cleanupSession(oldSessionId);
               permissionModeManager.cleanup(oldSessionId);
               inputRouter.cleanup(oldSessionId);
+              subagentTracker.cleanup(oldSessionId);
 
               // Mark old session as closed since SessionEnd never did it
               sessionStore.updateStatus(oldSessionId, 'closed');
@@ -523,6 +550,7 @@ export async function main(): Promise<void> {
         approvalManager.cleanupSession(session.sessionId);
         permissionModeManager.cleanup(session.sessionId);
         inputRouter.cleanup(session.sessionId);
+        subagentTracker.cleanup(session.sessionId);
 
         // Store threadId for the upcoming SessionStart(source=clear)
         clearPending.set(latest.cwd, {
@@ -550,10 +578,11 @@ export async function main(): Promise<void> {
         monitors.delete(session.sessionId);
       }
 
-      // Clean up control state, permission modes, and input router
+      // Clean up control state, permission modes, input router, and subagent tracker
       approvalManager.cleanupSession(session.sessionId);
       permissionModeManager.cleanup(session.sessionId);
       inputRouter.cleanup(session.sessionId);
+      subagentTracker.cleanup(session.sessionId);
 
       const summary = formatSessionEnd(latest, 'completed');
       // Send immediately (not batched) -- this is a lifecycle event
@@ -589,8 +618,19 @@ export async function main(): Promise<void> {
         pending.push({ toolName: result.toolName, expandContent: result.expandContent });
       }
 
+      // Subagent prefix: if a subagent is active, prepend [agentName]
+      const activeAgent = subagentTracker.getActiveAgent(session.sessionId);
+      let displayLine: string;
+      if (activeAgent) {
+        const indent = subagentTracker.getIndent(activeAgent.agentId);
+        const prefix = `${indent}[${escapeHtml(activeAgent.displayName)}] `;
+        displayLine = prefix + result.compact;
+      } else {
+        displayLine = result.compact;
+      }
+
       // Enqueue compact one-liner (batched with 2s window)
-      batcher.enqueue(session.threadId, result.compact);
+      batcher.enqueue(session.threadId, displayLine);
 
       // Update status message with current tool
       const monitor = monitors.get(session.sessionId);
@@ -621,13 +661,33 @@ export async function main(): Promise<void> {
       await batcher.enqueueImmediate(session.threadId, summary);
     },
 
-    // Phase 3+7: PreToolUse approval handler (with dangerous command formatting)
+    // Phase 3+7+8: PreToolUse approval handler (with dangerous command formatting + subagent prefix)
     onPreToolUse: async (session, payload: PreToolUsePayload) => {
+      // Stash description from Agent/Task tool for SubagentStart correlation
+      if (payload.tool_name === 'Agent' || payload.tool_name === 'Task') {
+        const desc = (payload.tool_input.description as string)
+          || (payload.tool_input.prompt as string)
+          || '';
+        subagentTracker.stashDescription(
+          session.sessionId,
+          (payload.tool_input.subagent_type as string) || 'unknown',
+          desc,
+        );
+      }
+
       // Use warning-styled prompt for dangerous commands
       const dangerous = isDangerous(payload.tool_name, payload.tool_input);
-      const approvalHtml = dangerous
+      let approvalHtml = dangerous
         ? formatDangerousPrompt(payload)
         : formatApprovalRequest(payload);
+
+      // Prefix with agent name if tool call is from a subagent
+      const activeAgent = subagentTracker.getActiveAgent(session.sessionId);
+      if (activeAgent) {
+        const indent = subagentTracker.getIndent(activeAgent.agentId);
+        const agentPrefix = `${indent}<b>[${escapeHtml(activeAgent.displayName)}]</b> `;
+        approvalHtml = agentPrefix + approvalHtml;
+      }
 
       // PERM-08: Log to stdout
       console.log(`[PERM] Awaiting user decision for ${payload.tool_name} (dangerous: ${dangerous})`);
@@ -681,6 +741,40 @@ export async function main(): Promise<void> {
         batcher.enqueueImmediate(session.threadId, '\u26D4 Until Done mode ended (turn complete)');
       }
     },
+
+    // Phase 8: Subagent lifecycle callbacks
+    onSubagentStart: async (session, payload) => {
+      // Register agent in tracker (description was stashed from PreToolUse)
+      const agent = subagentTracker.start(
+        session.sessionId,
+        payload.agent_id,
+        payload.agent_type,
+      );
+
+      // Post spawn announcement as inline message
+      const indent = subagentTracker.getIndent(agent.agentId);
+      const spawnHtml = formatSubagentSpawn(agent.displayName, agent.description, indent);
+      await batcher.enqueueImmediate(session.threadId, spawnHtml);
+
+      console.log(`[AGENT] Subagent ${agent.displayName} (${payload.agent_id}) spawned for session ${session.sessionId} (depth ${agent.depth})`);
+    },
+
+    onSubagentStop: async (session, payload) => {
+      const result = subagentTracker.stop(payload.agent_id);
+      if (!result) {
+        console.warn(`[AGENT] SubagentStop for unknown agent: ${payload.agent_id}`);
+        return;
+      }
+
+      // Post done announcement as inline message
+      // Note: stop() already removed the agent from the map, so getIndent won't work.
+      // Use depth directly from the returned agent instead.
+      const indentStr = '  '.repeat(Math.min(result.agent.depth, 2));
+      const doneHtml = formatSubagentDone(result.agent.displayName, result.durationMs, indentStr);
+      await batcher.enqueueImmediate(session.threadId, doneHtml);
+
+      console.log(`[AGENT] Subagent ${result.agent.displayName} (${payload.agent_id}) done after ${Math.round(result.durationMs / 1000)}s`);
+    },
   };
 
   // 9. Create hook handlers with session store and callbacks
@@ -688,16 +782,32 @@ export async function main(): Promise<void> {
 
   // 10. Create Fastify hook server (configured but not listening)
   const server = await createHookServer(config, handlers, permissionModeManager, (sessionId, toolName, toolInput, toolUseId) => {
-    // PERM-07: Post auto-approved lightning line immediately (not batched)
+    // PERM-07: Post auto-approved tool display
     const session = sessionStore.get(sessionId);
     if (session) {
-      const lightningLine = formatAutoApproved(toolName, toolInput);
-      batcher.enqueueImmediate(session.threadId, lightningLine);
-      // Track for PostToolUse dedup
-      autoApprovedToolUseIds.add(toolUseId);
-      // Update status message Stop button
-      updateModeStatus(sessionId);
+      const activeAgent = subagentTracker.getActiveAgent(sessionId);
+      if (activeAgent) {
+        // Subagent auto-approved: show as [name] Tool(args) NOT lightning
+        const result = formatToolCompact({ tool_name: toolName, tool_input: toolInput } as PostToolUsePayload);
+        const indent = subagentTracker.getIndent(activeAgent.agentId);
+        const prefixedLine = `${indent}[${escapeHtml(activeAgent.displayName)}] ${result.compact}`;
+        batcher.enqueue(session.threadId, prefixedLine);
+        // Track for PostToolUse dedup (same as before)
+        autoApprovedToolUseIds.add(toolUseId);
+      } else {
+        // Main agent auto-approved: lightning display (existing behavior)
+        const lightningLine = formatAutoApproved(toolName, toolInput);
+        batcher.enqueueImmediate(session.threadId, lightningLine);
+        autoApprovedToolUseIds.add(toolUseId);
+        // Update status message Stop button
+        updateModeStatus(sessionId);
+      }
     }
+  },
+  // onAgentToolDetected: stash Agent/Task description for SubagentStart correlation
+  (sessionId, toolName, toolInput) => {
+    const desc = (toolInput.description as string) || (toolInput.prompt as string) || '';
+    subagentTracker.stashDescription(sessionId, (toolInput.subagent_type as string) || 'unknown', desc);
   });
 
   // 11. Reconnect to existing sessions on restart
@@ -778,9 +888,10 @@ export async function main(): Promise<void> {
     clearDetectors.clear();
     // Phase 3+7: Clean up control managers
     approvalManager.shutdown();
-    // Clean up permission mode state for all sessions
+    // Clean up permission mode and subagent tracker state for all sessions
     for (const session of sessionStore.getActiveSessions()) {
       permissionModeManager.cleanup(session.sessionId);
+      subagentTracker.cleanup(session.sessionId);
     }
     batcher.shutdown();
     bot.stop();

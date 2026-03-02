@@ -27,6 +27,7 @@ export async function createHookServer(
   handlers: HookHandlers,
   permissionModeManager?: PermissionModeManager,
   onAutoApproved?: (sessionId: string, toolName: string, toolInput: Record<string, unknown>, toolUseId: string) => void,
+  onAgentToolDetected?: (sessionId: string, toolName: string, toolInput: Record<string, unknown>) => void,
 ): Promise<FastifyInstance> {
   const fastify = Fastify({ logger: true });
 
@@ -106,6 +107,11 @@ export async function createHookServer(
     '/hooks/pre-tool-use',
     async (request) => {
       const payload = request.body as PreToolUsePayload;
+
+      // Stash Agent/Task description for SubagentStart correlation
+      if (onAgentToolDetected && (payload.tool_name === 'Agent' || payload.tool_name === 'Task')) {
+        onAgentToolDetected(payload.session_id, payload.tool_name, payload.tool_input);
+      }
 
       // AUTO_APPROVE bypass: skip approval, return allow immediately
       if (config.autoApprove) {
