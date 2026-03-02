@@ -29,7 +29,7 @@
 
 **Milestone Goal:** Make Telegram output match Claude Code's terminal experience -- compact, clean, and controllable.
 
-- [x] **Phase 6: Compact Output & Session UX** - Terminal-fidelity tool display with expand/collapse, content store, clean status, and /clear topic reuse
+- [ ] **Phase 6: Compact Output & Session UX** - Terminal-fidelity tool display with expand/collapse, content store, clean status, and /clear topic reuse
 - [ ] **Phase 7: Permission Modes** - Tiered auto-accept modes replacing binary approve/deny
 - [ ] **Phase 8: Subagent Visibility** - Subagent lifecycle messages and agent-prefixed output
 
@@ -43,14 +43,15 @@
   1. Tool calls appear as single-line `Tool(args...)` messages, never multi-line verbose blocks; long calls truncate at 250 chars with an Expand button that edits in-place to show full content with Collapse
   2. No emoji status labels, no "waiting for input" commentary, no extra formatting around Claude's text output; pinned status uses compact format
   3. Expanded content is retrievable via LRU cache for the lifetime of the session
-  4. Running /clear in Claude Code reuses the existing Telegram topic -- a visual separator appears, a new status message is pinned (old one unpinned), and session counters reset to zero
+  4. Running /clear in Claude Code reuses the existing Telegram topic -- a visual separator appears, a new status message is pinned, and session counters reset to zero
   5. SessionEnd with reason=clear keeps the topic open instead of closing/archiving it
-**Plans:** 3 plans
+**Plans:** 4 plans
 
 Plans:
 - [x] 06-01-PLAN.md -- Compact formatter, expand cache module, batcher upgrade
 - [x] 06-02-PLAN.md -- Expand/collapse wiring, bot commentary cleanup, compact status
 - [x] 06-03-PLAN.md -- /clear session lifecycle with topic reuse
+- [ ] 06-04-PLAN.md -- Gap closure: fix /clear to work without SessionEnd (upstream bug #6428)
 
 ### Phase 7: Permission Modes
 **Goal**: Users control how aggressively permissions are auto-approved, eliminating button-tap fatigue for trusted workflows
@@ -95,6 +96,6 @@ Phases execute in numeric order: 6 -> 7 -> 8
 | 3. Control | v1.0 | 2/2 | Complete | 2026-03-01 |
 | 4. SDK Resume Input | v2.0 | 2/2 | Complete | 2026-03-01 |
 | 5. tmux Cleanup | v2.0 | 1/1 | Complete | 2026-03-01 |
-| 6. Compact Output & Session UX | v3.0 | 3/3 | Complete | 2026-03-01 |
+| 6. Compact Output & Session UX | v3.0 | 3/4 | Gap closure | - |
 | 7. Permission Modes | v3.0 | 0/? | Not started | - |
 | 8. Subagent Visibility | v3.0 | 0/? | Not started | - |
