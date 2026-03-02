@@ -187,17 +187,24 @@ export class StatusMessage {
 }
 
 /**
- * Format status data into a compact, no-emoji string for the pinned status message.
- * Per user decision: 2-line format with no emoji status labels.
+ * Format status data into a compact emoji status block for the pinned message.
  *
  * Format:
- *   claude-o-gram | 45% ctx | 1h 30m
- *   42 tools | 8 files
+ *   🟢 Ctx: 45%
+ *   🔧 Tool: Read
+ *   ⏱️ 1h 30m | 42 calls | 8 files
  */
 function formatStatus(data: StatusData): string {
-  const statusSuffix = data.status === 'closed' ? ' (ended)' : '';
+  const statusEmoji =
+    data.status === 'active'
+      ? '\u{1F7E2}'   // green circle
+      : data.status === 'idle'
+        ? '\u{1F7E1}'  // yellow circle
+        : '\u{1F534}';  // red circle
+
   return [
-    `claude-o-gram | ${data.contextPercent}% ctx | ${escapeHtml(data.sessionDuration)}${statusSuffix}`,
-    `${data.toolCallCount} tools | ${data.filesChanged} files`,
+    `${statusEmoji} Ctx: ${data.contextPercent}%`,
+    `\u{1F527} Tool: ${escapeHtml(data.currentTool)}`,
+    `\u{23F1}\u{FE0F} ${escapeHtml(data.sessionDuration)} | ${data.toolCallCount} calls | ${data.filesChanged} files`,
   ].join('\n');
 }

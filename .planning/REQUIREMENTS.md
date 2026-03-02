@@ -34,7 +34,7 @@ Requirements for v3.0 UX Overhaul. Each maps to roadmap phases.
 - [x] **SESS-01**: /clear reuses existing topic instead of creating new one
 - [x] **SESS-02**: Visual separator posted on /clear: `--- context cleared ---`
 - [x] **SESS-03**: New pinned status message posted after /clear
-- [x] **SESS-04**: Old status message unpinned on /clear
+- [ ] **SESS-04**: ~~Old status message unpinned on /clear~~ (removed per user decision — UAT test 10)
 - [x] **SESS-05**: Session counters (tools, files, duration) reset on /clear
 - [x] **SESS-06**: SessionEnd with reason=clear keeps topic open (no close/archive)
 
@@ -93,7 +93,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SESS-01 | Phase 6 | Complete |
 | SESS-02 | Phase 6 | Complete |
 | SESS-03 | Phase 6 | Complete |
-| SESS-04 | Phase 6 | Complete |
+| SESS-04 | Phase 6 | Removed (user decision) |
 | SESS-05 | Phase 6 | Complete |
 | SESS-06 | Phase 6 | Complete |
 | PERM-01 | Phase 7 | Pending |
