@@ -7,14 +7,12 @@ import type { VerbosityTier } from '../types/monitoring.js';
 import type { ApprovalManager } from '../control/approval-manager.js';
 import type { InputRouter } from '../input/input-router.js';
 import type { CommandRegistry } from './command-registry.js';
-import { PermissionModeManager, type PermissionMode } from '../control/permission-modes.js';
+import type { PermissionModeManager } from '../control/permission-modes.js';
 import {
   formatApprovalResult,
 } from './formatter.js';
 import { expandCache, cacheKey, buildExpandedHtml } from './expand-cache.js';
-import { escapeHtml } from '../utils/text.js';
 import type { RuntimeSettings } from '../settings/runtime-settings.js';
-import { buildSettingsKeyboard, formatSettingsMessage } from '../settings/settings-topic.js';
 
 /** Bot context type alias for use across the bot module */
 export type BotContext = Context;
@@ -35,9 +33,10 @@ export async function createBot(
   approvalManager: ApprovalManager,
   inputRouter: InputRouter,
   commandRegistry: CommandRegistry,
-  permissionModeManager: PermissionModeManager,
+  _permissionModeManager: PermissionModeManager,
   runtimeSettings: RuntimeSettings,
-  onModeChange?: (sessionId: string) => void,
+  onCleanupInactiveTopics?: () => Promise<number>,
+  refreshSettings?: () => void,
 ): Promise<Bot<BotContext>> {
   const bot = new Bot<BotContext>(config.telegramBotToken);
 
@@ -118,151 +117,115 @@ export async function createBot(
     await ctx.reply('Verbosity set to <b>quiet</b> -- showing edits and bash only');
   });
 
-  // --- Phase 3: Approval callback query handlers ---
+  // --- Approval callback query handlers ---
+  // NON-BLOCKING: Telegram buttons send keystrokes via tmux as a convenience.
+  // Claude Code shows its local permission dialog; these buttons are shortcuts.
 
-  // Handle Approve button taps
+  // Handle Approve button taps — send "y" via tmux to approve locally
   bot.callbackQuery(/^approve:(.+)$/, async (ctx) => {
     const toolUseId = ctx.match[1];
-    const pending = approvalManager.decide(toolUseId, 'allow');
-    if (pending) {
-      console.log(`[PERM] User approved ${toolUseId}`);
-      await ctx.answerCallbackQuery(); // Dismiss loading spinner
-      const who = ctx.from?.username
-        ? `@${ctx.from.username}`
-        : ctx.from?.first_name || 'User';
-      const originalText = ctx.callbackQuery.message?.text || '';
-      const updatedText = formatApprovalResult('allow', who, originalText);
-      try {
-        await ctx.editMessageText(updatedText, {
-          parse_mode: 'HTML',
-          reply_markup: undefined, // Remove inline keyboard
-        });
-      } catch (err) {
-        // Ignore "message is not modified" errors
-        if (!(err instanceof Error && err.message.includes('message is not modified'))) {
-          console.warn('Failed to edit approval message:', err instanceof Error ? err.message : err);
-        }
-      }
-    } else {
-      // Approval already resolved (timeout or duplicate tap) — show alert
-      await ctx.answerCallbackQuery({
-        text: 'This approval has already expired.',
-        show_alert: true,
-      });
-    }
-  });
-
-  // Handle Deny button taps
-  bot.callbackQuery(/^deny:(.+)$/, async (ctx) => {
-    const toolUseId = ctx.match[1];
-    const pending = approvalManager.decide(toolUseId, 'deny');
-    if (pending) {
-      console.log(`[PERM] User denied ${toolUseId}`);
-      await ctx.answerCallbackQuery(); // Dismiss loading spinner
-      const who = ctx.from?.username
-        ? `@${ctx.from.username}`
-        : ctx.from?.first_name || 'User';
-      const originalText = ctx.callbackQuery.message?.text || '';
-      const updatedText = formatApprovalResult('deny', who, originalText);
-      try {
-        await ctx.editMessageText(updatedText, {
-          parse_mode: 'HTML',
-          reply_markup: undefined,
-        });
-      } catch (err) {
-        if (!(err instanceof Error && err.message.includes('message is not modified'))) {
-          console.warn('Failed to edit approval message:', err instanceof Error ? err.message : err);
-        }
-      }
-    } else {
-      // Approval already resolved (timeout or duplicate tap) — show alert
-      await ctx.answerCallbackQuery({
-        text: 'This approval has already expired.',
-        show_alert: true,
-      });
-    }
-  });
-
-  // --- Phase 7: Permission mode callback query handlers ---
-
-  /**
-   * Shared handler for mode selection buttons (ma:, ms:, mf:, mu:).
-   * Approves the current tool call AND activates the selected mode.
-   */
-  async function handleModeSelection(
-    ctx: Context,
-    toolUseId: string,
-    mode: PermissionMode,
-  ): Promise<void> {
-    // Approve the current tool call AND activate mode
-    const pending = approvalManager.decide(toolUseId, 'allow');
+    const pending = approvalManager.resolvePending(toolUseId);
     if (!pending) {
-      await ctx.answerCallbackQuery({ text: 'This approval has already expired.', show_alert: true });
+      await ctx.answerCallbackQuery({ text: 'Already resolved.', show_alert: true });
+      // Clean up orphaned buttons — edit message to remove keyboard and mark resolved
+      try {
+        const existingText = ctx.callbackQuery.message?.text
+          || ctx.callbackQuery.message?.caption
+          || '';
+        if (existingText) {
+          await ctx.editMessageText(
+            existingText + '\n\n✅ <b>Resolved</b>',
+            { parse_mode: 'HTML', reply_markup: undefined },
+          );
+        } else {
+          await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+        }
+      } catch {
+        // Best-effort: message may already be edited or too old
+      }
       return;
     }
 
-    // For same-tool, pass the tool name from the pending approval
-    const toolName = mode === 'same-tool' ? pending.toolName : undefined;
-    permissionModeManager.setMode(pending.sessionId, mode, toolName);
+    // Check if tmux input is available
+    const method = inputRouter.getMethod(pending.sessionId);
+    if (method !== 'tmux') {
+      // Can't send keystroke — tell user to approve locally
+      // Put the pending back so PostToolUse can resolve it
+      approvalManager.trackPending(toolUseId, pending.sessionId, pending.threadId, pending.messageId, pending.toolName, pending.originalHtml);
+      await ctx.answerCallbackQuery({ text: 'No tmux pane — approve from your terminal', show_alert: true });
+      return;
+    }
 
-    // PERM-08: Log mode activation
-    console.log(`[PERM] Mode activated: ${mode}${toolName ? ` (${toolName})` : ''} for session ${pending.sessionId}`);
+    // Send "y" keystroke to approve in the local terminal
+    const result = await inputRouter.send(pending.sessionId, 'y');
+    if (result.status !== 'sent') {
+      approvalManager.trackPending(toolUseId, pending.sessionId, pending.threadId, pending.messageId, pending.toolName, pending.originalHtml);
+      await ctx.answerCallbackQuery({ text: `Failed: ${result.error}`, show_alert: true });
+      return;
+    }
 
+    console.log(`[PERM] User approved ${toolUseId} via Telegram (tmux keystroke)`);
     await ctx.answerCallbackQuery();
-
-    // Notify index.ts of mode change (triggers Stop button on status message)
-    onModeChange?.(pending.sessionId);
-
-    // Edit message to show mode activation result
-    const who = ctx.from?.username ? `@${escapeHtml(ctx.from.username)}` : escapeHtml(ctx.from?.first_name || 'User');
-    const modeLabel: Record<string, string> = {
-      'accept-all': 'Accept All',
-      'same-tool': `Same Tool (${pending.toolName})`,
-      'safe-only': 'Safe Only',
-      'until-done': 'Until Done',
-    };
-    const originalText = ctx.callbackQuery?.message?.text || '';
-    const updatedText = `${originalText}\n\n\u26A1 <b>${modeLabel[mode]}</b> activated by ${who}`;
+    const who = ctx.from?.username ? `@${ctx.from.username}` : ctx.from?.first_name || 'User';
+    const updatedText = formatApprovalResult('allow', who, pending.originalHtml);
     try {
-      await ctx.editMessageText(updatedText, {
-        parse_mode: 'HTML',
-        reply_markup: undefined,
-      });
+      await ctx.editMessageText(updatedText, { parse_mode: 'HTML', reply_markup: undefined });
     } catch (err) {
       if (!(err instanceof Error && err.message.includes('message is not modified'))) {
-        console.warn('Failed to edit mode activation message:', err instanceof Error ? err.message : err);
+        console.warn('Failed to edit approval message:', err instanceof Error ? err.message : err);
       }
     }
-  }
+  });
 
-  // Mode selection handlers
-  bot.callbackQuery(/^ma:(.+)$/, async (ctx) => handleModeSelection(ctx, ctx.match[1], 'accept-all'));
-  bot.callbackQuery(/^ms:(.+)$/, async (ctx) => handleModeSelection(ctx, ctx.match[1], 'same-tool'));
-  bot.callbackQuery(/^mf:(.+)$/, async (ctx) => handleModeSelection(ctx, ctx.match[1], 'safe-only'));
-  bot.callbackQuery(/^mu:(.+)$/, async (ctx) => handleModeSelection(ctx, ctx.match[1], 'until-done'));
-
-  // Stop auto-accept button handler
-  bot.callbackQuery(/^stop:(\d+)$/, async (ctx) => {
-    const threadId = parseInt(ctx.match[1]);
-    const session = sessionStore.getByThreadId(threadId);
-    if (!session) {
-      await ctx.answerCallbackQuery({ text: 'Session not found', show_alert: true });
+  // Handle Deny button taps — send "n" via tmux to deny locally
+  bot.callbackQuery(/^deny:(.+)$/, async (ctx) => {
+    const toolUseId = ctx.match[1];
+    const pending = approvalManager.resolvePending(toolUseId);
+    if (!pending) {
+      await ctx.answerCallbackQuery({ text: 'Already resolved.', show_alert: true });
+      // Clean up orphaned buttons — edit message to remove keyboard and mark resolved
+      try {
+        const existingText = ctx.callbackQuery.message?.text
+          || ctx.callbackQuery.message?.caption
+          || '';
+        if (existingText) {
+          await ctx.editMessageText(
+            existingText + '\n\n✅ <b>Resolved</b>',
+            { parse_mode: 'HTML', reply_markup: undefined },
+          );
+        } else {
+          await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+        }
+      } catch {
+        // Best-effort: message may already be edited or too old
+      }
       return;
     }
-    permissionModeManager.resetToManual(session.sessionId);
-    console.log(`[PERM] Auto-accept stopped for session ${session.sessionId}`);
-    await ctx.answerCallbackQuery({ text: 'Auto-accept stopped' });
 
-    // Notify index.ts to update status message (remove Stop button)
-    onModeChange?.(session.sessionId);
+    const method = inputRouter.getMethod(pending.sessionId);
+    if (method !== 'tmux') {
+      approvalManager.trackPending(toolUseId, pending.sessionId, pending.threadId, pending.messageId, pending.toolName, pending.originalHtml);
+      await ctx.answerCallbackQuery({ text: 'No tmux pane — deny from your terminal', show_alert: true });
+      return;
+    }
 
-    // Post a brief announcement to the topic
+    const result = await inputRouter.send(pending.sessionId, 'n');
+    if (result.status !== 'sent') {
+      approvalManager.trackPending(toolUseId, pending.sessionId, pending.threadId, pending.messageId, pending.toolName, pending.originalHtml);
+      await ctx.answerCallbackQuery({ text: `Failed: ${result.error}`, show_alert: true });
+      return;
+    }
+
+    console.log(`[PERM] User denied ${toolUseId} via Telegram (tmux keystroke)`);
+    await ctx.answerCallbackQuery();
+    const who = ctx.from?.username ? `@${ctx.from.username}` : ctx.from?.first_name || 'User';
+    const updatedText = formatApprovalResult('deny', who, pending.originalHtml);
     try {
-      await ctx.api.sendMessage(config.telegramChatId, '\u26D4 Auto-accept stopped', {
-        message_thread_id: threadId,
-      });
+      await ctx.editMessageText(updatedText, { parse_mode: 'HTML', reply_markup: undefined });
     } catch (err) {
-      console.warn('Failed to post stop message:', err instanceof Error ? err.message : err);
+      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+        console.warn('Failed to edit approval message:', err instanceof Error ? err.message : err);
+      }
     }
   });
 
@@ -336,25 +299,7 @@ export async function createBot(
     runtimeSettings.subagentOutput = !runtimeSettings.subagentOutput;
     console.log(`[SETTINGS] Sub-agent output: ${runtimeSettings.subagentOutput ? 'visible' : 'hidden'}`);
     await ctx.answerCallbackQuery();
-    // Edit settings message in-place
-    const text = formatSettingsMessage(
-      runtimeSettings.subagentOutput,
-      runtimeSettings.defaultPermissionMode,
-    );
-    const keyboard = buildSettingsKeyboard(
-      runtimeSettings.subagentOutput,
-      runtimeSettings.defaultPermissionMode,
-    );
-    try {
-      await ctx.editMessageText(text, {
-        parse_mode: 'HTML',
-        reply_markup: keyboard,
-      });
-    } catch (err) {
-      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
-        console.warn('Failed to edit settings message:', err instanceof Error ? err.message : err);
-      }
-    }
+    refreshSettings?.();
   });
 
   // Default permission mode selection
@@ -375,25 +320,26 @@ export async function createBot(
     runtimeSettings.defaultPermissionMode = newMode;
     console.log(`[SETTINGS] Default permission mode: ${newMode}`);
     await ctx.answerCallbackQuery();
-    // Edit settings message in-place
-    const text = formatSettingsMessage(
-      runtimeSettings.subagentOutput,
-      runtimeSettings.defaultPermissionMode,
-    );
-    const keyboard = buildSettingsKeyboard(
-      runtimeSettings.subagentOutput,
-      runtimeSettings.defaultPermissionMode,
-    );
-    try {
-      await ctx.editMessageText(text, {
-        parse_mode: 'HTML',
-        reply_markup: keyboard,
+    refreshSettings?.();
+  });
+
+  // Inactive topics cleanup
+  bot.callbackQuery('set_rm:inactive', async (ctx) => {
+    if (!isSettingsAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({
+        text: 'Only the bot owner can change settings',
+        show_alert: true,
       });
-    } catch (err) {
-      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
-        console.warn('Failed to edit settings message:', err instanceof Error ? err.message : err);
-      }
+      return;
     }
+    if (!onCleanupInactiveTopics) {
+      await ctx.answerCallbackQuery({ text: 'Cleanup not available', show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: 'Removing inactive topics...' });
+    const removed = await onCleanupInactiveTopics();
+    console.log(`[SETTINGS] Removed ${removed} inactive topic(s)`);
+    refreshSettings?.();
   });
 
   // --- CLI command forwarding (catch-all for non-bot-native commands) ---
@@ -489,24 +435,12 @@ export async function createBot(
 }
 
 /**
- * Create an InlineKeyboard with Approve/Deny on row 1 and mode buttons on row 2.
- * All buttons visible by default — no expansion step needed.
- *
- * Callback data prefixes (all within 64-byte Telegram limit):
- * - approve: (8 + 36 UUID = 44 bytes)
- * - deny: (5 + 36 = 41 bytes)
- * - ma: mode accept-all (3 + 36 = 39 bytes)
- * - ms: mode same-tool (3 + 36 = 39 bytes)
- * - mf: mode safe-only (3 + 36 = 39 bytes)
- * - mu: mode until-done (3 + 36 = 39 bytes)
+ * Create an InlineKeyboard with Approve/Deny buttons.
+ * These send keystrokes via tmux as a convenience — Claude Code
+ * shows its local permission dialog as the primary approval method.
  */
 export function makeApprovalKeyboard(toolUseId: string): InlineKeyboard {
   return new InlineKeyboard()
     .text('\u2705 Accept', `approve:${toolUseId}`)
-    .text('\u274C Deny', `deny:${toolUseId}`)
-    .row()
-    .text('All', `ma:${toolUseId}`)
-    .text('Same Tool', `ms:${toolUseId}`)
-    .text('Safe Only', `mf:${toolUseId}`)
-    .text('Until Done', `mu:${toolUseId}`);
+    .text('\u274C Deny', `deny:${toolUseId}`);
 }
