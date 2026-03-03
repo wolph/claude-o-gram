@@ -17,6 +17,7 @@ import {
   formatApprovalResult,
   formatSubagentSpawn,
   formatSubagentDone,
+  formatBypassBatch,
 } from './bot/formatter.js';
 import { SubagentTracker } from './monitoring/subagent-tracker.js';
 import { installHooks } from './utils/install-hooks.js';
@@ -27,6 +28,7 @@ import { SummaryTimer } from './monitoring/summary-timer.js';
 import { ClearDetector } from './monitoring/clear-detector.js';
 import { escapeHtml, markdownToHtml, isProceduralNarration, convertCommandsForTelegram } from './utils/text.js';
 import { ApprovalManager } from './control/approval-manager.js';
+import { BypassBatcher } from './control/bypass-batcher.js';
 import { InputRouter } from './input/input-router.js';
 import { CommandRegistry } from './bot/command-registry.js';
 import { expandCache, cacheKey } from './bot/expand-cache.js';
@@ -198,6 +200,25 @@ export async function main(): Promise<void> {
       }
     });
   });
+
+  // 7d. Bypass mode batcher: accumulates auto-approved tool calls, flushes every 10s
+  const bypassBatcher = new BypassBatcher(
+    {
+      send: async (threadId, html) => {
+        const msg = await bot.api.sendMessage(config.telegramChatId, html, {
+          message_thread_id: threadId,
+          parse_mode: 'HTML',
+        });
+        return msg.message_id;
+      },
+      edit: async (messageId, html) => {
+        await bot.api.editMessageText(config.telegramChatId, messageId, html, {
+          parse_mode: 'HTML',
+        });
+      },
+    },
+    formatBypassBatch,
+  );
 
   // 8. Per-session monitoring instances
   const monitors = new Map<string, SessionMonitor>();
@@ -661,6 +682,7 @@ export async function main(): Promise<void> {
         permissionModeManager.cleanup(session.sessionId);
         inputRouter.cleanup(session.sessionId);
         subagentTracker.cleanup(session.sessionId);
+        bypassBatcher.cleanupSession(session.sessionId);
 
         // Store threadId for the upcoming SessionStart(source=clear)
         clearPending.set(latest.cwd, {
@@ -696,6 +718,7 @@ export async function main(): Promise<void> {
       permissionModeManager.cleanup(session.sessionId);
       inputRouter.cleanup(session.sessionId);
       subagentTracker.cleanup(session.sessionId);
+      bypassBatcher.cleanupSession(session.sessionId);
 
       const summary = formatSessionEnd(latest, 'completed');
       // Send immediately (not batched) -- this is a lifecycle event
@@ -804,6 +827,13 @@ export async function main(): Promise<void> {
           (payload.tool_input.subagent_type as string) || 'unknown',
           desc,
         );
+      }
+
+      // Bypass mode: batch tool calls instead of sending individual approval messages
+      const permMode = payload.permission_mode || session.permissionMode;
+      if (permMode === 'bypassPermissions' || permMode === 'dontAsk') {
+        bypassBatcher.add(session.sessionId, session.threadId, payload);
+        return;
       }
 
       // Format approval request message
@@ -1070,6 +1100,7 @@ export async function main(): Promise<void> {
     clearDetectors.clear();
     // Phase 3+7: Clean up control managers
     approvalManager.shutdown();
+    bypassBatcher.shutdown();
     // Clean up permission mode and subagent tracker state for all sessions
     for (const session of sessionStore.getActiveSessions()) {
       permissionModeManager.cleanup(session.sessionId);
