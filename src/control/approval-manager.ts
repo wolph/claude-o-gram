@@ -19,7 +19,6 @@ interface PendingStore {
 /** Callback to clean up stale approval messages on startup */
 export type StaleCleanupFn = (entry: PendingApproval) => Promise<void>;
 
-const MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 const SAVE_DEBOUNCE_MS = 500;
 
 /**
@@ -44,15 +43,13 @@ export class ApprovalManager {
    * Run stale entry cleanup. Call this AFTER the bot is ready to make API calls.
    * Edits orphaned Telegram messages to remove buttons.
    */
+  /**
+   * Run cleanup on ALL pending entries from a previous run.
+   * On bot restart, every persisted entry is stale (the bot wasn't running
+   * to resolve them). Edits each orphaned Telegram message to remove buttons.
+   */
   async cleanupStale(cleanupFn: StaleCleanupFn): Promise<number> {
-    const now = Date.now();
-    const staleIds: string[] = [];
-
-    for (const [toolUseId, entry] of this.pending) {
-      if (now - entry.createdAt > MAX_AGE_MS) {
-        staleIds.push(toolUseId);
-      }
-    }
+    const staleIds = [...this.pending.keys()];
 
     let cleaned = 0;
     for (const toolUseId of staleIds) {

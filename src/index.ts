@@ -1031,19 +1031,16 @@ export async function main(): Promise<void> {
     );
   }
 
-  // Clean up stale pending approvals from previous run
+  // Clean up all pending approvals from previous run — strip orphaned buttons
   const staleCount = await approvalManager.cleanupStale(async (entry) => {
     try {
-      await bot.api.editMessageText(
+      await bot.api.editMessageReplyMarkup(
         config.telegramChatId,
         entry.messageId,
-        entry.originalHtml + '\n\n\u2705 <b>Resolved</b> \u2014 session ended',
-        { parse_mode: 'HTML', reply_markup: undefined },
+        { reply_markup: undefined },
       );
-    } catch (err) {
-      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
-        throw err;
-      }
+    } catch {
+      // Best-effort: message may already be edited or too old to modify
     }
   });
   if (staleCount > 0) {

@@ -127,19 +127,9 @@ export async function createBot(
     const pending = approvalManager.resolvePending(toolUseId);
     if (!pending) {
       await ctx.answerCallbackQuery({ text: 'Already resolved.', show_alert: true });
-      // Clean up orphaned buttons — edit message to remove keyboard and mark resolved
+      // Clean up orphaned buttons — strip keyboard (don't modify text to avoid HTML issues)
       try {
-        const existingText = ctx.callbackQuery.message?.text
-          || ctx.callbackQuery.message?.caption
-          || '';
-        if (existingText) {
-          await ctx.editMessageText(
-            existingText + '\n\n✅ <b>Resolved</b>',
-            { parse_mode: 'HTML', reply_markup: undefined },
-          );
-        } else {
-          await ctx.editMessageReplyMarkup({ reply_markup: undefined });
-        }
+        await ctx.editMessageReplyMarkup({ reply_markup: undefined });
       } catch {
         // Best-effort: message may already be edited or too old
       }
@@ -183,19 +173,9 @@ export async function createBot(
     const pending = approvalManager.resolvePending(toolUseId);
     if (!pending) {
       await ctx.answerCallbackQuery({ text: 'Already resolved.', show_alert: true });
-      // Clean up orphaned buttons — edit message to remove keyboard and mark resolved
+      // Clean up orphaned buttons — strip keyboard (don't modify text to avoid HTML issues)
       try {
-        const existingText = ctx.callbackQuery.message?.text
-          || ctx.callbackQuery.message?.caption
-          || '';
-        if (existingText) {
-          await ctx.editMessageText(
-            existingText + '\n\n✅ <b>Resolved</b>',
-            { parse_mode: 'HTML', reply_markup: undefined },
-          );
-        } else {
-          await ctx.editMessageReplyMarkup({ reply_markup: undefined });
-        }
+        await ctx.editMessageReplyMarkup({ reply_markup: undefined });
       } catch {
         // Best-effort: message may already be edited or too old
       }
