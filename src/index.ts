@@ -4,7 +4,8 @@ import { SessionStore } from './sessions/session-store.js';
 import { createHookHandlers, type HookCallbacks } from './hooks/handlers.js';
 import { createHookServer } from './hooks/server.js';
 import { createBot, makeApprovalKeyboard } from './bot/bot.js';
-import { PermissionModeManager, isDangerous } from './control/permission-modes.js';
+import { PermissionModeManager } from './control/permission-modes.js';
+// PermissionModeManager kept for session cleanup; no longer used for auto-approval
 import { TopicManager } from './bot/topics.js';
 import { MessageBatcher } from './bot/rate-limiter.js';
 import {
@@ -13,8 +14,7 @@ import {
   formatToolCompact,
   formatNotification,
   formatApprovalRequest,
-  formatAutoApproved,
-  formatDangerousPrompt,
+  formatApprovalResult,
   formatSubagentSpawn,
   formatSubagentDone,
 } from './bot/formatter.js';
@@ -36,7 +36,7 @@ import { RuntimeSettings } from './settings/runtime-settings.js';
 import { SettingsTopic } from './settings/settings-topic.js';
 import type { SessionInfo } from './types/sessions.js';
 import type { StatusData } from './types/monitoring.js';
-import type { PreToolUsePayload, PostToolUsePayload } from './types/hooks.js';
+import type { PreToolUsePayload } from './types/hooks.js';
 
 /** Per-session monitoring instances */
 interface SessionMonitor {
@@ -106,7 +106,9 @@ export async function main(): Promise<void> {
   const runtimeSettings = new RuntimeSettings(botStateStore);
 
   // 4. Create control managers and input router
-  const approvalManager = new ApprovalManager();
+  const approvalManager = new ApprovalManager(
+    join(config.dataDir, 'pending-approvals.json'),
+  );
   const permissionModeManager = new PermissionModeManager();
   const inputRouter = new InputRouter();
 
@@ -119,10 +121,37 @@ export async function main(): Promise<void> {
   console.log(`Discovered ${commandRegistry.getEntries().length} Claude Code commands`);
 
   // 5. Create bot instance (with plugins, not yet started)
-  const bot = await createBot(config, sessionStore, approvalManager, inputRouter, commandRegistry, permissionModeManager, runtimeSettings, updateModeStatus);
+  /** Get count of closed (inactive) sessions */
+  const getInactiveCount = () => sessionStore.getClosedSessions().length;
+
+  // Late-bound callbacks — topicManager and settingsTopic are assigned after bot creation
+  let topicManagerRef: TopicManager | null = null;
+  let settingsTopicRef: SettingsTopic | null = null;
+
+  const onCleanupInactiveTopics = async (): Promise<number> => {
+    if (!topicManagerRef) return 0;
+    const closed = sessionStore.getClosedSessions();
+    for (const session of closed) {
+      if (session.threadId > 0) {
+        // Best-effort: topic may already be deleted by the user
+        await topicManagerRef.deleteTopic(session.threadId);
+      }
+    }
+    // Always remove all closed sessions from the store
+    const ids = closed.map(s => s.sessionId);
+    if (ids.length > 0) {
+      sessionStore.deleteSessions(ids);
+    }
+    return ids.length;
+  };
+
+  const refreshSettings = () => settingsTopicRef?.requestRefresh();
+
+  const bot = await createBot(config, sessionStore, approvalManager, inputRouter, commandRegistry, permissionModeManager, runtimeSettings, onCleanupInactiveTopics, refreshSettings);
 
   // 6. Create topic manager wired to bot
   const topicManager = new TopicManager(bot, config.telegramChatId);
+  topicManagerRef = topicManager;
 
   // 6b. Create topic status manager (Phase 9: color-coded status emoji prefixes)
   const topicStatusManager = new TopicStatusManager(bot, config.telegramChatId);
@@ -206,6 +235,26 @@ export async function main(): Promise<void> {
   }
 
   /**
+   * Clean up duplicate topics for a given cwd.
+   * Deletes Telegram topics and session store entries for all closed sessions
+   * with the same cwd but a different threadId than the one being kept.
+   */
+  async function cleanupDuplicateTopics(cwd: string, keepThreadId: number): Promise<void> {
+    const toDelete = sessionStore.getAllSessions().filter(
+      s => s.cwd === cwd && s.status === 'closed' && s.threadId > 0 && s.threadId !== keepThreadId
+    );
+    for (const s of toDelete) {
+      try {
+        await topicManager.deleteTopic(s.threadId);
+      } catch { /* best-effort */ }
+    }
+    if (toDelete.length > 0) {
+      sessionStore.deleteSessions(toDelete.map(s => s.sessionId));
+      console.log(`Cleaned up ${toDelete.length} duplicate topic(s) for ${cwd}`);
+    }
+  }
+
+  /**
    * Handle a /clear event detected via filesystem watcher.
    * Mirrors the onSessionStart(source='clear') logic but triggered by
    * ClearDetector instead of HTTP hooks.
@@ -215,6 +264,9 @@ export async function main(): Promise<void> {
     newTranscriptPath: string,
     newSessionId: string,
   ): Promise<void> {
+    // Dedup: if the HTTP hook already registered this session, skip
+    if (sessionStore.get(newSessionId)) return;
+
     // Find the prior session. SessionEnd(reason=clear) fires BEFORE the new
     // transcript appears, so the session is likely already closed.
     // Check three sources: active (SessionEnd didn't fire), clearPending
@@ -268,6 +320,8 @@ export async function main(): Promise<void> {
       if (oldSession.status === 'active') {
         sessionStore.updateStatus(oldSession.sessionId, 'closed');
       }
+      // Clear old session's threadId to prevent getByThreadId collision
+      sessionStore.updateThreadId(oldSession.sessionId, 0);
     }
 
     // Post timestamped separator (SESS-02)
@@ -297,9 +351,6 @@ export async function main(): Promise<void> {
       }
     });
   }
-
-  // Phase 7: Track auto-approved tool_use_ids for PostToolUse dedup
-  const autoApprovedToolUseIds = new Set<string>();
 
   /**
    * Initialize monitoring components for a session.
@@ -438,27 +489,6 @@ export async function main(): Promise<void> {
     topicStatusManager.setStatus(session.threadId, 'green');
   }
 
-  /**
-   * Update the status message's Stop button based on the current permission mode.
-   * Called when a mode is activated or deactivated (via mode selection or Stop button).
-   */
-  function updateModeStatus(sessionId: string): void {
-    const monitor = monitors.get(sessionId);
-    if (!monitor) return;
-    const state = permissionModeManager.getMode(sessionId);
-    const session = sessionStore.get(sessionId);
-    if (!session) return;
-
-    if (state.mode !== 'manual') {
-      // Show Stop button on status message
-      const stopKeyboard = new InlineKeyboard().text('\u26D4 Stop Auto-Accept', `stop:${session.threadId}`);
-      monitor.statusMessage.setKeyboard(stopKeyboard);
-    } else {
-      // Remove Stop button
-      monitor.statusMessage.setKeyboard(undefined);
-    }
-  }
-
   // 8. Define HookCallbacks -- THE CRITICAL WIRING
   //    This connects session lifecycle events to Telegram forum topic actions.
   const callbacks: HookCallbacks = {
@@ -503,8 +533,10 @@ export async function main(): Promise<void> {
               inputRouter.cleanup(oldSessionId);
               subagentTracker.cleanup(oldSessionId);
 
-              // Mark old session as closed since SessionEnd never did it
+              // Mark old session as closed and clear its threadId to prevent
+              // getByThreadId from returning the stale closed session
               sessionStore.updateStatus(oldSessionId, 'closed');
+              sessionStore.updateThreadId(oldSessionId, 0);
               break;
             }
           }
@@ -532,6 +564,41 @@ export async function main(): Promise<void> {
             sessionStore.updateInputMethod(session.sessionId, method);
           }
         });
+
+        return;
+      }
+
+      if (source === 'reuse' && session.threadId > 0) {
+        // Reuse: reopen a closed topic for a new session with the same cwd
+        await topicManager.reopenTopic(session.threadId, session.topicName);
+        topicStatusManager.registerTopic(session.threadId, session.topicName);
+        await topicStatusManager.setStatusImmediate(session.threadId, 'green', session.topicName);
+
+        // Post separator to distinguish from previous session
+        const now = new Date();
+        const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+        const separator = `\u2500\u2500\u2500 new session at ${timeStr} \u2500\u2500\u2500`;
+        await batcher.enqueueImmediate(session.threadId, separator);
+
+        // Reset counters for the fresh session
+        sessionStore.resetCounters(session.sessionId);
+
+        // Initialize monitoring
+        initMonitoring(session);
+
+        // Start /clear detector
+        startClearDetector(session);
+
+        // Detect input method
+        void inputRouter.register(session.sessionId, session.cwd, session.permissionMode).then(() => {
+          const method = inputRouter.getMethod(session.sessionId);
+          if (method) {
+            sessionStore.updateInputMethod(session.sessionId, method);
+          }
+        });
+
+        // Clean up duplicate topics for this cwd (best-effort, async)
+        void cleanupDuplicateTopics(session.cwd, session.threadId);
 
         return;
       }
@@ -601,6 +668,9 @@ export async function main(): Promise<void> {
           statusMessageId: latest.statusMessageId,
         });
 
+        // Clear old session's threadId to prevent getByThreadId collision
+        sessionStore.updateThreadId(session.sessionId, 0);
+
         // Do NOT close the topic, do NOT post session end summary (SESS-06)
         return;
       }
@@ -637,18 +707,21 @@ export async function main(): Promise<void> {
     },
 
     onToolUse: async (session, payload) => {
-      // Skip display for auto-approved tools (already shown as lightning line)
-      if (autoApprovedToolUseIds.has(payload.tool_use_id)) {
-        autoApprovedToolUseIds.delete(payload.tool_use_id);
-        // Still update status message with current tool
-        const monitor = monitors.get(session.sessionId);
-        if (monitor) {
-          const latestSession = sessionStore.get(session.sessionId);
-          if (latestSession) {
-            monitor.statusMessage.requestUpdate(buildStatusData(latestSession, payload.tool_name));
+      // Check if this tool had a pending Telegram approval message.
+      // If so, the user approved locally — update the Telegram message.
+      const pendingApproval = approvalManager.resolvePending(payload.tool_use_id);
+      if (pendingApproval) {
+        const updatedText = formatApprovalResult('allow', 'locally', pendingApproval.originalHtml);
+        try {
+          await bot.api.editMessageText(config.telegramChatId, pendingApproval.messageId, updatedText, {
+            parse_mode: 'HTML',
+            reply_markup: undefined,
+          });
+        } catch (err) {
+          if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+            console.warn('Failed to update local approval message:', err instanceof Error ? err.message : err);
           }
         }
-        return;
       }
 
       // Set topic to yellow (processing) -- debounced, won't spam API
@@ -718,7 +791,8 @@ export async function main(): Promise<void> {
       await batcher.enqueueImmediate(session.threadId, summary);
     },
 
-    // Phase 3+7+8: PreToolUse approval handler (with dangerous command formatting + subagent prefix)
+    // PreToolUse: informational message to Telegram (non-blocking).
+    // Claude Code shows its local dialog. Telegram buttons send keystrokes via tmux.
     onPreToolUse: async (session, payload: PreToolUsePayload) => {
       // Stash description from Agent/Task tool for SubagentStart correlation
       if (payload.tool_name === 'Agent' || payload.tool_name === 'Task') {
@@ -732,11 +806,8 @@ export async function main(): Promise<void> {
         );
       }
 
-      // Use warning-styled prompt for dangerous commands
-      const dangerous = isDangerous(payload.tool_name, payload.tool_input);
-      let approvalHtml = dangerous
-        ? formatDangerousPrompt(payload)
-        : formatApprovalRequest(payload);
+      // Format approval request message
+      let approvalHtml = formatApprovalRequest(payload);
 
       // Prefix with agent name if tool call is from a subagent
       const activeAgent = subagentTracker.getActiveAgent(session.sessionId);
@@ -746,64 +817,32 @@ export async function main(): Promise<void> {
         approvalHtml = agentPrefix + approvalHtml;
       }
 
-      // PERM-08: Log to stdout
-      console.log(`[PERM] Awaiting user decision for ${payload.tool_name} (dangerous: ${dangerous})`);
+      console.log(`[PERM] Permission request for ${payload.tool_name} (local dialog shown)`);
 
       const keyboard = makeApprovalKeyboard(payload.tool_use_id);
 
-      // Send approval message with inline keyboard to the session topic
+      // Post informational message with Approve/Deny buttons
       const msg = await bot.api.sendMessage(config.telegramChatId, approvalHtml, {
         message_thread_id: session.threadId,
         parse_mode: 'HTML',
         reply_markup: keyboard,
       });
 
-      // Set topic to green -- blocked waiting for user approval (= waiting for input)
-      topicStatusManager.setStatus(session.threadId, 'green');
-
-      // Wait for user decision -- THIS BLOCKS THE HTTP RESPONSE (PERM-01: no timeout)
-      const decision = await approvalManager.waitForDecision(
+      // Track pending approval for Telegram message updates
+      approvalManager.trackPending(
         payload.tool_use_id,
         session.sessionId,
         session.threadId,
         msg.message_id,
         payload.tool_name,
+        approvalHtml,
       );
 
-      // Decision received -- back to processing
-      topicStatusManager.setStatus(session.threadId, 'yellow');
-
-      // Build the hook response
-      if (decision === 'allow') {
-        return {
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse',
-            permissionDecision: 'allow',
-            permissionDecisionReason: 'Approved by user via Telegram',
-          },
-        };
-      }
-
-      return {
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'deny',
-          permissionDecisionReason: 'Denied by user via Telegram',
-        },
-      };
+      // Set topic to green -- waiting for user approval (= waiting for input)
+      topicStatusManager.setStatus(session.threadId, 'green');
     },
 
     onStop: async (session, _payload) => {
-      const state = permissionModeManager.getMode(session.sessionId);
-      if (state.mode === 'until-done') {
-        permissionModeManager.resetToManual(session.sessionId);
-        console.log(`[PERM] Until Done mode expired for session ${session.sessionId} (Stop hook)`);
-        // Update status message to remove Stop button
-        updateModeStatus(session.sessionId);
-        // Post brief announcement
-        batcher.enqueueImmediate(session.threadId, '\u26D4 Until Done mode ended (turn complete)');
-      }
-
       // Turn complete -- set topic back to green (waiting for input)
       topicStatusManager.setStatus(session.threadId, 'green');
       // Clear sticky red if set -- new turn means user has seen the warning
@@ -852,37 +891,26 @@ export async function main(): Promise<void> {
   // 9. Create hook handlers with session store and callbacks
   const handlers = createHookHandlers(sessionStore, callbacks);
 
-  // 10. Create Fastify hook server (configured but not listening)
-  const server = await createHookServer(config, handlers, permissionModeManager, (sessionId, toolName, toolInput, toolUseId) => {
-    // PERM-07: Post auto-approved tool display
-    const session = sessionStore.get(sessionId);
-    if (session) {
-      const activeAgent = subagentTracker.getActiveAgent(sessionId);
-      if (activeAgent) {
-        // Subagent auto-approved: show as [name] Tool(args) (suppressed when subagentOutput is false)
-        if (runtimeSettings.subagentOutput) {
-          const result = formatToolCompact({ tool_name: toolName, tool_input: toolInput } as PostToolUsePayload);
-          const indent = subagentTracker.getIndent(activeAgent.agentId);
-          const prefixedLine = `${indent}[${escapeHtml(activeAgent.displayName)}] ${result.compact}`;
-          batcher.enqueue(session.threadId, prefixedLine);
-        }
-        // Always track for PostToolUse dedup regardless of display
-        autoApprovedToolUseIds.add(toolUseId);
-      } else {
-        // Main agent auto-approved: lightning display (existing behavior)
-        const lightningLine = formatAutoApproved(toolName, toolInput);
-        batcher.enqueueImmediate(session.threadId, lightningLine);
-        autoApprovedToolUseIds.add(toolUseId);
-        // Update status message Stop button
-        updateModeStatus(sessionId);
-      }
-    }
-  },
-  // onAgentToolDetected: stash Agent/Task description for SubagentStart correlation
-  (sessionId, toolName, toolInput) => {
-    const desc = (toolInput.description as string) || (toolInput.prompt as string) || '';
-    subagentTracker.stashDescription(sessionId, (toolInput.subagent_type as string) || 'unknown', desc);
+  // 10. Create Fastify hook server and START LISTENING IMMEDIATELY.
+  //     The server must accept connections before any slow startup work
+  //     (gray sweep, reconnection, settings init) that could take seconds.
+  //     Hooks are already installed in settings.json (step 2), so any Claude
+  //     Code session that fires a hook during startup needs a listening server.
+  const server = await createHookServer(config, handlers,
+    // onAgentToolDetected: stash Agent/Task description for SubagentStart correlation
+    (sessionId, toolName, toolInput) => {
+      const desc = (toolInput.description as string) || (toolInput.prompt as string) || '';
+      subagentTracker.stashDescription(sessionId, (toolInput.subagent_type as string) || 'unknown', desc);
+    },
+  );
+
+  await server.listen({
+    port: config.hookServerPort,
+    host: config.hookServerHost,
   });
+  console.log(
+    `Fastify hook server listening on ${config.hookServerHost}:${config.hookServerPort}`,
+  );
 
   // 11. Phase 9: Startup gray sweep -- mark all active sessions as offline
   //     Sequential with delay to avoid editForumTopic rate limits.
@@ -909,32 +937,83 @@ export async function main(): Promise<void> {
   // 11b. Reconnect to existing sessions on restart
   //      Per user decision: "reconnect to existing topics from saved session map
   //      + post 'Bot restarted' notification"
+  //      If a topic was manually deleted, create a new one for the session.
   const activeSessions = sessionStore.getActiveSessions();
+  let reconnectedCount = 0;
   for (const session of activeSessions) {
-    if (session.threadId > 0) {
-      try {
-        // Re-initialize monitoring for active sessions on restart
-        initMonitoring(session);
-        // Start /clear detector (filesystem workaround for bug #6428)
-        startClearDetector(session);
-        // Re-detect input method
-        void inputRouter.register(session.sessionId, session.cwd, session.permissionMode);
-      } catch (err) {
-        console.warn(
-          `Failed to reconnect session in topic ${session.threadId}:`,
-          err instanceof Error ? err.message : err,
-        );
+    try {
+      let threadId = session.threadId;
+
+      if (threadId > 0) {
+        // Probe: try reopening the topic to verify it still exists
+        try {
+          await topicManager.reopenTopic(threadId, session.topicName);
+        } catch (err) {
+          const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+          if (msg.includes('not modified') || msg.includes('not_modified')) {
+            // Topic exists and is already open — good
+          } else {
+            // Topic was deleted — create a new one
+            console.log(`Topic ${threadId} for session ${session.sessionId} was deleted, creating new`);
+            threadId = 0;
+          }
+        }
       }
+
+      if (threadId === 0) {
+        // Create a fresh topic for this session
+        threadId = await topicManager.createTopic(session.topicName);
+        sessionStore.updateThreadId(session.sessionId, threadId);
+        session.threadId = threadId;
+        // Reset status message ID — old one belonged to deleted topic
+        sessionStore.updateStatusMessageId(session.sessionId, 0);
+        session.statusMessageId = 0;
+      }
+
+      // Re-initialize monitoring for active sessions on restart
+      initMonitoring(session);
+      // Start /clear detector (filesystem workaround for bug #6428)
+      startClearDetector(session);
+      // Re-detect input method
+      void inputRouter.register(session.sessionId, session.cwd, session.permissionMode);
+      // Clean up duplicate topics for this cwd (best-effort, async)
+      void cleanupDuplicateTopics(session.cwd, session.threadId);
+      reconnectedCount++;
+    } catch (err) {
+      console.warn(
+        `Failed to reconnect session ${session.sessionId}:`,
+        err instanceof Error ? err.message : err,
+      );
     }
   }
-  if (activeSessions.length > 0) {
+  if (reconnectedCount > 0) {
     console.log(
-      `Reconnected to ${activeSessions.length} active session(s)`,
+      `Reconnected to ${reconnectedCount} active session(s)`,
     );
   }
 
+  // Clean up stale pending approvals from previous run
+  const staleCount = await approvalManager.cleanupStale(async (entry) => {
+    try {
+      await bot.api.editMessageText(
+        config.telegramChatId,
+        entry.messageId,
+        entry.originalHtml + '\n\n\u2705 <b>Resolved</b> \u2014 session ended',
+        { parse_mode: 'HTML', reply_markup: undefined },
+      );
+    } catch (err) {
+      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+        throw err;
+      }
+    }
+  });
+  if (staleCount > 0) {
+    console.log(`Cleaned up ${staleCount} stale pending approval(s)`);
+  }
+
   // 11c. Phase 12: Initialize settings topic
-  const settingsTopic = new SettingsTopic(bot, config.telegramChatId, runtimeSettings);
+  const settingsTopic = new SettingsTopic(bot, config.telegramChatId, runtimeSettings, getInactiveCount);
+  settingsTopicRef = settingsTopic;
   try {
     const settingsThreadId = await settingsTopic.init();
     console.log(`Settings topic ready: thread ${settingsThreadId}`);
@@ -943,7 +1022,7 @@ export async function main(): Promise<void> {
     // Non-fatal: bot continues without settings topic
   }
 
-  // 12. Start both servers
+  // 12. Start Telegram bot (hook server already listening from step 10)
   bot.start();
   console.log('Telegram bot started (polling)');
 
@@ -967,13 +1046,6 @@ export async function main(): Promise<void> {
     }
   }
 
-  await server.listen({
-    port: config.hookServerPort,
-    host: config.hookServerHost,
-  });
-  console.log(
-    `Fastify hook server listening on ${config.hookServerHost}:${config.hookServerPort}`,
-  );
   console.log('Startup complete');
 
   // 13. Graceful shutdown
@@ -989,6 +1061,8 @@ export async function main(): Promise<void> {
     clearPending.clear();
     // Phase 9: Clean up topic status manager (cancels debounce timers)
     topicStatusManager.destroy();
+    // Clean up settings topic debounce timer
+    settingsTopic.destroy();
     // Stop all clear detectors
     for (const [, detector] of clearDetectors) {
       detector.stop();
