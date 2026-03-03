@@ -803,6 +803,15 @@ export async function main(): Promise<void> {
     },
 
     onNotification: async (session, payload) => {
+      // Suppress permission_prompt notifications in bypass mode — they're misleading
+      const permMode = payload.permission_mode || session.permissionMode;
+      if (
+        payload.notification_type === 'permission_prompt'
+        && (permMode === 'bypassPermissions' || permMode === 'dontAsk')
+      ) {
+        return;
+      }
+
       const html = formatNotification(payload);
       // Notify only for prompts that block Claude and need user action
       const shouldNotify = payload.notification_type === 'permission_prompt'
