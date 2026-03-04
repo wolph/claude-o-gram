@@ -1,6 +1,7 @@
 import { escapeHtml, truncateText, shortenCommand } from '../utils/text.js';
 import type { PostToolUsePayload, PreToolUsePayload, NotificationPayload } from '../types/hooks.js';
 import type { SessionInfo } from '../types/sessions.js';
+import type { AskUserQuestionData } from '../types/monitoring.js';
 
 // ---------------------------------------------------------------------------
 // Compact tool result type
@@ -759,4 +760,32 @@ function smartPathForBatch(filePath: string): string {
   const segments = p.split('/');
   if (segments.length <= 3) return p;
   return segments[0] + '/.../' + segments.slice(-2).join('/');
+}
+
+// ---------------------------------------------------------------------------
+// AskUserQuestion formatting
+// ---------------------------------------------------------------------------
+
+/**
+ * Format an AskUserQuestion for Telegram display.
+ * Shows the question text with header, suitable for pairing with
+ * an InlineKeyboard of option buttons.
+ *
+ * Only formats the first question (Claude Code sends 1-4 but typically 1).
+ */
+export function formatAskUserQuestion(data: AskUserQuestionData): string {
+  const q = data.questions[0];
+  if (!q) return '\u2753 <b>Input Needed</b>';
+
+  const parts: string[] = [];
+
+  // Header line
+  const header = q.header ? escapeHtml(q.header) : 'Question';
+  parts.push(`\u2753 <b>Input Needed</b> \u2014 ${header}`);
+
+  // Question text
+  parts.push('');
+  parts.push(escapeHtml(q.question));
+
+  return parts.join('\n');
 }
