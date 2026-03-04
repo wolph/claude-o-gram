@@ -12,6 +12,7 @@ import {
   formatApprovalResult,
 } from './formatter.js';
 import { expandCache, cacheKey, buildExpandedHtml } from './expand-cache.js';
+import { escapeHtml } from '../utils/text.js';
 import type { RuntimeSettings } from '../settings/runtime-settings.js';
 
 /** Bot context type alias for use across the bot module */
@@ -327,6 +328,84 @@ export async function createBot(
     refreshSettings?.();
   });
 
+  // --- AskUserQuestion callback query handlers ---
+  // Buttons send number keystrokes (1-4) via tmux to select an option.
+
+  bot.callbackQuery(/^ask:([a-f0-9]+):(\w+)$/, async (ctx) => {
+    const optionStr = ctx.match[2];
+
+    // "Other →" button: show toast, no keystroke
+    if (optionStr === 'other') {
+      await ctx.answerCallbackQuery({
+        text: 'Type your answer in the terminal.',
+        show_alert: true,
+      });
+      return;
+    }
+
+    const optionIndex = parseInt(optionStr, 10);
+    if (isNaN(optionIndex)) {
+      await ctx.answerCallbackQuery({ text: 'Invalid option.', show_alert: true });
+      return;
+    }
+
+    // Find the session from the thread
+    const threadId = ctx.callbackQuery.message?.message_thread_id;
+    if (!threadId) {
+      await ctx.answerCallbackQuery({ text: 'No session found.', show_alert: true });
+      return;
+    }
+
+    const session = sessionStore.getByThreadId(threadId);
+    if (!session || session.status !== 'active') {
+      await ctx.answerCallbackQuery({ text: 'Session not active.', show_alert: true });
+      // Remove buttons from stale message
+      try {
+        await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } });
+      } catch { /* best-effort */ }
+      return;
+    }
+
+    // Check tmux availability
+    const method = inputRouter.getMethod(session.sessionId);
+    if (method !== 'tmux') {
+      await ctx.answerCallbackQuery({
+        text: 'No tmux pane \u2014 answer from your terminal',
+        show_alert: true,
+      });
+      return;
+    }
+
+    // Send the option number key (1-indexed: option 0 → key "1", option 1 → key "2", etc.)
+    const keystroke = String(optionIndex + 1);
+    const result = await inputRouter.send(session.sessionId, keystroke);
+    if (result.status !== 'sent') {
+      await ctx.answerCallbackQuery({ text: `Failed: ${result.error}`, show_alert: true });
+      return;
+    }
+
+    // Success: dismiss loading spinner
+    await ctx.answerCallbackQuery();
+
+    // Edit message: remove buttons, append selection indicator
+    const who = ctx.from?.username ? `@${ctx.from.username}` : ctx.from?.first_name || 'User';
+    try {
+      // Get the button text that was selected from the inline keyboard
+      const buttons = ctx.callbackQuery.message?.reply_markup?.inline_keyboard?.flat() || [];
+      const selectedButton = buttons.find(b => 'callback_data' in b && b.callback_data === ctx.callbackQuery.data);
+      const selectedLabel = selectedButton?.text || `Option ${optionIndex + 1}`;
+
+      const originalText = ctx.callbackQuery.message?.text || '';
+      const baseText = escapeHtml(originalText);
+      const updatedText = `${baseText}\n\n\u2705 <b>${escapeHtml(selectedLabel)}</b> \u2014 selected by ${escapeHtml(who)}`;
+      await ctx.editMessageText(updatedText, { parse_mode: 'HTML', reply_markup: undefined });
+    } catch (err) {
+      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+        console.warn('Failed to edit ask message:', err instanceof Error ? err.message : err);
+      }
+    }
+  });
+
   // --- CLI command forwarding (catch-all for non-bot-native commands) ---
   bot.on('message:text', async (ctx, next) => {
     const text = ctx.message.text;
@@ -428,4 +507,35 @@ export function makeApprovalKeyboard(toolUseId: string): InlineKeyboard {
   return new InlineKeyboard()
     .text('\u2705 Accept', `approve:${toolUseId}`)
     .text('\u274C Deny', `deny:${toolUseId}`);
+}
+
+/**
+ * Create an InlineKeyboard for AskUserQuestion options.
+ * Each predefined option becomes a button. An "Other →" button is appended.
+ * Callback data format: `ask:<toolUseId_first8>:<option_index>`
+ *
+ * The 64-byte Telegram callback_data limit is respected:
+ * "ask:" (4) + 8-char ID (8) + ":" (1) + index (1-2) = 14-15 bytes max.
+ */
+export function makeAskKeyboard(
+  toolUseId: string,
+  options: Array<{ label: string }>,
+): InlineKeyboard {
+  const idPrefix = toolUseId.slice(0, 8);
+  const kb = new InlineKeyboard();
+
+  for (let i = 0; i < options.length; i++) {
+    const label = options[i].label.slice(0, 30); // Truncate long labels
+    kb.text(label, `ask:${idPrefix}:${i}`);
+    // Two buttons per row
+    if (i % 2 === 1 && i < options.length - 1) {
+      kb.row();
+    }
+  }
+
+  // "Other →" button on its own row
+  kb.row();
+  kb.text('Other \u2192', `ask:${idPrefix}:other`);
+
+  return kb;
 }
