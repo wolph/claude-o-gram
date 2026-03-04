@@ -7,7 +7,7 @@ import {
   existsSync,
 } from 'node:fs';
 import type { FSWatcher } from 'node:fs';
-import type { TokenUsage, TranscriptEntry, ContentBlock } from '../types/monitoring.js';
+import type { TokenUsage, TranscriptEntry, ContentBlock, AskUserQuestionData } from '../types/monitoring.js';
 
 /** Default context window size for Claude models (200k tokens) */
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
@@ -57,17 +57,20 @@ export class TranscriptWatcher {
   private static readonly DEBOUNCE_MS = 100;
 
   private onSidechainMessage?: (text: string) => void;
+  private onAskUserQuestion?: (data: AskUserQuestionData) => void;
 
   constructor(
     filePath: string,
     onAssistantMessage: (text: string) => void,
     onUsageUpdate: (usage: TokenUsage) => void,
     onSidechainMessage?: (text: string) => void,
+    onAskUserQuestion?: (data: AskUserQuestionData) => void,
   ) {
     this.filePath = filePath;
     this.onAssistantMessage = onAssistantMessage;
     this.onUsageUpdate = onUsageUpdate;
     this.onSidechainMessage = onSidechainMessage;
+    this.onAskUserQuestion = onAskUserQuestion;
   }
 
   /**
@@ -207,7 +210,6 @@ export class TranscriptWatcher {
   private processEntry(entry: TranscriptEntry): void {
     // Subagent (sidechain) messages: emit via sidechain callback if registered
     if (entry.isSidechain) {
-      if (!this.onSidechainMessage) return;
       if (entry.type !== 'assistant') return;
       if (entry.message.role !== 'assistant') return;
 
@@ -226,7 +228,10 @@ export class TranscriptWatcher {
         text = textParts.length > 0 ? textParts.join('\n') : null;
       }
 
-      if (text && text.trim().length > 0) {
+      // Detect AskUserQuestion in sidechain entries too
+      this.detectAskUserQuestion(content);
+
+      if (text && text.trim().length > 0 && this.onSidechainMessage) {
         this.onSidechainMessage(text);
       }
       return;
@@ -254,6 +259,9 @@ export class TranscriptWatcher {
       text = textParts.length > 0 ? textParts.join('\n') : null;
     }
 
+    // Detect AskUserQuestion tool_use blocks
+    this.detectAskUserQuestion(content);
+
     // Emit text if non-empty
     if (text && text.trim().length > 0) {
       this.onAssistantMessage(text);
@@ -262,6 +270,40 @@ export class TranscriptWatcher {
     // Emit usage update if present
     if (entry.message.usage) {
       this.onUsageUpdate(entry.message.usage);
+    }
+  }
+
+  /**
+   * Scan content blocks for AskUserQuestion tool_use and emit callback.
+   * Called from both main-chain and sidechain processing paths.
+   */
+  private detectAskUserQuestion(content: string | ContentBlock[]): void {
+    if (!this.onAskUserQuestion) return;
+    if (typeof content === 'string') return;
+    if (!Array.isArray(content)) return;
+
+    for (const block of content as ContentBlock[]) {
+      if (block.type !== 'tool_use') continue;
+      if (block.name !== 'AskUserQuestion') continue;
+
+      const input = block.input as Record<string, unknown>;
+      const questions = input.questions as Array<Record<string, unknown>> | undefined;
+      if (!questions || !Array.isArray(questions)) continue;
+
+      const parsed: AskUserQuestionData = {
+        toolUseId: block.id,
+        questions: questions.map((q) => ({
+          question: (q.question as string) || '',
+          header: (q.header as string) || undefined,
+          options: ((q.options as Array<Record<string, unknown>>) || []).map((o) => ({
+            label: (o.label as string) || '',
+            description: (o.description as string) || undefined,
+          })),
+          multiSelect: (q.multiSelect as boolean) || false,
+        })),
+      };
+
+      this.onAskUserQuestion(parsed);
     }
   }
 
