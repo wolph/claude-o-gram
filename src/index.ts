@@ -282,6 +282,14 @@ export async function main(): Promise<void> {
   // Per-session dedup for AskUserQuestion tool_use_ids
   const seenAskIds = new Map<string, Set<string>>();
 
+  // Track AskUserQuestion Telegram message IDs for answer resolution
+  // Maps toolUseId (first 8 chars) → { messageId, originalHtml, options }
+  const pendingAskMessages = new Map<string, {
+    messageId: number;
+    originalHtml: string;
+    options: Array<{ label: string }>;
+  }>();
+
   /**
    * Bridge between SessionEnd(reason=clear) and SessionStart(source=clear).
    * Stores threadId and statusMessageId so the clear flow can reuse the topic.
@@ -532,17 +540,57 @@ export async function main(): Promise<void> {
         }
 
         const keyboard = makeAskKeyboard(data.toolUseId, q.options);
+        const idPrefix = data.toolUseId.slice(0, 8);
 
         // Send immediately (not batched) — this needs user interaction
-        void bot.api.sendMessage(config.telegramChatId, html, {
+        bot.api.sendMessage(config.telegramChatId, html, {
           message_thread_id: session.threadId,
           parse_mode: 'HTML',
           reply_markup: keyboard,
+        }).then((msg) => {
+          // Track for answer resolution
+          pendingAskMessages.set(idPrefix, {
+            messageId: msg.message_id,
+            originalHtml: html,
+            options: q.options,
+          });
         }).catch((err) => {
           console.warn(
             'Failed to send AskUserQuestion message:',
             err instanceof Error ? err.message : err,
           );
+        });
+      },
+      // onAskUserQuestionResult: update Telegram message when answer detected
+      (toolUseId: string, answerText: string) => {
+        const idPrefix = toolUseId.slice(0, 8);
+        const pending = pendingAskMessages.get(idPrefix);
+        if (!pending) return;
+        pendingAskMessages.delete(idPrefix);
+
+        // Parse the answer — try to extract the selected option label
+        let answerLabel = answerText;
+        try {
+          const parsed = JSON.parse(answerText);
+          if (parsed.answers && typeof parsed.answers === 'object') {
+            // answers is { "question text": "selected label" }
+            const values = Object.values(parsed.answers) as string[];
+            if (values.length > 0) answerLabel = values[0];
+          } else if (typeof parsed === 'string') {
+            answerLabel = parsed;
+          }
+        } catch {
+          // Not JSON, use raw text (truncated)
+          answerLabel = answerText.slice(0, 100);
+        }
+
+        const updatedHtml = `${pending.originalHtml}\n\n\u2705 <b>${escapeHtml(answerLabel)}</b>`;
+        bot.api.editMessageText(config.telegramChatId, pending.messageId, updatedHtml, {
+          parse_mode: 'HTML',
+        }).catch((err) => {
+          if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+            console.warn('Failed to update ask answer:', err instanceof Error ? err.message : err);
+          }
         });
       },
     );

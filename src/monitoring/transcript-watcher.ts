@@ -58,6 +58,7 @@ export class TranscriptWatcher {
 
   private onSidechainMessage?: (text: string) => void;
   private onAskUserQuestion?: (data: AskUserQuestionData) => void;
+  private onAskUserQuestionResult?: (toolUseId: string, answer: string) => void;
 
   constructor(
     filePath: string,
@@ -65,12 +66,14 @@ export class TranscriptWatcher {
     onUsageUpdate: (usage: TokenUsage) => void,
     onSidechainMessage?: (text: string) => void,
     onAskUserQuestion?: (data: AskUserQuestionData) => void,
+    onAskUserQuestionResult?: (toolUseId: string, answer: string) => void,
   ) {
     this.filePath = filePath;
     this.onAssistantMessage = onAssistantMessage;
     this.onUsageUpdate = onUsageUpdate;
     this.onSidechainMessage = onSidechainMessage;
     this.onAskUserQuestion = onAskUserQuestion;
+    this.onAskUserQuestionResult = onAskUserQuestionResult;
   }
 
   /**
@@ -237,6 +240,12 @@ export class TranscriptWatcher {
       return;
     }
 
+    // Detect AskUserQuestion tool_result in user entries
+    if (entry.type === 'user' || entry.message.role === 'user') {
+      this.detectAskUserQuestionResult(entry.message.content);
+      return;
+    }
+
     // Only process assistant messages
     if (entry.type !== 'assistant') return;
     if (entry.message.role !== 'assistant') return;
@@ -304,6 +313,41 @@ export class TranscriptWatcher {
       };
 
       this.onAskUserQuestion(parsed);
+    }
+  }
+
+  /**
+   * Scan user message content blocks for tool_result entries that are
+   * AskUserQuestion answers. The tool_result content contains the user's
+   * selected answer as JSON with an "answers" field.
+   */
+  private detectAskUserQuestionResult(content: string | ContentBlock[]): void {
+    if (!this.onAskUserQuestionResult) return;
+    if (typeof content === 'string') return;
+    if (!Array.isArray(content)) return;
+
+    for (const block of content as ContentBlock[]) {
+      if (block.type !== 'tool_result') continue;
+      const toolUseId = block.tool_use_id;
+      if (!toolUseId) continue;
+
+      // Extract the answer text from tool_result content
+      let answerText = '';
+      const resultContent = block.content;
+      if (typeof resultContent === 'string') {
+        answerText = resultContent;
+      } else if (Array.isArray(resultContent)) {
+        // Content may be an array of text blocks
+        for (const part of resultContent) {
+          if (typeof part === 'object' && part !== null && 'text' in part) {
+            answerText += (part as { text: string }).text;
+          }
+        }
+      }
+
+      if (answerText) {
+        this.onAskUserQuestionResult(toolUseId, answerText);
+      }
     }
   }
 
