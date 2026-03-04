@@ -15,7 +15,6 @@ import {
   formatNotification,
   formatApprovalRequest,
   formatApprovalResult,
-  formatSubagentSpawn,
   formatSubagentDone,
   formatBypassBatch,
   formatAskUserQuestion,
@@ -887,6 +886,9 @@ export async function main(): Promise<void> {
     },
 
     onNotification: async (session, payload) => {
+      // Suppress idle notifications — status message already shows idle state
+      if (payload.notification_type === 'idle_prompt') return;
+
       // Suppress permission_prompt notifications in bypass mode — they're misleading
       const permMode = payload.permission_mode || session.permissionMode;
       if (
@@ -981,12 +983,7 @@ export async function main(): Promise<void> {
         payload.agent_type,
       );
 
-      // Post spawn announcement as inline message (suppressed when subagentOutput is false)
-      if (runtimeSettings.subagentOutput) {
-        const indent = subagentTracker.getIndent(agent.agentId);
-        const spawnHtml = formatSubagentSpawn(agent.displayName, agent.description, indent);
-        await batcher.enqueueImmediate(session.threadId, spawnHtml);
-      }
+      // Spawn announcements suppressed — subagentDone shows completion summary
 
       console.log(`[AGENT] Subagent ${agent.displayName} (${payload.agent_id}) spawned for session ${session.sessionId} (depth ${agent.depth})`);
     },
