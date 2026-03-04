@@ -698,68 +698,7 @@ function formatDuration(ms: number): string {
 export function formatBypassBatch(
   entries: Array<{ toolName: string; toolInput: Record<string, unknown> }>,
 ): string {
-  const lines: string[] = ['\u26A1 <b>Auto-approved</b> (bypass mode)'];
-
-  for (let i = 0; i < entries.length; i++) {
-    const { toolName, toolInput } = entries[i];
-    const isLast = i === entries.length - 1;
-    const prefix = isLast ? '\u2514' : '\u251C';
-    const preview = buildBypassPreview(toolName, toolInput);
-    lines.push(`${prefix} ${escapeHtml(preview)}`);
-  }
-
-  return lines.join('\n');
-}
-
-/** Build a compact one-liner for a tool call in bypass batch */
-function buildBypassPreview(
-  toolName: string,
-  toolInput: Record<string, unknown>,
-): string {
-  switch (toolName) {
-    case 'Bash':
-    case 'BashBackground': {
-      const cmd = shortenCommand((toolInput.command as string) || '');
-      const line = cmd.split('\n')[0];
-      return `${toolName}(${line.slice(0, 80)})`;
-    }
-    case 'Read': {
-      const fp = (toolInput.file_path as string) || (toolInput.path as string) || '?';
-      return `Read(${smartPathForBatch(fp)})`;
-    }
-    case 'Write': {
-      const fp = (toolInput.file_path as string) || (toolInput.path as string) || '?';
-      return `Write(${smartPathForBatch(fp)})`;
-    }
-    case 'Edit':
-    case 'MultiEdit': {
-      const fp = (toolInput.file_path as string) || (toolInput.path as string) || '?';
-      return `Edit(${smartPathForBatch(fp)})`;
-    }
-    case 'Glob': {
-      const pattern = (toolInput.pattern as string) || '*';
-      return `Glob("${pattern.slice(0, 60)}")`;
-    }
-    case 'Grep': {
-      const pattern = (toolInput.pattern as string) || '';
-      return `Grep("${pattern.slice(0, 60)}")`;
-    }
-    default:
-      return toolName;
-  }
-}
-
-/** Shorten file path for batch display */
-function smartPathForBatch(filePath: string): string {
-  let p = filePath;
-  const home = process.env.HOME;
-  if (home && p.startsWith(home + '/')) {
-    p = '~/' + p.slice(home.length + 1);
-  }
-  if (p.length <= 50) return p;
-  const segments = p.split('/');
-  if (segments.length <= 3) return p;
-  return segments[0] + '/.../' + segments.slice(-2).join('/');
+  return `\u26A1 ${entries.length} auto-approved tool call${entries.length === 1 ? '' : 's'}`;
 }
 
 // ---------------------------------------------------------------------------
