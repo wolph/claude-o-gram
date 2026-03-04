@@ -46,3 +46,17 @@ export interface StatusData {
   filesChanged: number;
   status: 'active' | 'idle' | 'closed';
 }
+
+/** Parsed data from an AskUserQuestion tool_use block in the transcript */
+export interface AskUserQuestionData {
+  toolUseId: string;
+  questions: Array<{
+    question: string;
+    header?: string;
+    options: Array<{
+      label: string;
+      description?: string;
+    }>;
+    multiSelect: boolean;
+  }>;
+}
