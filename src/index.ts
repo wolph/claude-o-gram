@@ -3,7 +3,7 @@ import { loadConfig } from './config.js';
 import { SessionStore } from './sessions/session-store.js';
 import { createHookHandlers, type HookCallbacks } from './hooks/handlers.js';
 import { createHookServer } from './hooks/server.js';
-import { createBot, makeApprovalKeyboard } from './bot/bot.js';
+import { createBot, makeApprovalKeyboard, makeAskKeyboard } from './bot/bot.js';
 import { PermissionModeManager } from './control/permission-modes.js';
 // PermissionModeManager kept for session cleanup; no longer used for auto-approval
 import { TopicManager } from './bot/topics.js';
@@ -18,6 +18,7 @@ import {
   formatSubagentSpawn,
   formatSubagentDone,
   formatBypassBatch,
+  formatAskUserQuestion,
 } from './bot/formatter.js';
 import { SubagentTracker } from './monitoring/subagent-tracker.js';
 import { installHooks } from './utils/install-hooks.js';
@@ -37,7 +38,7 @@ import { BotStateStore } from './settings/bot-state-store.js';
 import { RuntimeSettings } from './settings/runtime-settings.js';
 import { SettingsTopic } from './settings/settings-topic.js';
 import type { SessionInfo } from './types/sessions.js';
-import type { StatusData } from './types/monitoring.js';
+import type { StatusData, AskUserQuestionData } from './types/monitoring.js';
 import type { PreToolUsePayload } from './types/hooks.js';
 
 /** Per-session monitoring instances */
@@ -223,6 +224,9 @@ export async function main(): Promise<void> {
   // 8. Per-session monitoring instances
   const monitors = new Map<string, SessionMonitor>();
 
+  // Per-session dedup for AskUserQuestion tool_use_ids
+  const seenAskIds = new Map<string, Set<string>>();
+
   /**
    * Bridge between SessionEnd(reason=clear) and SessionStart(source=clear).
    * Stores threadId and statusMessageId so the clear flow can reuse the topic.
@@ -338,6 +342,7 @@ export async function main(): Promise<void> {
       permissionModeManager.cleanup(oldSession.sessionId);
       inputRouter.cleanup(oldSession.sessionId);
       subagentTracker.cleanup(oldSession.sessionId);
+      seenAskIds.delete(oldSession.sessionId);
       if (oldSession.status === 'active') {
         sessionStore.updateStatus(oldSession.sessionId, 'closed');
       }
@@ -448,6 +453,42 @@ export async function main(): Promise<void> {
           batcher.enqueue(session.threadId, prefix + markdownToHtml(text));
         }
       },
+      // onAskUserQuestion: forward to Telegram as interactive prompt
+      (data: AskUserQuestionData) => {
+        // Dedup: skip if we've already seen this tool_use_id
+        let seen = seenAskIds.get(session.sessionId);
+        if (!seen) {
+          seen = new Set();
+          seenAskIds.set(session.sessionId, seen);
+        }
+        if (seen.has(data.toolUseId)) return;
+        seen.add(data.toolUseId);
+
+        // Format the question message
+        const html = formatAskUserQuestion(data);
+
+        // Build inline keyboard from the first question's options
+        const q = data.questions[0];
+        if (!q || q.options.length === 0) {
+          // No options — just show as text
+          batcher.enqueue(session.threadId, html);
+          return;
+        }
+
+        const keyboard = makeAskKeyboard(data.toolUseId, q.options);
+
+        // Send immediately (not batched) — this needs user interaction
+        void bot.api.sendMessage(config.telegramChatId, html, {
+          message_thread_id: session.threadId,
+          parse_mode: 'HTML',
+          reply_markup: keyboard,
+        }).catch((err) => {
+          console.warn(
+            'Failed to send AskUserQuestion message:',
+            err instanceof Error ? err.message : err,
+          );
+        });
+      },
     );
 
     // Initialize summary timer
@@ -553,6 +594,7 @@ export async function main(): Promise<void> {
               permissionModeManager.cleanup(oldSessionId);
               inputRouter.cleanup(oldSessionId);
               subagentTracker.cleanup(oldSessionId);
+              seenAskIds.delete(oldSessionId);
 
               // Mark old session as closed and clear its threadId to prevent
               // getByThreadId from returning the stale closed session
@@ -683,6 +725,7 @@ export async function main(): Promise<void> {
         inputRouter.cleanup(session.sessionId);
         subagentTracker.cleanup(session.sessionId);
         bypassBatcher.cleanupSession(session.sessionId);
+        seenAskIds.delete(session.sessionId);
 
         // Store threadId for the upcoming SessionStart(source=clear)
         clearPending.set(latest.cwd, {
@@ -719,6 +762,7 @@ export async function main(): Promise<void> {
       inputRouter.cleanup(session.sessionId);
       subagentTracker.cleanup(session.sessionId);
       bypassBatcher.cleanupSession(session.sessionId);
+      seenAskIds.delete(session.sessionId);
 
       const summary = formatSessionEnd(latest, 'completed');
       // Send immediately (not batched) -- this is a lifecycle event
