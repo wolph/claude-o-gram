@@ -11,7 +11,6 @@ import { MessageBatcher } from './bot/rate-limiter.js';
 import {
   formatSessionStart,
   formatSessionEnd,
-  formatToolCompact,
   formatNotification,
   formatApprovalRequest,
   formatApprovalResult,
@@ -26,6 +25,7 @@ import { StatusMessage } from './monitoring/status-message.js';
 import { TopicStatusManager } from './monitoring/topic-status.js';
 import { SummaryTimer } from './monitoring/summary-timer.js';
 import { ClearDetector } from './monitoring/clear-detector.js';
+import { TaskChecklist } from './monitoring/task-checklist.js';
 import { escapeHtml, markdownToHtml, isProceduralNarration, convertCommandsForTelegram } from './utils/text.js';
 import { ApprovalManager } from './control/approval-manager.js';
 import { BypassBatcher } from './control/bypass-batcher.js';
@@ -260,6 +260,22 @@ export async function main(): Promise<void> {
     formatBypassBatch,
   );
 
+  // 7e. Task checklist: live-updating task progress per session
+  const taskChecklist = new TaskChecklist({
+    send: async (threadId, html) => {
+      const msg = await bot.api.sendMessage(config.telegramChatId, html, {
+        message_thread_id: threadId,
+        parse_mode: 'HTML',
+      });
+      return msg.message_id;
+    },
+    edit: async (messageId, html) => {
+      await bot.api.editMessageText(config.telegramChatId, messageId, html, {
+        parse_mode: 'HTML',
+      });
+    },
+  });
+
   // 8. Per-session monitoring instances
   const monitors = new Map<string, SessionMonitor>();
 
@@ -382,6 +398,7 @@ export async function main(): Promise<void> {
       inputRouter.cleanup(oldSession.sessionId);
       subagentTracker.cleanup(oldSession.sessionId);
       seenAskIds.delete(oldSession.sessionId);
+      taskChecklist.cleanup(oldSession.sessionId);
       if (oldSession.status === 'active') {
         sessionStore.updateStatus(oldSession.sessionId, 'closed');
       }
@@ -634,6 +651,7 @@ export async function main(): Promise<void> {
               inputRouter.cleanup(oldSessionId);
               subagentTracker.cleanup(oldSessionId);
               seenAskIds.delete(oldSessionId);
+              taskChecklist.cleanup(oldSessionId);
 
               // Mark old session as closed and clear its threadId to prevent
               // getByThreadId from returning the stale closed session
@@ -765,6 +783,7 @@ export async function main(): Promise<void> {
         subagentTracker.cleanup(session.sessionId);
         bypassBatcher.cleanupSession(session.sessionId);
         seenAskIds.delete(session.sessionId);
+        taskChecklist.cleanup(session.sessionId);
 
         // Store threadId for the upcoming SessionStart(source=clear)
         clearPending.set(latest.cwd, {
@@ -802,6 +821,7 @@ export async function main(): Promise<void> {
       subagentTracker.cleanup(session.sessionId);
       bypassBatcher.cleanupSession(session.sessionId);
       seenAskIds.delete(session.sessionId);
+      taskChecklist.cleanup(session.sessionId);
 
       const summary = formatSessionEnd(latest, 'completed');
       // Send immediately (not batched) -- this is a lifecycle event
@@ -813,13 +833,13 @@ export async function main(): Promise<void> {
     },
 
     onToolUse: async (session, payload) => {
-      // Check if this tool had a pending Telegram approval message.
-      // If so, the user approved locally — update the Telegram message.
+      // Auto-approve resolution: if there's a pending approval for this tool_use_id,
+      // update the message
       const pendingApproval = approvalManager.resolvePending(payload.tool_use_id);
       if (pendingApproval) {
-        const updatedText = formatApprovalResult('allow', 'locally', pendingApproval.originalHtml);
         try {
-          await bot.api.editMessageText(config.telegramChatId, pendingApproval.messageId, updatedText, {
+          const resultText = formatApprovalResult('allow', 'locally', pendingApproval.originalHtml);
+          await bot.api.editMessageText(config.telegramChatId, pendingApproval.messageId, resultText, {
             parse_mode: 'HTML',
             reply_markup: undefined,
           });
@@ -833,47 +853,28 @@ export async function main(): Promise<void> {
       // Set topic to yellow (processing) -- debounced, won't spam API
       topicStatusManager.setStatus(session.threadId, 'yellow');
 
-      const result = formatToolCompact(payload);
-
-      // Track expand data for this thread's pending batch
-      if (result.expandContent) {
-        let pending = pendingExpandData.get(session.threadId);
-        if (!pending) {
-          pending = [];
-          pendingExpandData.set(session.threadId, pending);
-        }
-        pending.push({ toolName: result.toolName, expandContent: result.expandContent });
-      }
-
-      // Subagent prefix: if a subagent is active, prepend [agentName]
-      // Suppressed when subagentOutput is false — skip display and expand data
-      const activeAgent = subagentTracker.getActiveAgent(session.sessionId);
-      let displayLine: string;
-      if (activeAgent) {
-        if (!runtimeSettings.subagentOutput) {
-          // Suppressed: skip display and expand data, but still update status message
-          const monitor = monitors.get(session.sessionId);
-          if (monitor) {
-            const latestSession = sessionStore.get(session.sessionId);
-            if (latestSession) {
-              monitor.statusMessage.requestUpdate(
-                buildStatusData(latestSession, payload.tool_name),
-              );
-            }
+      // Task tools: route to checklist (consumes TaskCreate, TaskUpdate, TaskList, TaskGet)
+      if (taskChecklist.handleToolUse(
+        session.sessionId,
+        session.threadId,
+        payload.tool_name,
+        payload.tool_input,
+        payload.tool_response,
+      )) {
+        // Still update status message even for task tools
+        const monitor = monitors.get(session.sessionId);
+        if (monitor) {
+          const latestSession = sessionStore.get(session.sessionId);
+          if (latestSession) {
+            monitor.statusMessage.requestUpdate(
+              buildStatusData(latestSession, payload.tool_name),
+            );
           }
-          return;
         }
-        const indent = subagentTracker.getIndent(activeAgent.agentId);
-        const prefix = `${indent}[${escapeHtml(activeAgent.displayName)}] `;
-        displayLine = prefix + result.compact;
-      } else {
-        displayLine = result.compact;
+        return;
       }
 
-      // Enqueue compact one-liner (batched with 2s window)
-      batcher.enqueue(session.threadId, displayLine);
-
-      // Update status message with current tool
+      // All other tools: suppress display, only update status message
       const monitor = monitors.get(session.sessionId);
       if (monitor) {
         const latestSession = sessionStore.get(session.sessionId);
@@ -1188,6 +1189,7 @@ export async function main(): Promise<void> {
     // Phase 3+7: Clean up control managers
     approvalManager.shutdown();
     bypassBatcher.shutdown();
+    taskChecklist.shutdown();
     // Clean up permission mode and subagent tracker state for all sessions
     for (const session of sessionStore.getActiveSessions()) {
       permissionModeManager.cleanup(session.sessionId);
