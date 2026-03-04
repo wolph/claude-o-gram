@@ -150,7 +150,47 @@ export async function main(): Promise<void> {
 
   const refreshSettings = () => settingsTopicRef?.requestRefresh();
 
-  const bot = await createBot(config, sessionStore, approvalManager, inputRouter, commandRegistry, permissionModeManager, runtimeSettings, onCleanupInactiveTopics, refreshSettings);
+  let cleanupOldButtonsFn: (() => Promise<number>) | null = null;
+
+  const bot = await createBot(config, sessionStore, approvalManager, inputRouter, commandRegistry, permissionModeManager, runtimeSettings, onCleanupInactiveTopics, refreshSettings, async () => cleanupOldButtonsFn?.() ?? 0);
+
+  // 5b. Wire late-bound cleanup for orphaned approval buttons
+  cleanupOldButtonsFn = async () => {
+    const allSessions = sessionStore.getAllSessions();
+    const anchors = new Set<number>();
+    for (const s of allSessions) {
+      if (s.statusMessageId > 0) {
+        anchors.add(s.statusMessageId);
+      }
+    }
+
+    if (anchors.size === 0) {
+      console.log('[CLEANUP] No message ID anchors found');
+      return 0;
+    }
+
+    let cleaned = 0;
+    for (const anchor of anchors) {
+      const start = Math.max(1, anchor - 500);
+      for (let msgId = anchor; msgId >= start; msgId--) {
+        try {
+          await bot.api.editMessageReplyMarkup(
+            config.telegramChatId,
+            msgId,
+            { reply_markup: { inline_keyboard: [] } },
+          );
+          cleaned++;
+        } catch {
+          // Ignore: wrong message, not ours, already edited, etc.
+        }
+        // Rate limit: 50ms between calls
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
+
+    console.log(`[CLEANUP] Removed keyboards from ${cleaned} message(s)`);
+    return cleaned;
+  };
 
   // 6. Create topic manager wired to bot
   const topicManager = new TopicManager(bot, config.telegramChatId);

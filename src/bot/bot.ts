@@ -38,6 +38,7 @@ export async function createBot(
   runtimeSettings: RuntimeSettings,
   onCleanupInactiveTopics?: () => Promise<number>,
   refreshSettings?: () => void,
+  onCleanupOldButtons?: () => Promise<number>,
 ): Promise<Bot<BotContext>> {
   const bot = new Bot<BotContext>(config.telegramBotToken);
 
@@ -326,6 +327,20 @@ export async function createBot(
     const removed = await onCleanupInactiveTopics();
     console.log(`[SETTINGS] Removed ${removed} inactive topic(s)`);
     refreshSettings?.();
+  });
+
+  // Bulk cleanup: remove orphaned approval buttons by brute-force ID range
+  bot.callbackQuery('set_rm:buttons', async (ctx) => {
+    if (!isSettingsAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({
+        text: 'Only the bot owner can change settings',
+        show_alert: true,
+      });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: 'Cleaning old buttons... this may take a minute.' });
+    const cleaned = await onCleanupOldButtons?.() ?? 0;
+    console.log(`[SETTINGS] Cleaned ${cleaned} old approval button(s)`);
   });
 
   // --- AskUserQuestion callback query handlers ---

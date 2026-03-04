@@ -6,7 +6,7 @@ import type { RuntimeSettings } from './runtime-settings.js';
  * Format the settings message text showing current setting values.
  * Uses emoji indicators for visual clarity (green/red circles).
  */
-export function formatSettingsMessage(subagentVisible: boolean, defaultMode: string): string {
+export function formatSettingsMessage(subagentVisible: boolean, defaultMode: string, inactiveCount = 0): string {
   const saStatus = subagentVisible ? '\u{1F7E2} Visible' : '\u{1F534} Hidden';
   const modeLabels: Record<string, string> = {
     'manual': 'Manual',
@@ -14,12 +14,16 @@ export function formatSettingsMessage(subagentVisible: boolean, defaultMode: str
     'accept-all': 'Accept All',
     'until-done': 'Until Done',
   };
-  return [
+  const lines = [
     '<b>\u2699\uFE0F Settings</b>',
     '',
     `Sub-agents: ${saStatus}`,
     `Default permission mode: ${modeLabels[defaultMode] || 'Manual'}`,
-  ].join('\n');
+  ];
+  if (inactiveCount > 0) {
+    lines.push(`Inactive topics: ${inactiveCount}`);
+  }
+  return lines.join('\n');
 }
 
 /**
@@ -27,7 +31,7 @@ export function formatSettingsMessage(subagentVisible: boolean, defaultMode: str
  * Sub-agent toggle on first row, permission mode buttons on second row.
  * Active mode is highlighted with a bullet marker.
  */
-export function buildSettingsKeyboard(subagentVisible: boolean, defaultMode: string): InlineKeyboard {
+export function buildSettingsKeyboard(subagentVisible: boolean, defaultMode: string, inactiveCount = 0): InlineKeyboard {
   const kb = new InlineKeyboard();
   // Sub-agent visibility toggle
   kb.text(
@@ -46,6 +50,14 @@ export function buildSettingsKeyboard(subagentVisible: boolean, defaultMode: str
     const isActive = m.value === defaultMode;
     kb.text(isActive ? `\u25CF ${m.label}` : m.label, `set_pm:${m.value}`);
   }
+  // Inactive topics cleanup button (only when there are inactive topics)
+  if (inactiveCount > 0) {
+    kb.row();
+    kb.text(`\u{1F5D1} Remove ${inactiveCount} inactive topic${inactiveCount === 1 ? '' : 's'}`, 'set_rm:inactive');
+  }
+  // Bulk cleanup button for orphaned approval buttons
+  kb.row();
+  kb.text('\u{1F9F9} Clean old approval buttons', 'set_rm:buttons');
   return kb;
 }
 
@@ -60,11 +72,16 @@ export class SettingsTopic {
   private bot: Bot<BotContext>;
   private chatId: number;
   private runtimeSettings: RuntimeSettings;
+  private getInactiveCount: () => number;
+  private lastText = '';
+  private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private static DEBOUNCE_MS = 300;
 
-  constructor(bot: Bot<BotContext>, chatId: number, runtimeSettings: RuntimeSettings) {
+  constructor(bot: Bot<BotContext>, chatId: number, runtimeSettings: RuntimeSettings, getInactiveCount: () => number = () => 0) {
     this.bot = bot;
     this.chatId = chatId;
     this.runtimeSettings = runtimeSettings;
+    this.getInactiveCount = getInactiveCount;
   }
 
   /**
@@ -76,13 +93,29 @@ export class SettingsTopic {
   async init(): Promise<number> {
     let threadId = this.runtimeSettings.settingsTopicId;
 
-    // Try to reopen existing topic
+    // Try to reopen existing topic (with retry for transient errors)
     if (threadId > 0) {
-      try {
-        await this.bot.api.reopenForumTopic(this.chatId, threadId);
-      } catch (err) {
-        // Topic may have been deleted -- fall through to create new
-        console.warn('Settings topic reopen failed, creating new:', err instanceof Error ? err.message : err);
+      let shouldRecreate = false;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          await this.bot.api.reopenForumTopic(this.chatId, threadId);
+          break; // Success
+        } catch (err) {
+          const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+          if (msg.includes('not modified') || msg.includes('not_modified')) {
+            break; // Already open — fine
+          }
+          if (msg.includes('not found') || msg.includes('not_found')) {
+            shouldRecreate = true;
+            break; // Permanent: topic is gone
+          }
+          // Transient error — retry once
+          if (attempt === 1) {
+            console.warn('Settings topic reopen failed after retry, assuming still valid:', msg);
+          }
+        }
+      }
+      if (shouldRecreate) {
         threadId = 0;
       }
     }
@@ -96,13 +129,16 @@ export class SettingsTopic {
     }
 
     // Send or update the settings message
+    const inactiveCount = this.getInactiveCount();
     const text = formatSettingsMessage(
       this.runtimeSettings.subagentOutput,
       this.runtimeSettings.defaultPermissionMode,
+      inactiveCount,
     );
     const keyboard = buildSettingsKeyboard(
       this.runtimeSettings.subagentOutput,
       this.runtimeSettings.defaultPermissionMode,
+      inactiveCount,
     );
 
     let messageId = this.runtimeSettings.settingsMessageId;
@@ -113,6 +149,7 @@ export class SettingsTopic {
           parse_mode: 'HTML',
           reply_markup: keyboard,
         });
+        this.lastText = text;
       } catch {
         // Message may have been deleted -- send new
         messageId = 0;
@@ -128,6 +165,7 @@ export class SettingsTopic {
       });
       messageId = msg.message_id;
       this.runtimeSettings.settingsMessageId = messageId;
+      this.lastText = text;
 
       // Pin the settings message silently
       try {
@@ -143,20 +181,41 @@ export class SettingsTopic {
   }
 
   /**
+   * Debounced refresh: collapses rapid successive calls into one API edit.
+   * Use this from callback handlers instead of refresh() directly.
+   */
+  requestRefresh(): void {
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+    }
+    this.debounceTimer = setTimeout(() => {
+      this.debounceTimer = null;
+      void this.refresh();
+    }, SettingsTopic.DEBOUNCE_MS);
+  }
+
+  /**
    * Refresh the settings message in-place after a toggle.
-   * Edits both the text content and the inline keyboard.
+   * Skips the API call if the text hasn't changed (dedup).
    */
   async refresh(): Promise<void> {
     const messageId = this.runtimeSettings.settingsMessageId;
     if (messageId === 0) return;
 
+    const inactiveCount = this.getInactiveCount();
     const text = formatSettingsMessage(
       this.runtimeSettings.subagentOutput,
       this.runtimeSettings.defaultPermissionMode,
+      inactiveCount,
     );
+
+    // Skip if text hasn't changed (keyboard is derived from the same values)
+    if (text === this.lastText) return;
+
     const keyboard = buildSettingsKeyboard(
       this.runtimeSettings.subagentOutput,
       this.runtimeSettings.defaultPermissionMode,
+      inactiveCount,
     );
 
     try {
@@ -164,10 +223,21 @@ export class SettingsTopic {
         parse_mode: 'HTML',
         reply_markup: keyboard,
       });
+      this.lastText = text;
     } catch (err) {
-      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+      if (err instanceof Error && err.message.includes('message is not modified')) {
+        this.lastText = text; // Sync cache
+      } else {
         console.warn('Failed to refresh settings message:', err instanceof Error ? err.message : err);
       }
+    }
+  }
+
+  /** Cancel pending debounce timer on shutdown */
+  destroy(): void {
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
     }
   }
 }
