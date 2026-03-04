@@ -23,7 +23,6 @@ import { installHooks } from './utils/install-hooks.js';
 import { TranscriptWatcher, calculateContextPercentage } from './monitoring/transcript-watcher.js';
 import { StatusMessage } from './monitoring/status-message.js';
 import { TopicStatusManager } from './monitoring/topic-status.js';
-import { SummaryTimer } from './monitoring/summary-timer.js';
 import { ClearDetector } from './monitoring/clear-detector.js';
 import { TaskChecklist } from './monitoring/task-checklist.js';
 import { escapeHtml, markdownToHtml, isProceduralNarration, convertCommandsForTelegram } from './utils/text.js';
@@ -44,7 +43,6 @@ import type { PreToolUsePayload } from './types/hooks.js';
 interface SessionMonitor {
   transcriptWatcher: TranscriptWatcher;
   statusMessage: StatusMessage;
-  summaryTimer: SummaryTimer;
   warned80: boolean;
   warned95: boolean;
 }
@@ -419,7 +417,6 @@ export async function main(): Promise<void> {
       const oldMonitor = monitors.get(oldSession.sessionId);
       if (oldMonitor) {
         oldMonitor.transcriptWatcher.stop();
-        oldMonitor.summaryTimer.stop();
         oldMonitor.statusMessage.destroy();
         monitors.delete(oldSession.sessionId);
       }
@@ -617,33 +614,10 @@ export async function main(): Promise<void> {
       },
     );
 
-    // Initialize summary timer
-    const summaryTimer = new SummaryTimer(
-      config.summaryIntervalMs,
-      () => {
-        const s = sessionStore.get(session.sessionId);
-        if (!s || s.status !== 'active') return null;
-        const suppressed = sessionStore.getSuppressedCounts(session.sessionId);
-        const files = s.filesChanged instanceof Set ? s.filesChanged.size : (s.filesChanged?.length || 0);
-        return {
-          cwd: s.cwd,
-          toolCallCount: s.toolCallCount,
-          filesChanged: files,
-          contextPercent: s.contextPercent || 0,
-          suppressedCounts: suppressed,
-          lastToolName: '',
-        };
-      },
-      (summaryText) => {
-        batcher.enqueue(session.threadId, summaryText);
-      },
-    );
-
     // Store monitor and start components
     monitors.set(session.sessionId, {
       transcriptWatcher,
       statusMessage: statusMsg,
-      summaryTimer,
       warned80: false,
       warned95: false,
     });
@@ -670,7 +644,6 @@ export async function main(): Promise<void> {
     }
 
     transcriptWatcher.start();
-    summaryTimer.start();
 
     // Phase 9: Register topic for status tracking and set initial green status
     topicStatusManager.registerTopic(session.threadId, session.topicName);
@@ -711,7 +684,6 @@ export async function main(): Promise<void> {
             const oldSession = sessionStore.get(oldSessionId);
             if (oldSession && oldSession.cwd === session.cwd) {
               monitor.transcriptWatcher.stop();
-              monitor.summaryTimer.stop();
               monitor.statusMessage.destroy();
               monitors.delete(oldSessionId);
 
@@ -841,7 +813,6 @@ export async function main(): Promise<void> {
         const monitor = monitors.get(session.sessionId);
         if (monitor) {
           monitor.transcriptWatcher.stop();
-          monitor.summaryTimer.stop();
           monitor.statusMessage.destroy();
           monitors.delete(session.sessionId);
         }
@@ -872,7 +843,6 @@ export async function main(): Promise<void> {
       const monitor = monitors.get(session.sessionId);
       if (monitor) {
         monitor.transcriptWatcher.stop();
-        monitor.summaryTimer.stop();
 
         // Send final status update showing "closed" state before destroying
         const finalData = buildStatusData(latest, '');
@@ -919,6 +889,9 @@ export async function main(): Promise<void> {
           }
         }
       }
+
+      // Guard: skip if threadId not yet assigned (race during topic creation)
+      if (!session.threadId) return;
 
       // Set topic to yellow (processing) -- debounced, won't spam API
       topicStatusManager.setStatus(session.threadId, 'yellow');
@@ -983,6 +956,9 @@ export async function main(): Promise<void> {
     // PreToolUse: informational message to Telegram (non-blocking).
     // Claude Code shows its local dialog. Telegram buttons send keystrokes via tmux.
     onPreToolUse: async (session, payload: PreToolUsePayload) => {
+      // Guard: skip if threadId not yet assigned (race during topic creation)
+      if (!session.threadId) return;
+
       // Stash description from Agent/Task tool for SubagentStart correlation
       if (payload.tool_name === 'Agent' || payload.tool_name === 'Task') {
         const desc = (payload.tool_input.description as string)
@@ -1242,7 +1218,6 @@ export async function main(): Promise<void> {
     // Stop all monitoring instances
     for (const [, monitor] of monitors) {
       monitor.transcriptWatcher.stop();
-      monitor.summaryTimer.stop();
       monitor.statusMessage.destroy();
     }
     monitors.clear();

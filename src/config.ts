@@ -44,7 +44,6 @@ export function loadConfig(): AppConfig {
     dataDir: process.env.DATA_DIR || './data',
     defaultVerbosity: parseVerbosityTier(process.env.VERBOSITY_DEFAULT),
     idleTimeoutMs: parseInt(process.env.IDLE_TIMEOUT_MS || '120000', 10),
-    summaryIntervalMs: parseInt(process.env.SUMMARY_INTERVAL_MS || '300000', 10),
     approvalTimeoutMs: parseInt(process.env.APPROVAL_TIMEOUT_MS || '300000', 10),
     autoApprove: process.env.AUTO_APPROVE === 'true',
     subagentOutput: process.env.SUBAGENT_VISIBLE === 'true',

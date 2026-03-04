@@ -19,9 +19,6 @@ export interface AppConfig {
   defaultVerbosity: VerbosityTier;
   /** Idle alert timeout in milliseconds (default: 120000 = 2 minutes) */
   idleTimeoutMs: number;
-  /** Periodic summary interval in milliseconds (default: 300000 = 5 minutes) */
-  summaryIntervalMs: number;
-
   // --- Phase 3 control config ---
 
   /** Approval timeout in milliseconds before auto-deny (default: 300000 = 5 minutes) */
