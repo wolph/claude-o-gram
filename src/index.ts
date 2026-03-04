@@ -242,23 +242,45 @@ export async function main(): Promise<void> {
   });
 
   // 7d. Bypass mode batcher: accumulates auto-approved tool calls, flushes every 10s
+  const makeBypassKeyboard = (messageId: number, expanded: boolean) =>
+    new InlineKeyboard().text(
+      expanded ? '\u25BE Hide details' : '\u25B8 Show details',
+      `bp:${messageId}`,
+    );
+
   const bypassBatcher = new BypassBatcher(
     {
-      send: async (threadId, html) => {
+      send: async (threadId, html, expanded) => {
         const msg = await bot.api.sendMessage(config.telegramChatId, html, {
           message_thread_id: threadId,
           parse_mode: 'HTML',
         });
+        // Add expand/collapse button after send (need messageId for callback data)
+        try {
+          await bot.api.editMessageReplyMarkup(config.telegramChatId, msg.message_id, {
+            reply_markup: makeBypassKeyboard(msg.message_id, expanded),
+          });
+        } catch {
+          // Non-critical — button just won't appear
+        }
         return msg.message_id;
       },
-      edit: async (messageId, html) => {
+      edit: async (messageId, html, expanded) => {
         await bot.api.editMessageText(config.telegramChatId, messageId, html, {
           parse_mode: 'HTML',
+          reply_markup: makeBypassKeyboard(messageId, expanded),
         });
       },
     },
     formatBypassBatch,
   );
+
+  // Bypass batch expand/collapse callback handler
+  bot.callbackQuery(/^bp:(\d+)$/, async (ctx) => {
+    const messageId = parseInt(ctx.match[1], 10);
+    await ctx.answerCallbackQuery();
+    await bypassBatcher.toggleExpand(messageId);
+  });
 
   // 7e. Task checklist: live-updating task progress per session
   const taskChecklist = new TaskChecklist({

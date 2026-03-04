@@ -693,12 +693,68 @@ function formatDuration(ms: number): string {
 
 /**
  * Format a batch of auto-approved tool calls for bypass mode.
- * Tree-style display similar to Claude Code's terminal output.
+ *
+ * When collapsed (default): shows count with tool name breakdown.
+ * When expanded: shows full tree with per-tool previews.
  */
 export function formatBypassBatch(
   entries: Array<{ toolName: string; toolInput: Record<string, unknown> }>,
+  expanded = false,
 ): string {
-  return `\u26A1 ${entries.length} auto-approved tool call${entries.length === 1 ? '' : 's'}`;
+  if (!expanded) {
+    // Summary with tool name counts: "⚡ 6 auto-approved (Grep×3, Read×2, Bash)"
+    const counts = new Map<string, number>();
+    for (const e of entries) {
+      counts.set(e.toolName, (counts.get(e.toolName) || 0) + 1);
+    }
+    const parts: string[] = [];
+    for (const [name, count] of counts) {
+      parts.push(count > 1 ? `${name}\u00D7${count}` : name);
+    }
+    return `\u26A1 ${entries.length} auto-approved (${parts.join(', ')})`;
+  }
+
+  // Expanded: full tree with per-tool previews
+  const lines: string[] = [`\u26A1 <b>${entries.length} auto-approved</b>`];
+  for (let i = 0; i < entries.length; i++) {
+    const { toolName, toolInput } = entries[i];
+    const isLast = i === entries.length - 1;
+    const prefix = isLast ? '\u2514' : '\u251C';
+    const preview = bypassPreview(toolName, toolInput);
+    lines.push(`${prefix} ${escapeHtml(preview)}`);
+  }
+  return lines.join('\n');
+}
+
+/** Compact one-liner for a tool call in bypass batch expanded view */
+function bypassPreview(toolName: string, input: Record<string, unknown>): string {
+  switch (toolName) {
+    case 'Read': {
+      const p = (input.file_path as string) || (input.path as string) || '';
+      return `Read(${smartPath(p)})`;
+    }
+    case 'Glob': return `Glob("${(input.pattern as string) || ''}")`;
+    case 'Grep': {
+      const pattern = (input.pattern as string) || '';
+      const path = (input.path as string) || '';
+      return path ? `Grep("${pattern}", ${smartPath(path)})` : `Grep("${pattern}")`;
+    }
+    case 'Edit':
+    case 'MultiEdit': {
+      const p = (input.file_path as string) || (input.path as string) || '';
+      return `Edit(${smartPath(p)})`;
+    }
+    case 'Write': {
+      const p = (input.file_path as string) || (input.path as string) || '';
+      return `Write(${smartPath(p)})`;
+    }
+    case 'Bash':
+    case 'BashBackground': {
+      const cmd = shortenCommand((input.command as string) || '');
+      return `Bash(${cmd.split('\n')[0].slice(0, 80)})`;
+    }
+    default: return toolName;
+  }
 }
 
 // ---------------------------------------------------------------------------
