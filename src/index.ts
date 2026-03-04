@@ -1037,7 +1037,7 @@ export async function main(): Promise<void> {
       await bot.api.editMessageReplyMarkup(
         config.telegramChatId,
         entry.messageId,
-        { reply_markup: undefined },
+        { reply_markup: { inline_keyboard: [] } },
       );
     } catch {
       // Best-effort: message may already be edited or too old to modify

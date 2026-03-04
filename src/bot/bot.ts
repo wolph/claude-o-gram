@@ -128,8 +128,12 @@ export async function createBot(
     if (!pending) {
       await ctx.answerCallbackQuery({ text: 'Already resolved.', show_alert: true });
       // Clean up orphaned buttons — strip keyboard (don't modify text to avoid HTML issues)
+      // Note: must pass an empty inline_keyboard array, NOT undefined.
+      // grammY's JSON serializer strips undefined values, so reply_markup: undefined
+      // results in the field being omitted from the request entirely, which tells
+      // Telegram "don't change the markup" rather than "remove the markup".
       try {
-        await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+        await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } });
       } catch {
         // Best-effort: message may already be edited or too old
       }
@@ -174,8 +178,9 @@ export async function createBot(
     if (!pending) {
       await ctx.answerCallbackQuery({ text: 'Already resolved.', show_alert: true });
       // Clean up orphaned buttons — strip keyboard (don't modify text to avoid HTML issues)
+      // See approve handler above for why { inline_keyboard: [] } is needed instead of undefined.
       try {
-        await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+        await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } });
       } catch {
         // Best-effort: message may already be edited or too old
       }
