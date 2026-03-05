@@ -46,6 +46,16 @@ export async function createBot(
   bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 60 }));
   bot.api.config.use(apiThrottler());
 
+  // SECURITY: Global middleware — only the bot owner can interact with the bot.
+  // This gates ALL commands, callback queries, text messages, and any other updates.
+  // Silently drops updates from unauthorized users (no error reply to avoid leaking info).
+  bot.use(async (ctx, next) => {
+    if (ctx.from?.id !== config.botOwnerId) {
+      return; // Silently drop — unauthorized user
+    }
+    return next();
+  });
+
   // Set default parse_mode to HTML via API transformer
   // @grammyjs/parse-mode v2 no longer exports a parseMode transformer,
   // so we implement a simple one that injects parse_mode into all applicable API calls.
@@ -267,9 +277,8 @@ export async function createBot(
 
   // --- Phase 12: Settings callback query handlers ---
 
-  /** Check if the user is authorized to change settings */
+  /** Check if the user is authorized to change settings (defense-in-depth; global middleware already blocks) */
   function isSettingsAuthorized(ctx: Context): boolean {
-    if (!config.botOwnerId) return true; // No owner configured -- allow all
     return ctx.from?.id === config.botOwnerId;
   }
 

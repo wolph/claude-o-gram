@@ -19,6 +19,9 @@ export function loadConfig(): AppConfig {
   if (!process.env.TELEGRAM_CHAT_ID) {
     missing.push('TELEGRAM_CHAT_ID');
   }
+  if (!process.env.BOT_OWNER_ID) {
+    missing.push('BOT_OWNER_ID');
+  }
   if (missing.length > 0) {
     console.error('');
     console.error('ERROR: Missing required environment variables:');
@@ -47,6 +50,6 @@ export function loadConfig(): AppConfig {
     approvalTimeoutMs: parseInt(process.env.APPROVAL_TIMEOUT_MS || '300000', 10),
     autoApprove: process.env.AUTO_APPROVE === 'true',
     subagentOutput: process.env.SUBAGENT_VISIBLE === 'true',
-    botOwnerId: process.env.BOT_OWNER_ID ? parseInt(process.env.BOT_OWNER_ID, 10) : undefined,
+    botOwnerId: parseInt(process.env.BOT_OWNER_ID!, 10),
   };
 }

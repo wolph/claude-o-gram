@@ -33,6 +33,6 @@ export interface AppConfig {
 
   // --- Phase 12 settings config ---
 
-  /** Telegram user ID of the bot owner. If set, only this user can change settings. */
-  botOwnerId?: number;
+  /** Telegram user ID of the bot owner. Only this user can interact with the bot. Required. */
+  botOwnerId: number;
 }
