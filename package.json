@@ -26,7 +26,7 @@
     "@grammyjs/parse-mode": "^2.2.1",
     "@grammyjs/transformer-throttler": "^1.2.1",
     "dotenv": "^17.3.1",
-    "fastify": "^5.7.4",
+    "fastify": "^5.8.1",
     "grammy": "^1.40.1",
     "lru-cache": "^11.2.6",
     "pino": "^10.3.1",
