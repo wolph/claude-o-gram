@@ -1,4 +1,4 @@
-# Claude Code Telegram Bridge
+# Claude-o-Gram
 
 A Telegram bot that mirrors Claude Code sessions to forum topics, giving you full remote monitoring and control from your phone.
 

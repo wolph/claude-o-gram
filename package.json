@@ -1,7 +1,7 @@
 {
   "name": "claude-o-gram",
   "version": "1.0.0",
-  "description": "Telegram bot that mirrors Claude Code sessions to forum topics",
+  "description": "Claude-o-Gram: A Telegram bot that mirrors Claude Code sessions to forum topics",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {

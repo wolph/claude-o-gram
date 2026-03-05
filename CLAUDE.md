@@ -1,4 +1,4 @@
-# Claude Code Telegram Bridge — Developer Guide
+# Claude-o-Gram — Developer Guide
 
 ## Quick Reference
 
