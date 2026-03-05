@@ -3,7 +3,6 @@ import { autoRetry } from '@grammyjs/auto-retry';
 import { apiThrottler } from '@grammyjs/transformer-throttler';
 import type { AppConfig } from '../types/config.js';
 import type { SessionStore } from '../sessions/session-store.js';
-import type { VerbosityTier } from '../types/monitoring.js';
 import type { ApprovalManager } from '../control/approval-manager.js';
 import type { InputRouter } from '../input/input-router.js';
 import type { CommandRegistry } from './command-registry.js';

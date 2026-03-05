@@ -6,7 +6,6 @@
  * and session cleanup. No Telegram dependencies -- pure state tracking.
  */
 
-import type { SubagentStartPayload, SubagentStopPayload } from '../types/hooks.js';
 
 /** Represents an active subagent being tracked */
 export interface ActiveAgent {
