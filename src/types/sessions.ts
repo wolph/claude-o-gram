@@ -37,5 +37,13 @@ export interface SessionInfo {
   contextPercent: number;
   /** ISO timestamp of the last hook event, for idle detection */
   lastActivityAt: string;
+  /** Permission mode from the original CLI session (e.g., 'bypassPermissions', 'default') */
+  permissionMode?: string;
 
+  // --- Input delivery fields ---
+
+  /** Detected input method for this session */
+  inputMethod?: 'tmux' | 'fifo' | 'sdk-resume';
+  /** tmux pane ID (e.g. "%53") when inputMethod is 'tmux' */
+  tmuxTarget?: string;
 }

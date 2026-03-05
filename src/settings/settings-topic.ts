@@ -151,7 +151,12 @@ export class SettingsTopic {
         });
         this.lastText = text;
       } catch {
-        // Message may have been deleted -- send new
+        // Message may have been deleted or is in a different topic — try to clean it up
+        try {
+          await this.bot.api.deleteMessage(this.chatId, messageId);
+        } catch {
+          // Already gone — fine
+        }
         messageId = 0;
       }
     }

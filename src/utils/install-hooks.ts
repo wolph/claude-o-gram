@@ -54,9 +54,9 @@ exit 0
   // Define hook configuration for our hook events
   const baseUrl = `http://127.0.0.1:${port}`;
 
-  // PERM-01: PreToolUse timeout set to 24 hours (86400s) for indefinite wait.
-  // Approval prompts wait until user decides -- no auto-deny timeout.
-  const preToolUseTimeoutSec = 86400;
+  // PreToolUse hook is non-blocking (returns {} immediately, informational only).
+  // Local Claude Code dialog handles the actual permission decision.
+  const preToolUseTimeoutSec = 10;
 
   const hookConfig: Record<string, unknown> = {
     SessionStart: [

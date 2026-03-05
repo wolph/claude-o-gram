@@ -11,8 +11,6 @@ import type {
   SubagentStopPayload,
 } from '../types/hooks.js';
 import type { HookHandlers } from './handlers.js';
-import type { PermissionModeManager } from '../control/permission-modes.js';
-
 /**
  * Create and configure the Fastify HTTP server with hook routes.
  *
@@ -25,8 +23,6 @@ import type { PermissionModeManager } from '../control/permission-modes.js';
 export async function createHookServer(
   config: AppConfig,
   handlers: HookHandlers,
-  permissionModeManager?: PermissionModeManager,
-  onAutoApproved?: (sessionId: string, toolName: string, toolInput: Record<string, unknown>, toolUseId: string) => void,
   onAgentToolDetected?: (sessionId: string, toolName: string, toolInput: Record<string, unknown>) => void,
 ): Promise<FastifyInstance> {
   const fastify = Fastify({ logger: true });
@@ -100,9 +96,10 @@ export async function createHookServer(
   );
 
   // POST /hooks/pre-tool-use
-  // BLOCKING: Unlike other hooks, this route awaits the handler.
-  // The HTTP connection stays open until the user approves/denies or timeout fires.
-  // Claude Code waits for the response before proceeding with the tool call.
+  // NON-BLOCKING: Returns {} immediately (no permission decision).
+  // Claude Code shows its local permission dialog. The bot posts an
+  // informational message to Telegram; Approve/Deny buttons send keystrokes
+  // via tmux as a convenience.
   fastify.post<{ Body: PreToolUsePayload }>(
     '/hooks/pre-tool-use',
     async (request) => {
@@ -113,72 +110,13 @@ export async function createHookServer(
         onAgentToolDetected(payload.session_id, payload.tool_name, payload.tool_input);
       }
 
-      // AUTO_APPROVE bypass: skip approval, return allow immediately
-      if (config.autoApprove) {
-        return {
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse',
-            permissionDecision: 'allow',
-            permissionDecisionReason: 'Auto-approved (AUTO_APPROVE=true)',
-          },
-        };
-      }
-
-      // If permission_mode indicates Claude auto-approves, mirror that behavior.
-      // Don't interrupt with approval prompts for tools Claude itself wouldn't prompt for.
-      if (
-        payload.permission_mode === 'bypassPermissions' ||
-        payload.permission_mode === 'dontAsk'
-      ) {
-        return {
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse',
-            permissionDecision: 'allow',
-            permissionDecisionReason: 'Auto-approved (permission mode)',
-          },
-        };
-      }
-
-      // Permission mode auto-approve: check BEFORE sending to Telegram
-      if (permissionModeManager) {
-        const session_id = payload.session_id;
-        if (permissionModeManager.shouldAutoApprove(session_id, payload.tool_name, payload.tool_input)) {
-          // PERM-08: Log to stdout before decision
-          console.log(`[PERM] Auto-approving ${payload.tool_name} (${permissionModeManager.getMode(session_id).mode} mode) for session ${session_id}`);
-          permissionModeManager.incrementAutoApproved(session_id);
-          // Notify index.ts to post the lightning display line
-          if (onAutoApproved) {
-            onAutoApproved(session_id, payload.tool_name, payload.tool_input, payload.tool_use_id);
-          }
-          // PERM-08: Log to stdout after decision
-          console.log(`[PERM] Auto-approved ${payload.tool_name} (tool_use_id: ${payload.tool_use_id})`);
-          return {
-            hookSpecificOutput: {
-              hookEventName: 'PreToolUse',
-              permissionDecision: 'allow',
-              permissionDecisionReason: `Auto-approved (${permissionModeManager.getMode(session_id).mode} mode)`,
-            },
-          };
-        }
-      }
-
-      // PERM-08: Log manual approval prompt
-      console.log(`[PERM] Prompting user for ${payload.tool_name} (tool_use_id: ${payload.tool_use_id})`);
-
-      try {
-        // Delegate to handler -- THIS AWAITS until user decides or timeout
-        return await handlers.handlePreToolUse(payload);
-      } catch (err) {
+      // Fire and forget — post informational message to Telegram asynchronously
+      handlers.handlePreToolUse(payload).catch((err) => {
         request.log.error(err, 'Error handling pre-tool-use hook');
-        // On error, allow the tool call (non-blocking error behavior)
-        return {
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse',
-            permissionDecision: 'allow',
-            permissionDecisionReason: 'Auto-approved (hook error)',
-          },
-        };
-      }
+      });
+
+      // Return empty — no permission decision, let Claude Code show local dialog
+      return {};
     }
   );
 

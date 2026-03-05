@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node /home/cryptobot/.claude/get-shit-done/bin/gsd-tools.cjs commit \"docs: initialize project\" --files .planning/PROJECT.md)",
+      "Bash(node /home/cryptobot/.claude/get-shit-done/bin/gsd-tools.cjs commit \"chore: add project config\" --files .planning/config.json)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:core.telegram.org)",
+      "WebFetch(domain:grammy.dev)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:kentgigger.com)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run:*)"
+    ]
+  }
+}

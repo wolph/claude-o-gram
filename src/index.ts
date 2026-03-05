@@ -935,11 +935,12 @@ export async function main(): Promise<void> {
 
       // Suppress permission_prompt notifications in bypass mode — they're misleading
       const permMode = payload.permission_mode || session.permissionMode;
-      if (
-        payload.notification_type === 'permission_prompt'
-        && (permMode === 'bypassPermissions' || permMode === 'dontAsk')
-      ) {
-        return;
+      if (payload.notification_type === 'permission_prompt') {
+        if (permMode === 'bypassPermissions' || permMode === 'dontAsk') {
+          return;
+        }
+        // Log unsuppressed permission prompts to diagnose bypass mismatches
+        console.warn(`[permission_prompt] not suppressed — permMode=${JSON.stringify(permMode)}, payload.permission_mode=${JSON.stringify(payload.permission_mode)}, session.permissionMode=${JSON.stringify(session.permissionMode)}`);
       }
 
       const html = formatNotification(payload);

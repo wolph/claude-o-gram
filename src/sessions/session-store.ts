@@ -24,14 +24,16 @@ export class SessionStore {
     return this.sessions.get(sessionId);
   }
 
-  /** Find a session by its Telegram thread ID */
+  /** Find a session by its Telegram thread ID. Prefers active over closed. */
   getByThreadId(threadId: number): SessionInfo | undefined {
+    let fallback: SessionInfo | undefined;
     for (const session of this.sessions.values()) {
       if (session.threadId === threadId) {
-        return session;
+        if (session.status === 'active') return session;
+        if (!fallback) fallback = session;
       }
     }
-    return undefined;
+    return fallback;
   }
 
   /**
@@ -212,6 +214,19 @@ export class SessionStore {
       }
     }
     return best;
+  }
+
+  /** Get all closed sessions */
+  getClosedSessions(): SessionInfo[] {
+    return Array.from(this.sessions.values()).filter(s => s.status === 'closed');
+  }
+
+  /** Delete sessions by ID and persist */
+  deleteSessions(sessionIds: string[]): void {
+    for (const id of sessionIds) {
+      this.sessions.delete(id);
+    }
+    this.save();
   }
 
   /** Get all sessions (active and closed) */

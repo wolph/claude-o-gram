@@ -60,7 +60,11 @@ export class CommandRegistry {
     const userCommandsDir = join(homedir(), '.claude', 'commands');
     this.scanCommandDir(userCommandsDir, 'user');
 
-    // 3. Plugin commands from enabled plugins
+    // 3. User skills from ~/.claude/skills/
+    const userSkillsDir = join(homedir(), '.claude', 'skills');
+    this.scanSkillDir(userSkillsDir, 'user');
+
+    // 4. Plugin commands and skills from enabled plugins
     this.scanPluginCommands();
   }
 
@@ -149,6 +153,22 @@ export class CommandRegistry {
     }
   }
 
+  /** Scan a directory for skill subdirectories containing SKILL.md files */
+  private scanSkillDir(dir: string, source: string, namespace?: string): void {
+    if (!existsSync(dir)) return;
+
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const skillFile = join(dir, entry.name, 'SKILL.md');
+      if (!existsSync(skillFile)) continue;
+
+      const skillName = entry.name;
+      const claudeName = namespace ? `${namespace}:${skillName}` : skillName;
+      const desc = this.extractFrontmatter(skillFile) || claudeName;
+      this.addEntry(claudeName, claudeName, desc, source);
+    }
+  }
+
   /** Scan enabled plugin command directories */
   private scanPluginCommands(): void {
     const pluginsFile = join(homedir(), '.claude', 'plugins', 'installed_plugins.json');
@@ -173,10 +193,12 @@ export class CommandRegistry {
         const versions = plugins[pluginId];
         if (!versions || versions.length === 0) continue;
         const latest = versions[versions.length - 1];
-        const commandsDir = join(latest.installPath, 'commands');
         // Extract short plugin name: "superpowers@claude-plugins-official" → "superpowers"
         const pluginName = pluginId.split('@')[0];
+        const commandsDir = join(latest.installPath, 'commands');
         this.scanCommandDir(commandsDir, 'plugin', pluginName);
+        const skillsDir = join(latest.installPath, 'skills');
+        this.scanSkillDir(skillsDir, 'plugin', pluginName);
       }
     } catch (err) {
       console.warn('Failed to scan plugin commands:', err instanceof Error ? err.message : err);

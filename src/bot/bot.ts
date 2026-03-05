@@ -482,11 +482,11 @@ export async function createBot(
     if (!session) return; // Not a managed session topic
     if (session.status !== 'active') return; // Session is closed
 
-    // Build input text, including quoted message context if replying to a specific message
+    // Include quoted message context when replying to a specific message
     let text = ctx.message.text;
     const replied = ctx.message.reply_to_message;
     if (replied && 'text' in replied && replied.text) {
-      text = `[Quoting: "${replied.text}"]\n\n${text}`;
+      text = `> ${replied.text.split('\n').join('\n> ')}\n\n${text}`;
     }
 
     const result = await inputRouter.send(session.sessionId, text);

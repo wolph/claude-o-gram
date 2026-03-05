@@ -23,11 +23,11 @@ import { escapeHtml } from '../utils/text.js';
  * This decouples session logic from Telegram, making it testable and wirable in Plan 04.
  */
 export interface HookCallbacks {
-  onSessionStart(session: SessionInfo, source: 'new' | 'resume' | 'clear'): Promise<void>;
+  onSessionStart(session: SessionInfo, source: 'new' | 'resume' | 'clear' | 'reuse'): Promise<void>;
   onSessionEnd(session: SessionInfo, reason: string): Promise<void>;
   onToolUse(session: SessionInfo, payload: PostToolUsePayload): Promise<void>;
   onNotification(session: SessionInfo, payload: NotificationPayload): Promise<void>;
-  onPreToolUse(session: SessionInfo, payload: PreToolUsePayload): Promise<Record<string, unknown>>;
+  onPreToolUse(session: SessionInfo, payload: PreToolUsePayload): Promise<void>;
   onStop(session: SessionInfo, payload: StopPayload): Promise<void>;
   onBackfillSummary(session: SessionInfo, summary: string): Promise<void>;
   onSubagentStart(session: SessionInfo, payload: SubagentStartPayload): Promise<void>;
@@ -219,6 +219,8 @@ export class HookHandlers {
           transcriptPath: payload.transcript_path,
           permissionMode: payload.permission_mode ?? existing.permissionMode,
         });
+        // Clear old session's threadId to prevent getByThreadId collision
+        this.sessionStore.updateThreadId(existing.sessionId, 0);
         await this.callbacks.onSessionStart(
           this.sessionStore.get(payload.session_id)!,
           'resume'
@@ -254,6 +256,11 @@ export class HookHandlers {
           contextPercent: 0,
           permissionMode: payload.permission_mode ?? prior.permissionMode,
         });
+
+        // Clear old session's threadId to prevent getByThreadId from returning
+        // the stale closed entry instead of the new active one
+        this.sessionStore.updateThreadId(prior.sessionId, 0);
+
         await this.callbacks.onSessionStart(
           this.sessionStore.get(payload.session_id)!,
           'clear'
@@ -264,12 +271,46 @@ export class HookHandlers {
       // (handles edge cases where the bot restarted between clear events)
     }
 
+    // Topic reuse: check for a recently closed session with the same cwd.
+    // If found, reuse its topic instead of creating a new one (prevents topic proliferation).
+    // Only reuse when no other active session exists for this cwd (simultaneous sessions
+    // still get separate topics).
+    const existingActive = this.sessionStore.getActiveByCwd(payload.cwd);
+    if (!existingActive) {
+      const closedSession = this.sessionStore.getRecentlyClosedByCwd(payload.cwd);
+      if (closedSession && closedSession.threadId > 0) {
+        const reuseNow = new Date().toISOString();
+        this.sessionStore.set(payload.session_id, {
+          ...closedSession,
+          sessionId: payload.session_id,
+          threadId: closedSession.threadId,
+          topicName: closedSession.topicName,
+          transcriptPath: payload.transcript_path,
+          status: 'active',
+          startedAt: reuseNow,
+          lastActivityAt: reuseNow,
+          toolCallCount: 0,
+          filesChanged: new Set<string>(),
+          suppressedCounts: {},
+          contextPercent: 0,
+          statusMessageId: 0,
+          permissionMode: payload.permission_mode ?? closedSession.permissionMode,
+        });
+        // Clear old session's threadId to prevent getByThreadId collision
+        this.sessionStore.updateThreadId(closedSession.sessionId, 0);
+        await this.callbacks.onSessionStart(
+          this.sessionStore.get(payload.session_id)!,
+          'reuse'
+        );
+        return;
+      }
+    }
+
     // Derive topic name from cwd basename
     let topicName = basename(payload.cwd);
 
     // Duplicate detection: if another active session exists for the same cwd,
     // append start timestamp for disambiguation
-    const existingActive = this.sessionStore.getActiveByCwd(payload.cwd);
     if (existingActive) {
       const now = new Date();
       const hours = String(now.getHours()).padStart(2, '0');
@@ -362,23 +403,14 @@ export class HookHandlers {
 
   /**
    * Handle a PreToolUse hook event.
-   * BLOCKING: Returns the response body that becomes the HTTP response.
-   * The connection stays open until the user decides.
+   * NON-BLOCKING: Posts informational message to Telegram. Does not return
+   * a permission decision — Claude Code shows its local dialog.
    */
-  async handlePreToolUse(payload: PreToolUsePayload): Promise<Record<string, unknown>> {
+  async handlePreToolUse(payload: PreToolUsePayload): Promise<void> {
     const session = await this.ensureSession(payload);
-    if (!session) {
-      // ensureSession failed (e.g. onSessionStart threw) -- allow the tool call
-      return {
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'allow',
-          permissionDecisionReason: 'Auto-approved (session registration failed)',
-        },
-      };
-    }
+    if (!session) return; // ensureSession failed — Claude Code handles locally
     this.sessionStore.updateLastActivity(payload.session_id);
-    return this.callbacks.onPreToolUse(session, payload);
+    await this.callbacks.onPreToolUse(session, payload);
   }
 
   /**

@@ -36,6 +36,17 @@ export class TopicManager {
     }
   }
 
+  /** Delete a forum topic permanently. Best-effort: logs errors. */
+  async deleteTopic(threadId: number): Promise<boolean> {
+    try {
+      await this.bot.api.deleteForumTopic(this.chatId, threadId);
+      return true;
+    } catch (err) {
+      console.warn('Failed to delete forum topic:', err instanceof Error ? err.message : err);
+      return false;
+    }
+  }
+
   /**
    * Close a topic with done status emoji.
    * Uses shared STATUS_EMOJIS.done constant for the checkmark prefix.
