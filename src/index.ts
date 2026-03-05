@@ -20,6 +20,7 @@ import {
 } from './bot/formatter.js';
 import { SubagentTracker } from './monitoring/subagent-tracker.js';
 import { installHooks } from './utils/install-hooks.js';
+import { getOrCreateHookSecret } from './utils/hook-secret.js';
 import { TranscriptWatcher, calculateContextPercentage } from './monitoring/transcript-watcher.js';
 import { StatusMessage } from './monitoring/status-message.js';
 import { TopicStatusManager } from './monitoring/topic-status.js';
@@ -85,8 +86,9 @@ export async function main(): Promise<void> {
   // 1. Load config (validates required env vars)
   const config = loadConfig();
 
-  // 2. Auto-install hooks into Claude Code settings (idempotent)
-  installHooks(config.hookServerPort);
+  // 2. Generate/load hook auth secret and install hooks
+  const hookSecret = getOrCreateHookSecret();
+  installHooks(config.hookServerPort, hookSecret);
 
   // 3. Initialize session store
   const sessionStore = new SessionStore(
@@ -1064,7 +1066,7 @@ export async function main(): Promise<void> {
   //     (gray sweep, reconnection, settings init) that could take seconds.
   //     Hooks are already installed in settings.json (step 2), so any Claude
   //     Code session that fires a hook during startup needs a listening server.
-  const server = await createHookServer(config, handlers,
+  const server = await createHookServer(config, handlers, hookSecret,
     // onAgentToolDetected: stash Agent/Task description for SubagentStart correlation
     (sessionId, toolName, toolInput) => {
       const desc = (toolInput.description as string) || (toolInput.prompt as string) || '';

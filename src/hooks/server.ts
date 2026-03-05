@@ -23,9 +23,24 @@ import type { HookHandlers } from './handlers.js';
 export async function createHookServer(
   config: AppConfig,
   handlers: HookHandlers,
+  hookSecret: string,
   onAgentToolDetected?: (sessionId: string, toolName: string, toolInput: Record<string, unknown>) => void,
 ): Promise<FastifyInstance> {
   const fastify = Fastify({ logger: true });
+
+  // SECURITY: Validate Bearer token on all /hooks/* routes.
+  // Rejects requests from other local processes that don't know the secret.
+  // The /health endpoint is excluded (registered after this hook applies).
+  fastify.addHook('onRequest', async (request, reply) => {
+    // Skip auth for non-hook routes (e.g. /health)
+    if (!request.url.startsWith('/hooks/')) return;
+
+    const auth = request.headers.authorization;
+    if (!auth || auth !== `Bearer ${hookSecret}`) {
+      reply.code(401).send({ error: 'Unauthorized' });
+      return;
+    }
+  });
 
   // POST /hooks/session-start
   fastify.post<{ Body: SessionStartPayload }>(

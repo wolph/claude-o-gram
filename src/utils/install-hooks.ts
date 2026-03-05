@@ -1,6 +1,7 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { HOOK_SECRET_ENV_VAR } from './hook-secret.js';
 
 /**
  * Auto-install Claude Code HTTP hooks into ~/.claude/settings.json.
@@ -9,10 +10,14 @@ import { homedir } from 'node:os';
  * pointing at the local Fastify server. Preserves any existing hooks
  * for other event types. Idempotent -- safe to call on every startup.
  *
+ * All HTTP hooks include an Authorization header with a Bearer token
+ * that the Fastify server validates, preventing other local processes
+ * from forging hook payloads.
+ *
  * Per user decision: "Bot auto-installs Claude Code hooks by writing
  * hook config to Claude Code's settings on first run."
  */
-export function installHooks(port: number): void {
+export function installHooks(port: number, secret: string): void {
   const claudeDir = join(homedir(), '.claude');
   const settingsPath = join(claudeDir, 'settings.json');
 
@@ -27,14 +32,18 @@ export function installHooks(port: number): void {
     mkdirSync(hookDir, { recursive: true });
   }
   const scriptPath = join(hookDir, 'subagent-start.sh');
+  // Include literal Bearer token in curl command (script is 0o755, readable by owner)
   const scriptContent = `#!/bin/bash
 # Bridge: SubagentStart command hook -> HTTP server
 curl -s --max-time 5 -X POST "http://127.0.0.1:${port}/hooks/subagent-start" \\
   -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${secret}" \\
   -d @- < /dev/stdin
 exit 0
 `;
-  writeFileSync(scriptPath, scriptContent, { mode: 0o755 });
+  writeFileSync(scriptPath, scriptContent, { mode: 0o700 });
+  // Ensure permissions even if file already existed with different mode
+  chmodSync(scriptPath, 0o700);
 
   // Read existing settings.json or start with empty object
   let settings: Record<string, unknown> = {};
@@ -54,6 +63,19 @@ exit 0
   // Define hook configuration for our hook events
   const baseUrl = `http://127.0.0.1:${port}`;
 
+  // Auth headers for HTTP hooks — reference env var, resolved by Claude Code
+  const authHeaders = { Authorization: `Bearer $${HOOK_SECRET_ENV_VAR}` };
+  const allowedEnvVars = [HOOK_SECRET_ENV_VAR];
+
+  // Helper to build an HTTP hook entry with auth
+  const httpHook = (path: string, timeout: number) => ({
+    type: 'http' as const,
+    url: `${baseUrl}${path}`,
+    timeout,
+    headers: authHeaders,
+    allowedEnvVars,
+  });
+
   // PreToolUse hook is non-blocking (returns {} immediately, informational only).
   // Local Claude Code dialog handles the actual permission decision.
   const preToolUseTimeoutSec = 10;
@@ -62,49 +84,37 @@ exit 0
     SessionStart: [
       {
         matcher: '',
-        hooks: [
-          { type: 'http', url: `${baseUrl}/hooks/session-start`, timeout: 10 },
-        ],
+        hooks: [httpHook('/hooks/session-start', 10)],
       },
     ],
     SessionEnd: [
       {
         matcher: '',
-        hooks: [
-          { type: 'http', url: `${baseUrl}/hooks/session-end`, timeout: 10 },
-        ],
+        hooks: [httpHook('/hooks/session-end', 10)],
       },
     ],
     PostToolUse: [
       {
         matcher: '',
-        hooks: [
-          { type: 'http', url: `${baseUrl}/hooks/post-tool-use`, timeout: 10 },
-        ],
+        hooks: [httpHook('/hooks/post-tool-use', 10)],
       },
     ],
     Notification: [
       {
         matcher: '',
-        hooks: [
-          { type: 'http', url: `${baseUrl}/hooks/notification`, timeout: 10 },
-        ],
+        hooks: [httpHook('/hooks/notification', 10)],
       },
     ],
     PreToolUse: [
       {
         matcher: '',
-        hooks: [
-          { type: 'http', url: `${baseUrl}/hooks/pre-tool-use`, timeout: preToolUseTimeoutSec },
-        ],
+        hooks: [httpHook('/hooks/pre-tool-use', preToolUseTimeoutSec)],
       },
     ],
     Stop: [
       {
         matcher: '',
-        hooks: [
-          { type: 'http', url: `${baseUrl}/hooks/stop`, timeout: 10 },
-        ],
+        hooks: [httpHook('/hooks/stop', 10)],
       },
     ],
     SubagentStart: [
@@ -118,9 +128,7 @@ exit 0
     SubagentStop: [
       {
         matcher: '',
-        hooks: [
-          { type: 'http', url: `${baseUrl}/hooks/subagent-stop`, timeout: 10 },
-        ],
+        hooks: [httpHook('/hooks/subagent-stop', 10)],
       },
     ],
   };
