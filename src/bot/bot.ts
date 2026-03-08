@@ -443,9 +443,8 @@ export async function createBot(
       return;
     }
     await ctx.answerCallbackQuery();
-    const chatId = ctx.chat?.id;
-    if (!chatId) return;
-    await sendCommandsOverview(ctx, chatId);
+    const threadId = ctx.callbackQuery.message?.message_thread_id;
+    await sendCommandsOverview(ctx, threadId);
   });
 
   // --- Submenu state machine ---
@@ -673,13 +672,10 @@ export async function createBot(
 
   // --- /commands UI ---
   bot.command('commands', async (ctx) => {
-    const chatId = ctx.chat?.id;
-    if (!chatId) return;
-
-    await sendCommandsOverview(ctx, chatId);
+    await sendCommandsOverview(ctx, ctx.message?.message_thread_id);
   });
 
-  async function sendCommandsOverview(ctx: Context, _chatId: number): Promise<void> {
+  async function sendCommandsOverview(ctx: Context, threadId?: number): Promise<void> {
     const nsByMode = commandRegistry.getCommandsByNamespace();
     const allEntries = commandRegistry.getEntries();
     const totalCount = allEntries.length;
@@ -723,7 +719,7 @@ export async function createBot(
     try {
       await ctx.reply(header, {
         reply_markup: kb,
-        message_thread_id: ctx.message?.message_thread_id,
+        message_thread_id: threadId,
       });
     } catch (err) {
       console.warn('Failed to send /commands overview:', err instanceof Error ? err.message : err);
