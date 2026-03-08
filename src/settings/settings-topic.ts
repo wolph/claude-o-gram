@@ -58,6 +58,9 @@ export function buildSettingsKeyboard(subagentVisible: boolean, defaultMode: str
   // Bulk cleanup button for orphaned approval buttons
   kb.row();
   kb.text('\u{1F9F9} Clean old approval buttons', 'set_rm:buttons');
+  // Commands management
+  kb.row();
+  kb.text('\uD83D\uDCCB Manage Commands', 'set_cmd:overview');
   return kb;
 }
 

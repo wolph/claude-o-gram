@@ -436,6 +436,18 @@ export async function createBot(
     }
   });
 
+  // --- Commands overview from settings topic ---
+  bot.callbackQuery('set_cmd:overview', async (ctx) => {
+    if (!isSettingsAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({ text: 'Only the bot owner can manage commands', show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery();
+    const chatId = ctx.chat?.id;
+    if (!chatId) return;
+    await sendCommandsOverview(ctx, chatId);
+  });
+
   // --- Submenu state machine ---
   // Tracks which user is waiting to provide parameters for a subcommand.
   // Keyed by chatId (the forum group ID). Resets on restart (intentional).
