@@ -12,7 +12,10 @@
     "test:watch": "vitest",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "hooks:install": "bash scripts/install-hooks.sh",
+    "secrets:scan": "bash scripts/gitleaks.sh git --no-banner --redact=100 --log-opts='--all --full-history --reflog' .",
+    "secrets:scan:staged": "bash scripts/gitleaks.sh git --no-banner --redact=100 --staged ."
   },
   "engines": {
     "node": ">=20.0.0"

@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { HOOK_SECRET_ENV_VAR } from './hook-secret.js';
@@ -6,9 +6,9 @@ import { HOOK_SECRET_ENV_VAR } from './hook-secret.js';
 /**
  * Auto-install Claude Code HTTP hooks into ~/.claude/settings.json.
  *
- * Merges SessionStart, SessionEnd, and PostToolUse hook configurations
- * pointing at the local Fastify server. Preserves any existing hooks
- * for other event types. Idempotent -- safe to call on every startup.
+ * Merges managed hook configurations pointing at the local Fastify server.
+ * Preserves any existing hooks for other event types. Idempotent -- safe to
+ * call on every startup.
  *
  * All HTTP hooks include an Authorization header with a Bearer token
  * that the Fastify server validates, preventing other local processes
@@ -18,32 +18,24 @@ import { HOOK_SECRET_ENV_VAR } from './hook-secret.js';
  * hook config to Claude Code's settings on first run."
  */
 export function installHooks(port: number, secret: string): void {
+  const log = (message: string) => console.log(`[HOOK INSTALL] ${message}`);
   const claudeDir = join(homedir(), '.claude');
   const settingsPath = join(claudeDir, 'settings.json');
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  log(`Starting hook installation for Claude Code.`);
+  log(`Claude settings target: ${settingsPath}`);
+  log(`Hook server base URL: ${baseUrl}`);
+  log(`Hook auth env var key: ${HOOK_SECRET_ENV_VAR}`);
+  log('Secret value is intentionally hidden in logs.');
 
   // Ensure ~/.claude/ directory exists
   if (!existsSync(claudeDir)) {
     mkdirSync(claudeDir, { recursive: true });
+    log(`Created Claude settings directory: ${claudeDir}`);
+  } else {
+    log(`Claude settings directory already exists: ${claudeDir}`);
   }
-
-  // Write shell script bridge for SubagentStart (command-only hook)
-  const hookDir = join(homedir(), '.claude-o-gram', 'hooks');
-  if (!existsSync(hookDir)) {
-    mkdirSync(hookDir, { recursive: true });
-  }
-  const scriptPath = join(hookDir, 'subagent-start.sh');
-  // Include literal Bearer token in curl command (script is 0o755, readable by owner)
-  const scriptContent = `#!/bin/bash
-# Bridge: SubagentStart command hook -> HTTP server
-curl -s --max-time 5 -X POST "http://127.0.0.1:${port}/hooks/subagent-start" \\
-  -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer ${secret}" \\
-  -d @- < /dev/stdin
-exit 0
-`;
-  writeFileSync(scriptPath, scriptContent, { mode: 0o700 });
-  // Ensure permissions even if file already existed with different mode
-  chmodSync(scriptPath, 0o700);
 
   // Read existing settings.json or start with empty object
   let settings: Record<string, unknown> = {};
@@ -51,19 +43,33 @@ exit 0
     try {
       const raw = readFileSync(settingsPath, 'utf-8');
       settings = JSON.parse(raw) as Record<string, unknown>;
+      log(`Loaded existing Claude settings from: ${settingsPath}`);
     } catch (err) {
       console.warn(
         `Warning: Failed to parse ${settingsPath}, starting with empty settings.`,
         err instanceof Error ? err.message : err,
       );
       settings = {};
+      log('Proceeding with empty settings due to parse failure.');
     }
+  } else {
+    log(`No existing Claude settings found; creating new file at: ${settingsPath}`);
   }
 
-  // Define hook configuration for our hook events
-  const baseUrl = `http://127.0.0.1:${port}`;
+  const existingEnv = (settings.env as Record<string, unknown> | undefined) || {};
+  const previousSecret = existingEnv[HOOK_SECRET_ENV_VAR];
+  settings.env = { ...existingEnv, [HOOK_SECRET_ENV_VAR]: secret };
 
-  // Auth headers for HTTP hooks — reference env var, resolved by Claude Code
+  if (typeof previousSecret === 'string' && previousSecret === secret) {
+    log(`settings.env.${HOOK_SECRET_ENV_VAR} already matched current secret.`);
+  } else if (typeof previousSecret === 'string') {
+    log(`settings.env.${HOOK_SECRET_ENV_VAR} existed and was updated to the latest secret.`);
+  } else {
+    log(`Added settings.env.${HOOK_SECRET_ENV_VAR} for hook authentication.`);
+  }
+  log(`Environment variable location: ${settingsPath} -> env.${HOOK_SECRET_ENV_VAR}`);
+
+  // Auth headers for HTTP hooks — reference env var resolved by Claude Code.
   const authHeaders = { Authorization: `Bearer $${HOOK_SECRET_ENV_VAR}` };
   const allowedEnvVars = [HOOK_SECRET_ENV_VAR];
 
@@ -120,9 +126,7 @@ exit 0
     SubagentStart: [
       {
         matcher: '',
-        hooks: [
-          { type: 'command', command: scriptPath, timeout: 10 },
-        ],
+        hooks: [httpHook('/hooks/subagent-start', 10)],
       },
     ],
     SubagentStop: [
@@ -141,12 +145,28 @@ exit 0
   const existingPreToolUse = (existingHooks.PreToolUse as unknown[]) || [];
   const ourPreToolUse = hookConfig.PreToolUse as unknown[];
   const ourUrl = `${baseUrl}/hooks/pre-tool-use`;
+  const legacyLocalPreToolUseUrl = /^http:\/\/127\.0\.0\.1:\d+\/hooks\/pre-tool-use$/;
 
-  // Filter out our previous entry (if any), keep all user hooks
+  const isManagedPreToolUseHook = (hook: Record<string, unknown>): boolean => {
+    if (hook.type !== 'http' || typeof hook.url !== 'string') return false;
+    if (!legacyLocalPreToolUseUrl.test(hook.url)) return false;
+
+    const headers = (hook.headers as Record<string, unknown> | undefined) || {};
+    const auth = headers.Authorization;
+    const allowed = Array.isArray(hook.allowedEnvVars)
+      ? hook.allowedEnvVars.filter((v): v is string => typeof v === 'string')
+      : [];
+
+    return auth === `Bearer $${HOOK_SECRET_ENV_VAR}` || allowed.includes(HOOK_SECRET_ENV_VAR);
+  };
+
+  // Filter out our previous entry (including stale bridge ports), keep user hooks.
   const userPreToolUse = existingPreToolUse.filter((entry: unknown) => {
-    const e = entry as { hooks?: Array<{ url?: string }> };
-    return !e.hooks?.some((h) => h.url === ourUrl);
+    const e = entry as { hooks?: Array<Record<string, unknown>> };
+    if (!Array.isArray(e.hooks)) return true;
+    return !e.hooks.some((hook) => isManagedPreToolUseHook(hook));
   });
+  const removedManagedEntries = existingPreToolUse.length - userPreToolUse.length;
 
   // Rebuild PreToolUse: user hooks first, then ours
   const mergedPreToolUse = userPreToolUse.length > 0
@@ -154,9 +174,17 @@ exit 0
     : ourPreToolUse;
 
   settings.hooks = { ...existingHooks, ...hookConfig, PreToolUse: mergedPreToolUse };
+  log('Hook configuration merged into settings.hooks (preserving existing user-defined hook events).');
+  if (removedManagedEntries > 0) {
+    log(`Removed ${removedManagedEntries} legacy managed PreToolUse bridge entr${removedManagedEntries === 1 ? 'y' : 'ies'}.`);
+  }
+  log(`HTTP hook headers now use: Authorization: Bearer $${HOOK_SECRET_ENV_VAR}`);
+  log(`HTTP hooks explicitly allow env expansion for: ${HOOK_SECRET_ENV_VAR}`);
 
   // Write back atomically
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
-
-  console.log(`Hooks installed/updated in ${settingsPath}`);
+  log(`Hooks installed/updated in ${settingsPath}`);
+  log('Next step 1/3: Restart any running Claude Code sessions to reload ~/.claude/settings.json.');
+  log('Next step 2/3: Start Claude Code in a fresh shell/session.');
+  log(`Next step 3/3: End a Claude session once and confirm no 401 for ${baseUrl}/hooks/session-end.`);
 }

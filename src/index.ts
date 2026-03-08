@@ -1,6 +1,8 @@
 import { join } from 'node:path';
 import { loadConfig } from './config.js';
 import { SessionStore } from './sessions/session-store.js';
+import { planInactiveCleanup } from './sessions/inactive-cleanup.js';
+import { discoverActiveClaudeSessions } from './sessions/live-session-discovery.js';
 import { createHookHandlers, type HookCallbacks } from './hooks/handlers.js';
 import { createHookServer } from './hooks/server.js';
 import { createBot, makeApprovalKeyboard, makeAskKeyboard } from './bot/bot.js';
@@ -35,7 +37,10 @@ import { expandCache, cacheKey } from './bot/expand-cache.js';
 import { InlineKeyboard } from 'grammy';
 import { BotStateStore } from './settings/bot-state-store.js';
 import { RuntimeSettings } from './settings/runtime-settings.js';
+import { CommandSettingsStore } from './settings/command-settings.js';
 import { SettingsTopic } from './settings/settings-topic.js';
+import { RuntimeStatus } from './runtime/runtime-status.js';
+import { CliOutput } from './runtime/cli-output.js';
 import type { SessionInfo } from './types/sessions.js';
 import type { StatusData, AskUserQuestionData } from './types/monitoring.js';
 import type { PreToolUsePayload } from './types/hooks.js';
@@ -86,16 +91,12 @@ export async function main(): Promise<void> {
   // 1. Load config (validates required env vars)
   const config = loadConfig();
 
-  // 2. Generate/load hook auth secret and install hooks
-  const hookSecret = getOrCreateHookSecret();
-  installHooks(config.hookServerPort, hookSecret);
-
-  // 3. Initialize session store
+  // 2. Initialize session store
   const sessionStore = new SessionStore(
     join(config.dataDir, 'sessions.json'),
   );
 
-  // 3b. Initialize bot-level state store and runtime settings
+  // 2b. Initialize bot-level state store and runtime settings
   const botStateStore = new BotStateStore(
     join(config.dataDir, 'bot-state.json'),
     {
@@ -107,24 +108,125 @@ export async function main(): Promise<void> {
   );
   const runtimeSettings = new RuntimeSettings(botStateStore);
 
-  // 4. Create control managers and input router
+  // 3. Create control managers and input router
   const approvalManager = new ApprovalManager(
     join(config.dataDir, 'pending-approvals.json'),
   );
   const permissionModeManager = new PermissionModeManager();
   const inputRouter = new InputRouter();
 
-  // 4c. Subagent lifecycle tracker
+  // Runtime observability: colorful CLI logs + live status dashboard
+  const runtimeStatus = new RuntimeStatus({
+    getActiveSessions: () => sessionStore.getActiveSessions().length,
+    getPendingApprovals: () => approvalManager.pendingCount,
+  });
+  const cli = new CliOutput(runtimeStatus);
+  cli.start();
+  cli.captureConsole();
+  cli.info('CORE', 'Runtime observability enabled', {
+    color: process.env.CLI_COLOR || 'auto',
+    dashboard: process.env.CLI_DASHBOARD || 'auto',
+    level: process.env.CLI_LOG_LEVEL || 'info',
+  });
+  const parsedInactiveStaleHours = Number.parseInt(process.env.INACTIVE_STALE_HOURS || '6', 10);
+  const inactiveStaleHours = Number.isFinite(parsedInactiveStaleHours) && parsedInactiveStaleHours > 0
+    ? parsedInactiveStaleHours
+    : 6;
+  const inactiveStaleMs = inactiveStaleHours * 60 * 60 * 1000;
+
+  // 4. Generate/load hook auth secret and install hooks
+  const hookSecret = getOrCreateHookSecret();
+  installHooks(config.hookServerPort, hookSecret);
+
+  // 5. Subagent lifecycle tracker
   const subagentTracker = new SubagentTracker();
 
-  // 4b. Discover Claude Code commands for Telegram autocomplete
+  // 5b. Discover Claude Code commands for Telegram autocomplete
   const commandRegistry = new CommandRegistry();
   commandRegistry.discover();
-  console.log(`Discovered ${commandRegistry.getEntries().length} Claude Code commands`);
+  cli.info('CORE', 'Discovered Claude Code commands', {
+    count: commandRegistry.getEntries().length,
+  });
 
-  // 5. Create bot instance (with plugins, not yet started)
-  /** Get count of closed (inactive) sessions */
-  const getInactiveCount = () => sessionStore.getClosedSessions().length;
+  // 5c. Initialize command settings store (namespace modes, per-command enable/disable, usage counts)
+  const commandSettingsStore = new CommandSettingsStore(
+    join(config.dataDir, 'command-settings.json'),
+  );
+  // Apply auto-defaults for all discovered namespaces/commands
+  commandSettingsStore.applyDefaults(commandRegistry.getCommandsByNamespace());
+
+  /**
+   * Build the Telegram command list using namespace-aware grouping.
+   *
+   * - Submenu namespaces: register one entry /<namespace> with a summary description.
+   * - Direct namespaces: register each enabled command individually.
+   * - If still > 100 after grouping: priority-truncate (builtin > user > plugin), then warn.
+   */
+  function buildTelegramCommandList(): Array<{ command: string; description: string }> {
+    const nsByMode = commandRegistry.getCommandsByNamespace();
+    const allEntries = commandRegistry.getEntries();
+    const result: Array<{ command: string; description: string }> = [];
+
+    for (const [ns, claudeNames] of nsByMode) {
+      const setting = commandSettingsStore.getNamespaceSetting(ns || '__toplevel__');
+      const enabledNames = claudeNames.filter(
+        (cn) => commandSettingsStore.getCommandSetting(cn).enabled,
+      );
+
+      if (!ns) {
+        // Top-level commands: always register individually (no namespace)
+        for (const cn of enabledNames) {
+          const e = allEntries.find((x) => x.claudeName === cn);
+          if (e) result.push({ command: e.telegramName, description: e.description.slice(0, 256) });
+        }
+        continue;
+      }
+
+      if (setting.mode === 'submenu') {
+        // Register one entry for the whole namespace
+        const descriptions = enabledNames
+          .map((cn) => allEntries.find((x) => x.claudeName === cn)?.description || cn)
+          .slice(0, 3)
+          .join(', ');
+        result.push({
+          command: ns.toLowerCase(),
+          description: `${enabledNames.length} commands: ${descriptions}`.slice(0, 256),
+        });
+      } else {
+        // Register each enabled command individually
+        for (const cn of enabledNames) {
+          const e = allEntries.find((x) => x.claudeName === cn);
+          if (e) result.push({ command: e.telegramName, description: e.description.slice(0, 256) });
+        }
+      }
+    }
+
+    if (result.length > 100) {
+      // Priority truncation: keep builtin > user > plugin
+      const priorityScore = (cmd: string): number => {
+        const e = allEntries.find((x) => x.telegramName === cmd || x.claudeName === cmd);
+        if (!e) return 0;
+        if (e.source === 'builtin') return 3;
+        if (e.source === 'user') return 2;
+        return 1; // plugin
+      };
+      const sorted = result.sort((a, b) => priorityScore(b.command) - priorityScore(a.command));
+      cli.warn('TELEGRAM', 'Command list still exceeds Telegram limit after grouping, truncating', {
+        count: result.length,
+        limit: 100,
+      });
+      return sorted.slice(0, 100);
+    }
+
+    return result;
+  }
+
+  // 6. Create bot instance (with plugins, not yet started)
+  /** Count sessions that are inactive (closed or stale-active) */
+  const getInactiveCount = () => {
+    const plan = planInactiveCleanup(sessionStore.getAllSessions(), { staleAfterMs: inactiveStaleMs });
+    return plan.deletable.length;
+  };
 
   // Late-bound callbacks — topicManager and settingsTopic are assigned after bot creation
   let topicManagerRef: TopicManager | null = null;
@@ -132,26 +234,81 @@ export async function main(): Promise<void> {
 
   const onCleanupInactiveTopics = async (): Promise<number> => {
     if (!topicManagerRef) return 0;
-    const closed = sessionStore.getClosedSessions();
-    for (const session of closed) {
+    const plan = planInactiveCleanup(sessionStore.getAllSessions(), {
+      staleAfterMs: inactiveStaleMs,
+    });
+    const targets = plan.deletable;
+    if (targets.length === 0) {
+      if (plan.unmapped.length > 0) {
+        const unmappedIds = [...new Set(plan.unmapped.map((s) => s.sessionId))];
+        sessionStore.deleteSessions(unmappedIds);
+      }
+      cli.info('CLEANUP', 'No inactive sessions to remove', {
+        closed: plan.closed.length,
+        staleActive: plan.staleActive.length,
+        unmapped: plan.unmapped.length,
+        removedSessions: plan.unmapped.length,
+      });
+      return 0;
+    }
+
+    let deletedTopics = 0;
+    let failedDeletes = 0;
+    const successfullyDeletedSessionIds = new Set<string>();
+    for (const session of targets) {
       if (session.threadId > 0) {
         // Best-effort: topic may already be deleted by the user
-        await topicManagerRef.deleteTopic(session.threadId);
+        const deleted = await topicManagerRef.deleteTopic(session.threadId);
+        if (deleted) {
+          deletedTopics++;
+          successfullyDeletedSessionIds.add(session.sessionId);
+        } else {
+          failedDeletes++;
+        }
       }
     }
-    // Always remove all closed sessions from the store
-    const ids = closed.map(s => s.sessionId);
-    if (ids.length > 0) {
-      sessionStore.deleteSessions(ids);
+    const unmappedIds = [...new Set(plan.unmapped.map((s) => s.sessionId))];
+    const idsToDelete = [...new Set([...successfullyDeletedSessionIds, ...unmappedIds])];
+    if (idsToDelete.length > 0) {
+      sessionStore.deleteSessions(idsToDelete);
     }
-    return ids.length;
+    cli.info('CLEANUP', 'Inactive topic cleanup finished', {
+      removedSessions: idsToDelete.length,
+      deletedTopics,
+      failedDeletes,
+      attemptedTopicDeletes: targets.length,
+      closed: plan.closed.length,
+      staleActive: plan.staleActive.length,
+      unmapped: plan.unmapped.length,
+      staleAfterHours: inactiveStaleHours,
+    });
+    return deletedTopics;
   };
 
   const refreshSettings = () => settingsTopicRef?.requestRefresh();
 
   let cleanupOldButtonsFn: (() => Promise<number>) | null = null;
 
-  const bot = await createBot(config, sessionStore, approvalManager, inputRouter, commandRegistry, permissionModeManager, runtimeSettings, onCleanupInactiveTopics, refreshSettings, async () => cleanupOldButtonsFn?.() ?? 0);
+  // Late-bound refresh: called when user clicks "Refresh Menu" in /commands UI
+  let botRef: Awaited<ReturnType<typeof createBot>> | null = null;
+  const onRefreshMenu = async (): Promise<void> => {
+    if (!botRef) return;
+    const toRegister = buildTelegramCommandList();
+    if (toRegister.length === 0) return;
+    try {
+      await botRef.api.setMyCommands(toRegister, {
+        scope: { type: 'chat', chat_id: config.telegramChatId },
+      });
+      cli.info('TELEGRAM', 'Re-registered commands with Telegram (refresh)', { count: toRegister.length });
+    } catch (err) {
+      cli.warn('TELEGRAM', 'Failed to re-register Telegram commands', {
+        error: err instanceof Error ? err.message : err,
+      });
+    }
+  };
+
+  const bot = await createBot(config, sessionStore, approvalManager, inputRouter, commandRegistry, permissionModeManager, runtimeSettings, commandSettingsStore, onCleanupInactiveTopics, refreshSettings, async () => cleanupOldButtonsFn?.() ?? 0, onRefreshMenu);
+  botRef = bot;
 
   // 5b. Wire late-bound cleanup for orphaned approval buttons
   cleanupOldButtonsFn = async () => {
@@ -164,14 +321,28 @@ export async function main(): Promise<void> {
     }
 
     if (anchors.size === 0) {
-      console.log('[CLEANUP] No message ID anchors found');
+      cli.info('CLEANUP', 'No message ID anchors found');
       return 0;
     }
 
+    cli.info('CLEANUP', 'Starting old approval button sweep', {
+      anchors: anchors.size,
+      rangePerAnchor: 500,
+    });
+
     let cleaned = 0;
+    let scanned = 0;
+    let anchorIndex = 0;
     for (const anchor of anchors) {
+      anchorIndex++;
+      cli.info('CLEANUP', 'Scanning message range for stale buttons', {
+        anchor,
+        anchorIndex,
+        anchors: anchors.size,
+      });
       const start = Math.max(1, anchor - 500);
       for (let msgId = anchor; msgId >= start; msgId--) {
+        scanned++;
         try {
           await bot.api.editMessageReplyMarkup(
             config.telegramChatId,
@@ -182,12 +353,24 @@ export async function main(): Promise<void> {
         } catch {
           // Ignore: wrong message, not ours, already edited, etc.
         }
+        if (scanned % 200 === 0) {
+          cli.info('CLEANUP', 'Old approval button sweep progress', {
+            scanned,
+            cleaned,
+            anchorIndex,
+            anchors: anchors.size,
+          });
+        }
         // Rate limit: 50ms between calls
         await new Promise(resolve => setTimeout(resolve, 50));
       }
     }
 
-    console.log(`[CLEANUP] Removed keyboards from ${cleaned} message(s)`);
+    cli.info('CLEANUP', 'Removed stale approval keyboards', {
+      cleaned,
+      scanned,
+      anchors: anchors.size,
+    });
     return cleaned;
   };
 
@@ -236,7 +419,9 @@ export async function main(): Promise<void> {
       reply_markup: keyboard,
     }).catch(err => {
       if (!(err instanceof Error && err.message.includes('message is not modified'))) {
-        console.warn('Failed to add expand button:', err instanceof Error ? err.message : err);
+        cli.warn('TELEGRAM', 'Failed to add expand button', {
+          error: err instanceof Error ? err.message : err,
+        });
       }
     });
   });
@@ -360,7 +545,7 @@ export async function main(): Promise<void> {
     }
     if (toDelete.length > 0) {
       sessionStore.deleteSessions(toDelete.map(s => s.sessionId));
-      console.log(`Cleaned up ${toDelete.length} duplicate topic(s) for ${cwd}`);
+      cli.info('CLEANUP', 'Cleaned duplicate topics', { count: toDelete.length, cwd });
     }
   }
 
@@ -431,8 +616,6 @@ export async function main(): Promise<void> {
       if (oldSession.status === 'active') {
         sessionStore.updateStatus(oldSession.sessionId, 'closed');
       }
-      // Clear old session's threadId to prevent getByThreadId collision
-      sessionStore.updateThreadId(oldSession.sessionId, 0);
     }
 
     // Post timestamped separator (SESS-02)
@@ -576,10 +759,9 @@ export async function main(): Promise<void> {
             options: q.options,
           });
         }).catch((err) => {
-          console.warn(
-            'Failed to send AskUserQuestion message:',
-            err instanceof Error ? err.message : err,
-          );
+          cli.warn('TELEGRAM', 'Failed to send AskUserQuestion message', {
+            error: err instanceof Error ? err.message : err,
+          });
         });
       },
       // onAskUserQuestionResult: update Telegram message when answer detected
@@ -610,9 +792,27 @@ export async function main(): Promise<void> {
           parse_mode: 'HTML',
         }).catch((err) => {
           if (!(err instanceof Error && err.message.includes('message is not modified'))) {
-            console.warn('Failed to update ask answer:', err instanceof Error ? err.message : err);
+            cli.warn('TELEGRAM', 'Failed to update ask answer', {
+              error: err instanceof Error ? err.message : err,
+            });
           }
         });
+      },
+      // onUserMessage: mirror prompts from Claude transcript (e.g. local terminal input)
+      (rawText: string) => {
+        const compact = rawText.trim();
+        if (compact.length === 0) return;
+        const text = convertCommandsForTelegram(compact);
+        if (text.length > 3000) {
+          const truncated = text.slice(0, 1500) + '\n... (truncated)';
+          batcher.enqueue(session.threadId, `\u{1F464} <b>You</b>\n${markdownToHtml(truncated)}`, {
+            content: text,
+            filename: 'user-input.txt',
+            caption: 'Full user input',
+          });
+        } else {
+          batcher.enqueue(session.threadId, `\u{1F464} <b>You</b>\n${markdownToHtml(text)}`);
+        }
       },
     );
 
@@ -641,7 +841,9 @@ export async function main(): Promise<void> {
         // Set default verbosity from config
         sessionStore.updateVerbosity(session.sessionId, config.defaultVerbosity);
       }).catch((err) => {
-        console.warn('Failed to initialize status message:', err instanceof Error ? err.message : err);
+        cli.warn('STATUS', 'Failed to initialize status message', {
+          error: err instanceof Error ? err.message : err,
+        });
       });
     }
 
@@ -656,6 +858,11 @@ export async function main(): Promise<void> {
   //    This connects session lifecycle events to Telegram forum topic actions.
   const callbacks: HookCallbacks = {
     onSessionStart: async (session, source) => {
+      cli.info('SESSION', 'Session start', {
+        source,
+        session: session.sessionId.slice(0, 8),
+        cwd: session.cwd,
+      });
       if (source === 'clear') {
         // /clear transition: reuse existing topic.
         // The session object already has threadId and statusMessageId
@@ -697,10 +904,8 @@ export async function main(): Promise<void> {
               seenAskIds.delete(oldSessionId);
               taskChecklist.cleanup(oldSessionId);
 
-              // Mark old session as closed and clear its threadId to prevent
-              // getByThreadId from returning the stale closed session
+              // Mark old session as closed; getByThreadId prefers active sessions
               sessionStore.updateStatus(oldSessionId, 'closed');
-              sessionStore.updateThreadId(oldSessionId, 0);
               break;
             }
           }
@@ -807,6 +1012,10 @@ export async function main(): Promise<void> {
     },
 
     onSessionEnd: async (session, reason) => {
+      cli.info('SESSION', 'Session end', {
+        reason,
+        session: session.sessionId.slice(0, 8),
+      });
       // Re-fetch session from store to get latest toolCallCount/filesChanged
       const latest = sessionStore.get(session.sessionId) || session;
 
@@ -833,9 +1042,6 @@ export async function main(): Promise<void> {
           threadId: latest.threadId,
           statusMessageId: latest.statusMessageId,
         });
-
-        // Clear old session's threadId to prevent getByThreadId collision
-        sessionStore.updateThreadId(session.sessionId, 0);
 
         // Do NOT close the topic, do NOT post session end summary (SESS-06)
         return;
@@ -875,6 +1081,10 @@ export async function main(): Promise<void> {
     },
 
     onToolUse: async (session, payload) => {
+      cli.debug('TOOL', 'Tool completed', {
+        session: session.sessionId.slice(0, 8),
+        tool: payload.tool_name,
+      });
       // Auto-approve resolution: if there's a pending approval for this tool_use_id,
       // update the message
       const pendingApproval = approvalManager.resolvePending(payload.tool_use_id);
@@ -887,7 +1097,9 @@ export async function main(): Promise<void> {
           });
         } catch (err) {
           if (!(err instanceof Error && err.message.includes('message is not modified'))) {
-            console.warn('Failed to update local approval message:', err instanceof Error ? err.message : err);
+            cli.warn('PERM', 'Failed to update local approval message', {
+              error: err instanceof Error ? err.message : err,
+            });
           }
         }
       }
@@ -932,6 +1144,10 @@ export async function main(): Promise<void> {
     },
 
     onNotification: async (session, payload) => {
+      cli.debug('NOTIFY', 'Notification received', {
+        type: payload.notification_type,
+        session: session.sessionId.slice(0, 8),
+      });
       // Suppress idle notifications — status message already shows idle state
       if (payload.notification_type === 'idle_prompt') return;
 
@@ -942,7 +1158,11 @@ export async function main(): Promise<void> {
           return;
         }
         // Log unsuppressed permission prompts to diagnose bypass mismatches
-        console.warn(`[permission_prompt] not suppressed — permMode=${JSON.stringify(permMode)}, payload.permission_mode=${JSON.stringify(payload.permission_mode)}, session.permissionMode=${JSON.stringify(session.permissionMode)}`);
+        cli.warn('NOTIFY', 'permission_prompt not suppressed', {
+          permMode,
+          payloadMode: payload.permission_mode,
+          sessionMode: session.permissionMode,
+        });
       }
 
       const html = formatNotification(payload);
@@ -959,6 +1179,10 @@ export async function main(): Promise<void> {
     // PreToolUse: informational message to Telegram (non-blocking).
     // Claude Code shows its local dialog. Telegram buttons send keystrokes via tmux.
     onPreToolUse: async (session, payload: PreToolUsePayload) => {
+      cli.debug('PERM', 'PreToolUse received', {
+        session: session.sessionId.slice(0, 8),
+        tool: payload.tool_name,
+      });
       // Guard: skip if threadId not yet assigned (race during topic creation)
       if (!session.threadId) return;
 
@@ -992,7 +1216,10 @@ export async function main(): Promise<void> {
         approvalHtml = agentPrefix + approvalHtml;
       }
 
-      console.log(`[PERM] Permission request for ${payload.tool_name} (local dialog shown)`);
+      cli.info('PERM', 'Permission request (local dialog shown)', {
+        tool: payload.tool_name,
+        session: session.sessionId.slice(0, 8),
+      });
 
       const keyboard = makeApprovalKeyboard(payload.tool_use_id);
 
@@ -1018,6 +1245,7 @@ export async function main(): Promise<void> {
     },
 
     onStop: async (session, _payload) => {
+      cli.debug('SESSION', 'Turn stopped', { session: session.sessionId.slice(0, 8) });
       // Turn complete -- set topic back to green (waiting for input)
       topicStatusManager.setStatus(session.threadId, 'green');
       // Clear sticky red if set -- new turn means user has seen the warning
@@ -1035,13 +1263,22 @@ export async function main(): Promise<void> {
 
       // Spawn announcements suppressed — subagentDone shows completion summary
 
-      console.log(`[AGENT] Subagent ${agent.displayName} (${payload.agent_id}) spawned for session ${session.sessionId} (depth ${agent.depth})`);
+      runtimeStatus.noteSubagentStart();
+      cli.info('AGENT', 'Subagent spawned', {
+        name: agent.displayName,
+        agentId: payload.agent_id,
+        session: session.sessionId.slice(0, 8),
+        depth: agent.depth,
+      });
     },
 
     onSubagentStop: async (session, payload) => {
       const result = subagentTracker.stop(payload.agent_id);
       if (!result) {
-        console.warn(`[AGENT] SubagentStop for unknown agent: ${payload.agent_id}`);
+        cli.warn('AGENT', 'SubagentStop received for unknown agent', {
+          agentId: payload.agent_id,
+          session: session.sessionId.slice(0, 8),
+        });
         return;
       }
 
@@ -1054,7 +1291,12 @@ export async function main(): Promise<void> {
         await batcher.enqueueImmediate(session.threadId, doneHtml);
       }
 
-      console.log(`[AGENT] Subagent ${result.agent.displayName} (${payload.agent_id}) done after ${Math.round(result.durationMs / 1000)}s`);
+      runtimeStatus.noteSubagentStop();
+      cli.info('AGENT', 'Subagent completed', {
+        name: result.agent.displayName,
+        agentId: payload.agent_id,
+        durationSec: Math.round(result.durationMs / 1000),
+      });
     },
   };
 
@@ -1072,15 +1314,32 @@ export async function main(): Promise<void> {
       const desc = (toolInput.description as string) || (toolInput.prompt as string) || '';
       subagentTracker.stashDescription(sessionId, (toolInput.subagent_type as string) || 'unknown', desc);
     },
+    {
+      onHookReceived: (event) => {
+        runtimeStatus.noteHook(event);
+        cli.debug('HOOK', 'Hook received', { event });
+      },
+      onAuthFailure: (route) => {
+        runtimeStatus.noteAuthFailure(route);
+        cli.warn('HOOK', 'Hook authentication rejected', { route });
+      },
+      onHandlerError: (route, error) => {
+        cli.error('HOOK', 'Hook handler error', {
+          route,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      },
+    },
   );
 
   await server.listen({
     port: config.hookServerPort,
     host: config.hookServerHost,
   });
-  console.log(
-    `Fastify hook server listening on ${config.hookServerHost}:${config.hookServerPort}`,
-  );
+  cli.info('HOOK', 'Fastify hook server listening', {
+    host: config.hookServerHost,
+    port: config.hookServerPort,
+  });
 
   // 11. Phase 9: Startup gray sweep -- mark all active sessions as offline
   //     Sequential with delay to avoid editForumTopic rate limits.
@@ -1091,17 +1350,17 @@ export async function main(): Promise<void> {
       try {
         await topicStatusManager.setStatusImmediate(session.threadId, 'gray', session.topicName);
       } catch (err) {
-        console.warn(
-          `Gray sweep: failed to update topic ${session.threadId}:`,
-          err instanceof Error ? err.message : err,
-        );
+        cli.warn('STARTUP', 'Gray sweep failed to update topic', {
+          threadId: session.threadId,
+          error: err instanceof Error ? err.message : err,
+        });
       }
       // Brief delay between calls to avoid rate limits
       await new Promise(resolve => setTimeout(resolve, 500));
     }
   }
   if (sessionsToSweep.length > 0) {
-    console.log(`Gray sweep: marked ${sessionsToSweep.length} topic(s) as offline`);
+    cli.info('STARTUP', 'Gray sweep marked topics offline', { count: sessionsToSweep.length });
   }
 
   // 11b. Reconnect to existing sessions on restart
@@ -1124,7 +1383,10 @@ export async function main(): Promise<void> {
             // Topic exists and is already open — good
           } else {
             // Topic was deleted — create a new one
-            console.log(`Topic ${threadId} for session ${session.sessionId} was deleted, creating new`);
+            cli.info('STARTUP', 'Topic missing, creating replacement', {
+              threadId,
+              session: session.sessionId.slice(0, 8),
+            });
             threadId = 0;
           }
         }
@@ -1150,16 +1412,66 @@ export async function main(): Promise<void> {
       void cleanupDuplicateTopics(session.cwd, session.threadId);
       reconnectedCount++;
     } catch (err) {
-      console.warn(
-        `Failed to reconnect session ${session.sessionId}:`,
-        err instanceof Error ? err.message : err,
-      );
+      cli.warn('STARTUP', 'Failed to reconnect session', {
+        session: session.sessionId.slice(0, 8),
+        error: err instanceof Error ? err.message : err,
+      });
     }
   }
   if (reconnectedCount > 0) {
-    console.log(
-      `Reconnected to ${reconnectedCount} active session(s)`,
-    );
+    cli.info('STARTUP', 'Reconnected active sessions', { count: reconnectedCount });
+  }
+
+  // 11c. Discover active Claude sessions that are running but not yet tracked
+  //      (e.g. bot started after Claude session). Register them as startup
+  //      sessions so they get topic creation/reuse + transcript backfill.
+  const liveDiscovery = discoverActiveClaudeSessions();
+  let recoveredLiveSessions = 0;
+  let skippedKnownLiveSessions = 0;
+  let failedLiveRecoveries = 0;
+
+  for (const live of liveDiscovery.sessions) {
+    if (sessionStore.get(live.sessionId)) {
+      skippedKnownLiveSessions++;
+      continue;
+    }
+
+    try {
+      await handlers.handleSessionStart({
+        hook_event_name: 'SessionStart',
+        session_id: live.sessionId,
+        transcript_path: live.transcriptPath,
+        cwd: live.cwd,
+        permission_mode: 'default',
+        source: 'startup',
+        model: 'unknown',
+      });
+      recoveredLiveSessions++;
+    } catch (err) {
+      failedLiveRecoveries++;
+      cli.warn('STARTUP', 'Failed to recover active live session', {
+        session: live.sessionId.slice(0, 8),
+        cwd: live.cwd,
+        error: err instanceof Error ? err.message : err,
+      });
+    }
+  }
+
+  if (
+    liveDiscovery.openTranscripts > 0 ||
+    liveDiscovery.unresolved > 0 ||
+    recoveredLiveSessions > 0 ||
+    skippedKnownLiveSessions > 0 ||
+    failedLiveRecoveries > 0
+  ) {
+    cli.info('STARTUP', 'Live session discovery finished', {
+      openTranscripts: liveDiscovery.openTranscripts,
+      resolved: liveDiscovery.sessions.length,
+      unresolved: liveDiscovery.unresolved,
+      recovered: recoveredLiveSessions,
+      skippedKnown: skippedKnownLiveSessions,
+      failed: failedLiveRecoveries,
+    });
   }
 
   // Clean up all pending approvals from previous run — strip orphaned buttons
@@ -1175,49 +1487,46 @@ export async function main(): Promise<void> {
     }
   });
   if (staleCount > 0) {
-    console.log(`Cleaned up ${staleCount} stale pending approval(s)`);
+    cli.info('CLEANUP', 'Cleaned stale pending approvals', { count: staleCount });
   }
 
-  // 11c. Phase 12: Initialize settings topic
+  // 11d. Phase 12: Initialize settings topic
   const settingsTopic = new SettingsTopic(bot, config.telegramChatId, runtimeSettings, getInactiveCount);
   settingsTopicRef = settingsTopic;
   try {
     const settingsThreadId = await settingsTopic.init();
-    console.log(`Settings topic ready: thread ${settingsThreadId}`);
+    cli.info('SETTINGS', 'Settings topic ready', { threadId: settingsThreadId });
   } catch (err) {
-    console.error('Failed to initialize settings topic:', err instanceof Error ? err.message : err);
+    cli.error('SETTINGS', 'Failed to initialize settings topic', {
+      error: err instanceof Error ? err.message : err,
+    });
     // Non-fatal: bot continues without settings topic
   }
 
   // 12. Start Telegram bot (hook server already listening from step 10)
   bot.start();
-  console.log('Telegram bot started (polling)');
+  cli.info('TELEGRAM', 'Bot started (polling)');
 
-  // 12b. Register discovered commands with Telegram autocomplete menu
-  const botCommands = commandRegistry.getEntries().map((e) => ({
-    command: e.telegramName,
-    description: e.description.slice(0, 256),
-  }));
-  if (botCommands.length > 100) {
-    console.warn(`Command count ${botCommands.length} exceeds Telegram limit of 100; truncating`);
-  }
-  const toRegister = botCommands.slice(0, 100);
+  // 12b. Register discovered commands with Telegram autocomplete menu (namespace-aware)
+  const toRegister = buildTelegramCommandList();
   if (toRegister.length > 0) {
     try {
       await bot.api.setMyCommands(toRegister, {
         scope: { type: 'chat', chat_id: config.telegramChatId },
       });
-      console.log(`Registered ${toRegister.length} commands with Telegram`);
+      cli.info('TELEGRAM', 'Registered commands with Telegram', { count: toRegister.length });
     } catch (err) {
-      console.warn('Failed to register Telegram commands:', err instanceof Error ? err.message : err);
+      cli.warn('TELEGRAM', 'Failed to register Telegram commands', {
+        error: err instanceof Error ? err.message : err,
+      });
     }
   }
 
-  console.log('Startup complete');
+  cli.info('CORE', 'Startup complete');
 
   // 13. Graceful shutdown
   const shutdown = async () => {
-    console.log('Shutting down...');
+    cli.info('CORE', 'Shutting down');
     // Stop all monitoring instances
     for (const [, monitor] of monitors) {
       monitor.transcriptWatcher.stop();
@@ -1238,6 +1547,7 @@ export async function main(): Promise<void> {
     approvalManager.shutdown();
     bypassBatcher.shutdown();
     taskChecklist.shutdown();
+    commandSettingsStore.shutdown();
     // Clean up permission mode and subagent tracker state for all sessions
     for (const session of sessionStore.getActiveSessions()) {
       permissionModeManager.cleanup(session.sessionId);
@@ -1246,7 +1556,8 @@ export async function main(): Promise<void> {
     batcher.shutdown();
     bot.stop();
     await server.close();
-    console.log('Shutdown complete');
+    cli.info('CORE', 'Shutdown complete');
+    cli.stop();
     process.exit(0);
   };
 

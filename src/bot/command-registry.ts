@@ -12,10 +12,15 @@ export interface CommandEntry {
   description: string;
   /** Source: 'builtin' | 'user' | 'plugin' */
   source: string;
+  /**
+   * Parameter hint from frontmatter. null/undefined = show generic prompt;
+   * "none" = skip prompt and run immediately; "<hint>" = show hint string.
+   */
+  parameters?: string | null;
 }
 
 /** Bot-native commands that are never forwarded to CLI */
-const BOT_NATIVE_COMMANDS = new Set(['status', 'verbose', 'normal', 'quiet']);
+const BOT_NATIVE_COMMANDS = new Set(['status', 'verbose', 'normal', 'quiet', 'commands']);
 
 /** Built-in Claude Code slash commands with descriptions */
 const BUILTIN_COMMANDS: Array<{ name: string; description: string }> = [
@@ -78,6 +83,27 @@ export class CommandRegistry {
     return this.telegramToClaudeMap.get(telegramName) ?? null;
   }
 
+  /** Look up a CommandEntry by its Claude name. Returns null if not found. */
+  getByClaudeName(claudeName: string): CommandEntry | null {
+    return this.entries.find((e) => e.claudeName === claudeName) ?? null;
+  }
+
+  /**
+   * Build a map of namespace → array of claudeNames in that namespace.
+   * Top-level commands (no colon) are grouped under the empty string key "".
+   */
+  getCommandsByNamespace(): Map<string, string[]> {
+    const map = new Map<string, string[]>();
+    for (const entry of this.entries) {
+      const colonIdx = entry.claudeName.indexOf(':');
+      const ns = colonIdx >= 0 ? entry.claudeName.slice(0, colonIdx) : '';
+      const list = map.get(ns) ?? [];
+      list.push(entry.claudeName);
+      map.set(ns, list);
+    }
+    return map;
+  }
+
   /** Check if a command is bot-native (handled by grammY, not forwarded) */
   isBotNative(name: string): boolean {
     return BOT_NATIVE_COMMANDS.has(name);
@@ -93,28 +119,32 @@ export class CommandRegistry {
       .slice(0, 32);
   }
 
-  /** Extract description from YAML frontmatter in a .md file */
-  private extractFrontmatter(filePath: string): string | null {
+  /** Extract description and parameters from YAML frontmatter in a .md file */
+  private extractFrontmatter(filePath: string): { description: string | null; parameters?: string | null } {
     try {
       const content = readFileSync(filePath, 'utf-8');
       const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
-      if (!match) return null;
+      if (!match) return { description: null };
       const yaml = match[1];
       const descMatch = yaml.match(/^description:\s*(.+)$/m);
-      return descMatch ? descMatch[1].trim().slice(0, 256) : null;
+      const paramMatch = yaml.match(/^parameters:\s*(.+)$/m);
+      return {
+        description: descMatch ? descMatch[1].trim().slice(0, 256) : null,
+        parameters: paramMatch ? paramMatch[1].trim() : undefined,
+      };
     } catch {
-      return null;
+      return { description: null };
     }
   }
 
   /** Add a command entry, skipping bot-native commands and duplicates */
-  private addEntry(claudeName: string, telegramName: string, description: string, source: string): void {
+  private addEntry(claudeName: string, telegramName: string, description: string, source: string, parameters?: string | null): void {
     const tgName = this.toTelegramName(telegramName);
     if (tgName.length === 0) return; // skip invalid names
     if (BOT_NATIVE_COMMANDS.has(tgName)) return;
     if (this.telegramToClaudeMap.has(tgName)) return; // first-registered wins
 
-    const entry: CommandEntry = { telegramName: tgName, claudeName, description, source };
+    const entry: CommandEntry = { telegramName: tgName, claudeName, description, source, parameters };
     this.entries.push(entry);
     this.telegramToClaudeMap.set(tgName, claudeName);
   }
@@ -139,16 +169,16 @@ export class CommandRegistry {
             const cmdName = basename(sub.name, '.md');
             const prefix = namespace || subNamespace;
             const claudeName = `${prefix}:${cmdName}`;
-            const desc = this.extractFrontmatter(join(subdir, sub.name)) || claudeName;
-            this.addEntry(claudeName, claudeName, desc, source);
+            const fm = this.extractFrontmatter(join(subdir, sub.name));
+            this.addEntry(claudeName, claudeName, fm.description || claudeName, source, fm.parameters);
           }
         }
       } else if (entry.isFile() && entry.name.endsWith('.md')) {
         // Top-level command
         const cmdName = basename(entry.name, '.md');
         const claudeName = namespace ? `${namespace}:${cmdName}` : cmdName;
-        const desc = this.extractFrontmatter(join(dir, entry.name)) || claudeName;
-        this.addEntry(claudeName, claudeName, desc, source);
+        const fm = this.extractFrontmatter(join(dir, entry.name));
+        this.addEntry(claudeName, claudeName, fm.description || claudeName, source, fm.parameters);
       }
     }
   }
@@ -164,8 +194,8 @@ export class CommandRegistry {
 
       const skillName = entry.name;
       const claudeName = namespace ? `${namespace}:${skillName}` : skillName;
-      const desc = this.extractFrontmatter(skillFile) || claudeName;
-      this.addEntry(claudeName, claudeName, desc, source);
+      const fm = this.extractFrontmatter(skillFile);
+      this.addEntry(claudeName, claudeName, fm.description || claudeName, source, fm.parameters);
     }
   }
 

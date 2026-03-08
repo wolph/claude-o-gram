@@ -91,7 +91,11 @@ Now start a Claude Code session — a forum topic will appear automatically.
 | `DATA_DIR` | No | `./data` | Directory for session persistence |
 | `VERBOSITY_DEFAULT` | No | `normal` | Default verbosity: `minimal`, `normal`, or `verbose` |
 | `APPROVAL_TIMEOUT_MS` | No | `300000` | Auto-deny timeout for approvals (5 min) |
+| `INACTIVE_STALE_HOURS` | No | `6` | Treat active sessions with no hook activity older than this as inactive during settings cleanup |
 | `AUTO_APPROVE` | No | `false` | Set to `true` to bypass all approval prompts |
+| `CLI_COLOR` | No | `auto` | CLI log color mode: `auto`, `on`, `off` |
+| `CLI_DASHBOARD` | No | `auto` | Live CLI status panel mode: `auto`, `on`, `off` |
+| `CLI_LOG_LEVEL` | No | `info` | CLI minimum log level: `debug`, `info`, `warn`, `error` |
 
 ## Bot Commands
 
@@ -149,6 +153,37 @@ tmux new-session -d -s telegram-bot 'cd /path/to/claude-o-gram && npm start'
 pm2 start dist/index.js --name claude-telegram
 ```
 
+## CLI Runtime Observability
+
+The bot process now includes a richer terminal UX for operational visibility:
+
+- **Colorful structured logs** for startup, session lifecycle, hook/auth activity, permission flow, and subagent lifecycle.
+- **Live status dashboard** (TTY mode) that refreshes in place and shows:
+  - uptime
+  - active sessions
+  - pending approvals
+  - hook throughput totals
+  - auth failures
+  - active/completed subagents
+  - warning/error counts
+  - last significant runtime event
+
+Use environment flags to tune behavior:
+
+- `CLI_COLOR=auto|on|off`
+- `CLI_DASHBOARD=auto|on|off`
+- `CLI_LOG_LEVEL=debug|info|warn|error`
+
+Examples:
+
+```bash
+# Always show colors + dashboard, include debug events
+CLI_COLOR=on CLI_DASHBOARD=on CLI_LOG_LEVEL=debug npm start
+
+# Plain logs only (no in-place dashboard)
+CLI_COLOR=off CLI_DASHBOARD=off CLI_LOG_LEVEL=info npm start
+```
+
 ## Security
 
 The bot has two authentication layers:
@@ -157,11 +192,15 @@ The bot has two authentication layers:
 
 **Hook server authentication** — On first startup, the bot generates a random 256-bit secret and stores it at `~/.claude-o-gram/hook-secret` (mode `0600`, owner-only). This secret is:
 - Set as `CLAUDE_CODE_TELEGRAM_SECRET` in the process environment
+- Written into `~/.claude/settings.json` as `env.CLAUDE_CODE_TELEGRAM_SECRET`
 - Referenced in hook HTTP headers via Claude Code's `allowedEnvVars` mechanism
 - Validated by a Fastify `onRequest` hook on all `/hooks/*` routes (returns 401 on mismatch)
-- Embedded as a literal in the SubagentStart shell script bridge
 
 The hook server binds to `127.0.0.1` by default (localhost only, not exposed to the network).
+
+**Secret leak prevention** — The repository enforces secret scanning in two places:
+- **CI:** GitHub Actions runs `gitleaks` on every push/PR and fails the workflow if leaks are detected.
+- **Local pre-commit hook:** Run `npm run hooks:install` once per clone to enable `.githooks/pre-commit`, which scans staged changes before each commit.
 
 ## Development
 
@@ -170,6 +209,9 @@ npm run dev        # Watch mode with tsx
 npm run typecheck  # Type-check without emitting
 npm run lint       # ESLint
 npm test           # Run all tests
+npm run hooks:install     # Install repository git hooks (run once per clone)
+npm run secrets:scan      # Full-history secret scan
+npm run secrets:scan:staged  # Scan staged changes (used by pre-commit)
 ```
 
 ## Architecture
@@ -217,6 +259,10 @@ src/
     runtime-settings.ts     # Live-configurable settings
     bot-state-store.ts      # Persistent bot-level state
     settings-topic.ts       # Settings forum topic UI
+  runtime/
+    runtime-status.ts       # Process counters + status snapshot model
+    cli-format.ts           # ANSI log formatting + dashboard rendering
+    cli-output.ts           # Structured logger + live terminal dashboard
   utils/
     text.ts                 # HTML escaping, markdown, truncation
     hook-secret.ts          # Bearer token generation/storage

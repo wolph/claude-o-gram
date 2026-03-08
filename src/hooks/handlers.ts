@@ -56,7 +56,7 @@ export class HookHandlers {
    * If the session is unknown (e.g. bot restarted while Claude Code was running),
    * auto-registers it, creates a Telegram topic, and backfills transcript history.
    */
-  private async ensureSession(payload: HookPayload): Promise<SessionInfo | null> {
+  private async ensureSession(payload: HookPayload): Promise<SessionInfo | undefined> {
     const existing = this.sessionStore.get(payload.session_id);
     if (existing) return existing;
 
@@ -88,7 +88,7 @@ export class HookHandlers {
     if (registered) {
       await this.backfillFromTranscript(registered);
     }
-    return registered ?? null;
+    return registered;
   }
 
   /**
@@ -110,6 +110,7 @@ export class HookHandlers {
 
     const toolCalls: { name: string; detail: string }[] = [];
     const filesChanged = new Set<string>();
+    const recentPrompts: string[] = [];
     let totalToolCalls = 0;
 
     for (const line of lines) {
@@ -121,6 +122,13 @@ export class HookHandlers {
       }
 
       if (entry.isSidechain) continue;
+      if (entry.type === 'user' && entry.message.role === 'user') {
+        const prompt = extractTextContent(entry.message.content);
+        if (prompt) {
+          recentPrompts.push(prompt);
+        }
+        continue;
+      }
       if (entry.type !== 'assistant') continue;
       if (entry.message.role !== 'assistant') continue;
 
@@ -198,6 +206,17 @@ export class HookHandlers {
       }
     }
 
+    const promptPreview = recentPrompts.slice(-3);
+    if (promptPreview.length > 0) {
+      parts.push('');
+      parts.push(`\u{1F464} <b>Recent prompts:</b>`);
+      for (const prompt of promptPreview) {
+        const oneLine = prompt.replace(/\s+/g, ' ').trim();
+        const short = oneLine.length > 220 ? `${oneLine.slice(0, 220)}...` : oneLine;
+        parts.push(`\u2022 <i>${escapeHtml(short)}</i>`);
+      }
+    }
+
     const summary = parts.join('\n');
     await this.callbacks.onBackfillSummary(session, summary);
   }
@@ -219,8 +238,6 @@ export class HookHandlers {
           transcriptPath: payload.transcript_path,
           permissionMode: payload.permission_mode ?? existing.permissionMode,
         });
-        // Clear old session's threadId to prevent getByThreadId collision
-        this.sessionStore.updateThreadId(existing.sessionId, 0);
         await this.callbacks.onSessionStart(
           this.sessionStore.get(payload.session_id)!,
           'resume'
@@ -257,10 +274,6 @@ export class HookHandlers {
           permissionMode: payload.permission_mode ?? prior.permissionMode,
         });
 
-        // Clear old session's threadId to prevent getByThreadId from returning
-        // the stale closed entry instead of the new active one
-        this.sessionStore.updateThreadId(prior.sessionId, 0);
-
         await this.callbacks.onSessionStart(
           this.sessionStore.get(payload.session_id)!,
           'clear'
@@ -296,12 +309,11 @@ export class HookHandlers {
           statusMessageId: 0,
           permissionMode: payload.permission_mode ?? closedSession.permissionMode,
         });
-        // Clear old session's threadId to prevent getByThreadId collision
-        this.sessionStore.updateThreadId(closedSession.sessionId, 0);
-        await this.callbacks.onSessionStart(
-          this.sessionStore.get(payload.session_id)!,
-          'reuse'
-        );
+        const reusedSession = this.sessionStore.get(payload.session_id)!;
+        await this.callbacks.onSessionStart(reusedSession, 'reuse');
+        if (payload.source === 'startup') {
+          await this.backfillFromTranscript(reusedSession);
+        }
         return;
       }
     }
@@ -340,6 +352,9 @@ export class HookHandlers {
 
     this.sessionStore.set(payload.session_id, session);
     await this.callbacks.onSessionStart(session, 'new');
+    if (payload.source === 'startup') {
+      await this.backfillFromTranscript(session);
+    }
   }
 
   /**
@@ -347,11 +362,21 @@ export class HookHandlers {
    * Marks the session as closed and delegates to the onSessionEnd callback.
    */
   async handleSessionEnd(payload: SessionEndPayload): Promise<void> {
-    const session = this.sessionStore.get(payload.session_id);
+    let session = this.sessionStore.get(payload.session_id);
     if (!session) {
-      console.warn(
-        `SessionEnd received for unknown session: ${payload.session_id}`
-      );
+      // Session started while bot was offline or hooks were not yet active.
+      // Recover by auto-registering and backfilling before closing.
+      session = await this.ensureSession(payload);
+      if (!session) {
+        console.warn(
+          `SessionEnd received for unknown session: ${payload.session_id}`
+        );
+        return;
+      }
+    }
+
+    if (session.status === 'closed') {
+      console.warn(`Duplicate SessionEnd ignored for already-closed session: ${payload.session_id}`);
       return;
     }
 
@@ -462,6 +487,29 @@ function extractFilePath(toolInput: Record<string, unknown>): string | null {
     return toolInput.path;
   }
   return null;
+}
+
+/**
+ * Extract plain text content from transcript message content.
+ * Supports both string payloads and block arrays with text blocks.
+ */
+function extractTextContent(content: string | ContentBlock[]): string | null {
+  if (typeof content === 'string') {
+    const trimmed = content.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (!Array.isArray(content)) return null;
+
+  const textParts = content
+    .filter(
+      (block): block is { type: 'text'; text: string } =>
+        block.type === 'text' && typeof block.text === 'string',
+    )
+    .map((block) => block.text.trim())
+    .filter((text) => text.length > 0);
+
+  if (textParts.length === 0) return null;
+  return textParts.join('\n');
 }
 
 /** Factory function for creating HookHandlers */

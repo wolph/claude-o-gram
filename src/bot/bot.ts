@@ -7,6 +7,7 @@ import type { ApprovalManager } from '../control/approval-manager.js';
 import type { InputRouter } from '../input/input-router.js';
 import type { CommandRegistry } from './command-registry.js';
 import type { PermissionModeManager } from '../control/permission-modes.js';
+import type { CommandSettingsStore } from '../settings/command-settings.js';
 import {
   formatApprovalResult,
 } from './formatter.js';
@@ -35,9 +36,11 @@ export async function createBot(
   commandRegistry: CommandRegistry,
   _permissionModeManager: PermissionModeManager,
   runtimeSettings: RuntimeSettings,
+  commandSettingsStore: CommandSettingsStore,
   onCleanupInactiveTopics?: () => Promise<number>,
   refreshSettings?: () => void,
   onCleanupOldButtons?: () => Promise<number>,
+  onRefreshMenu?: () => Promise<void>,
 ): Promise<Bot<BotContext>> {
   const bot = new Bot<BotContext>(config.telegramBotToken);
 
@@ -331,9 +334,11 @@ export async function createBot(
       await ctx.answerCallbackQuery({ text: 'Cleanup not available', show_alert: true });
       return;
     }
+    const startedAt = Date.now();
+    console.log('[SETTINGS] Inactive topic cleanup requested');
     await ctx.answerCallbackQuery({ text: 'Removing inactive topics...' });
     const removed = await onCleanupInactiveTopics();
-    console.log(`[SETTINGS] Removed ${removed} inactive topic(s)`);
+    console.log(`[SETTINGS] Removed ${removed} inactive topic(s) in ${Date.now() - startedAt}ms`);
     refreshSettings?.();
   });
 
@@ -346,9 +351,11 @@ export async function createBot(
       });
       return;
     }
+    const startedAt = Date.now();
+    console.log('[SETTINGS] Old approval button cleanup requested');
     await ctx.answerCallbackQuery({ text: 'Cleaning old buttons... this may take a minute.' });
     const cleaned = await onCleanupOldButtons?.() ?? 0;
-    console.log(`[SETTINGS] Cleaned ${cleaned} old approval button(s)`);
+    console.log(`[SETTINGS] Cleaned ${cleaned} old approval button(s) in ${Date.now() - startedAt}ms`);
   });
 
   // --- AskUserQuestion callback query handlers ---
@@ -429,6 +436,356 @@ export async function createBot(
     }
   });
 
+  // --- Submenu state machine ---
+  // Tracks which user is waiting to provide parameters for a subcommand.
+  // Keyed by chatId (the forum group ID). Resets on restart (intentional).
+  const pendingSubcmd = new Map<number, {
+    claudeName: string;
+    messageId: number;
+    threadId: number;
+    createdAt: number;
+  }>();
+
+  const SUBMENU_PAGE_SIZE = 8;
+
+  /** Build an inline keyboard for a namespace submenu page */
+  function buildSubmenuKeyboard(ns: string, entries: Array<{ claudeName: string; description: string }>, page: number): InlineKeyboard {
+    const start = page * SUBMENU_PAGE_SIZE;
+    const pageEntries = entries.slice(start, start + SUBMENU_PAGE_SIZE);
+    const kb = new InlineKeyboard();
+
+    for (let i = 0; i < pageEntries.length; i++) {
+      const e = pageEntries[i];
+      // Button label: strip namespace prefix for readability, title-case
+      const rawName = e.claudeName.includes(':') ? e.claudeName.split(':').slice(1).join(':') : e.claudeName;
+      const label = rawName.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()).slice(0, 20);
+      // callback_data: sub:<claudeName> (max 64 bytes; claudeNames are typically <40 chars)
+      const cbData = `sub:${e.claudeName}`.slice(0, 64);
+      kb.text(label, cbData);
+      if (i % 2 === 1 && i < pageEntries.length - 1) kb.row();
+    }
+
+    // Pagination row
+    const totalPages = Math.ceil(entries.length / SUBMENU_PAGE_SIZE);
+    if (totalPages > 1) {
+      kb.row();
+      if (page > 0) kb.text('\u2190 Prev', `subp:${ns}:${page - 1}`);
+      kb.text(`${page + 1}/${totalPages}`, 'subp_noop');
+      if (page < totalPages - 1) kb.text('Next \u2192', `subp:${ns}:${page + 1}`);
+    }
+
+    return kb;
+  }
+
+  /** Build the submenu message text for a namespace */
+  function buildSubmenuText(ns: string, entries: Array<{ claudeName: string; description: string }>): string {
+    return `\uD83D\uDCC1 <b>/${escapeHtml(ns)}</b> \u2014 ${entries.length} command${entries.length !== 1 ? 's' : ''}\n\nSelect a command:`;
+  }
+
+  /** Register submenu namespace command handler for all submenu-mode namespaces */
+  function registerSubmenuHandlers(): void {
+    const nsByMode = commandRegistry.getCommandsByNamespace();
+
+    for (const [ns, claudeNames] of nsByMode) {
+      if (!ns) continue; // skip top-level
+      const nsSetting = commandSettingsStore.getNamespaceSetting(ns);
+      if (nsSetting.mode !== 'submenu') continue;
+
+      const entries = claudeNames
+        .map((cn) => {
+          const e = commandRegistry.getByClaudeName(cn);
+          return e ? { claudeName: e.claudeName, description: e.description } : null;
+        })
+        .filter((e): e is { claudeName: string; description: string } => e !== null)
+        .filter((e) => commandSettingsStore.getCommandSetting(e.claudeName).enabled);
+
+      if (entries.length === 0) continue;
+
+      // Register handler for /ns command (Telegram lowercases everything)
+      // Use message:text middleware pattern to handle dynamic namespace names
+      // (bot.command() works fine for lowercase ASCII names)
+      bot.command(ns.toLowerCase(), async (ctx) => {
+        const threadId = ctx.message?.message_thread_id;
+        const chatId = ctx.chat?.id;
+        if (!chatId) return;
+
+        const kb = buildSubmenuKeyboard(ns, entries, 0);
+        const text = buildSubmenuText(ns, entries);
+
+        await ctx.reply(text, {
+          reply_markup: kb,
+          message_thread_id: threadId,
+        });
+
+        // Clear any pending subcommand when showing a new submenu
+        pendingSubcmd.delete(chatId);
+      });
+    }
+  }
+
+  registerSubmenuHandlers();
+
+  // --- Submenu callback: user tapped a subcommand button ---
+  bot.callbackQuery(/^sub:(.+)$/, async (ctx) => {
+    const claudeName = ctx.match[1];
+    const chatId = ctx.chat?.id;
+    const threadId = ctx.callbackQuery.message?.message_thread_id;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!chatId || !messageId) {
+      await ctx.answerCallbackQuery({ text: 'Something went wrong', show_alert: true });
+      return;
+    }
+
+    const entry = commandRegistry.getByClaudeName(claudeName);
+    if (!entry) {
+      await ctx.answerCallbackQuery({ text: 'Command not found', show_alert: true });
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+
+    // If parameters === 'none', execute immediately
+    if (entry.parameters === 'none') {
+      pendingSubcmd.delete(chatId);
+      commandSettingsStore.recordUse(claudeName);
+      const session = threadId ? sessionStore.getByThreadId(threadId) : null;
+      if (!session || session.status !== 'active') {
+        await ctx.editMessageText(`\u274C No active session in this topic.`, { reply_markup: undefined });
+        return;
+      }
+      const result = await inputRouter.send(session.sessionId, `/${claudeName}`);
+      if (result.status === 'sent') {
+        await ctx.editMessageText(`\u26A1 Running: <code>/${escapeHtml(claudeName)}</code>`, { reply_markup: undefined });
+      } else {
+        await ctx.editMessageText(`\u274C Failed: ${escapeHtml(result.error ?? 'unknown error')}`, { reply_markup: undefined });
+      }
+      return;
+    }
+
+    // Otherwise: show parameter prompt
+    pendingSubcmd.set(chatId, { claudeName, messageId, threadId: threadId ?? 0, createdAt: Date.now() });
+
+    const paramHint = entry.parameters
+      ? `Parameters: <code>${escapeHtml(entry.parameters)}</code>`
+      : 'Parameters: (none required, or type anything to pass as arguments)';
+
+    const promptText =
+      `\u25B6 <b>${escapeHtml(claudeName)}</b>\n` +
+      `${escapeHtml(entry.description)}\n\n` +
+      `${paramHint}\n\n` +
+      `Type your parameters and send, or:`;
+
+    const promptKb = new InlineKeyboard()
+      .text('\u25B6 Run without parameters', 'subrun')
+      .row()
+      .text('\u2717 Cancel', 'subcancel');
+
+    try {
+      await ctx.editMessageText(promptText, { reply_markup: promptKb });
+    } catch (err) {
+      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+        console.warn('Failed to edit submenu to prompt:', err instanceof Error ? err.message : err);
+      }
+    }
+  });
+
+  // --- Submenu pagination ---
+  bot.callbackQuery(/^subp:([^:]+):(\d+)$/, async (ctx) => {
+    const ns = ctx.match[1];
+    const page = parseInt(ctx.match[2], 10);
+    await ctx.answerCallbackQuery();
+
+    const nsByMode = commandRegistry.getCommandsByNamespace();
+    const claudeNames = nsByMode.get(ns) ?? [];
+    const entries = claudeNames
+      .map((cn) => {
+        const e = commandRegistry.getByClaudeName(cn);
+        return e ? { claudeName: e.claudeName, description: e.description } : null;
+      })
+      .filter((e): e is { claudeName: string; description: string } => e !== null)
+      .filter((e) => commandSettingsStore.getCommandSetting(e.claudeName).enabled);
+
+    const kb = buildSubmenuKeyboard(ns, entries, page);
+    const text = buildSubmenuText(ns, entries);
+    try {
+      await ctx.editMessageText(text, { reply_markup: kb });
+    } catch { /* message may not be modified */ }
+  });
+
+  bot.callbackQuery('subp_noop', async (ctx) => {
+    await ctx.answerCallbackQuery();
+  });
+
+  // --- Submenu run-without-parameters ---
+  bot.callbackQuery('subrun', async (ctx) => {
+    const chatId = ctx.chat?.id;
+    const threadId = ctx.callbackQuery.message?.message_thread_id;
+    if (!chatId) {
+      await ctx.answerCallbackQuery({ text: 'Something went wrong', show_alert: true });
+      return;
+    }
+
+    const pending = pendingSubcmd.get(chatId);
+    if (!pending) {
+      await ctx.answerCallbackQuery({ text: 'No pending command', show_alert: true });
+      return;
+    }
+    pendingSubcmd.delete(chatId);
+    await ctx.answerCallbackQuery();
+
+    commandSettingsStore.recordUse(pending.claudeName);
+    const session = threadId ? sessionStore.getByThreadId(threadId) : null;
+    if (!session || session.status !== 'active') {
+      await ctx.editMessageText(`\u274C No active session in this topic.`, { reply_markup: undefined });
+      return;
+    }
+    const result = await inputRouter.send(session.sessionId, `/${pending.claudeName}`);
+    if (result.status === 'sent') {
+      await ctx.editMessageText(`\u26A1 Running: <code>/${escapeHtml(pending.claudeName)}</code>`, { reply_markup: undefined });
+    } else {
+      await ctx.editMessageText(`\u274C Failed: ${escapeHtml(result.error ?? 'unknown error')}`, { reply_markup: undefined });
+    }
+  });
+
+  // --- Submenu cancel ---
+  bot.callbackQuery('subcancel', async (ctx) => {
+    const chatId = ctx.chat?.id;
+    if (!chatId) { await ctx.answerCallbackQuery(); return; }
+    pendingSubcmd.delete(chatId);
+    await ctx.answerCallbackQuery();
+    try {
+      await ctx.editMessageText('Cancelled.', { reply_markup: undefined });
+    } catch { /* best-effort */ }
+  });
+
+  // --- /commands UI ---
+  bot.command('commands', async (ctx) => {
+    const chatId = ctx.chat?.id;
+    if (!chatId) return;
+
+    await sendCommandsOverview(ctx, chatId);
+  });
+
+  async function sendCommandsOverview(ctx: Context, _chatId: number): Promise<void> {
+    const nsByMode = commandRegistry.getCommandsByNamespace();
+    const allEntries = commandRegistry.getEntries();
+    const totalCount = allEntries.length;
+
+    // Count what's in Telegram menu
+    let menuCount = 0;
+    const nsLines: string[] = [];
+    const kb = new InlineKeyboard();
+
+    // Top-level commands (no namespace)
+    const topLevel = nsByMode.get('') ?? [];
+    if (topLevel.length > 0) {
+      const enabledCount = topLevel.filter((cn) => commandSettingsStore.getCommandSetting(cn).enabled).length;
+      nsLines.push(`<b>(top-level)</b> (${enabledCount}) \u2014 Direct`);
+      menuCount += enabledCount;
+    }
+
+    let rowItems = 0;
+    for (const [ns, claudeNames] of nsByMode) {
+      if (!ns) continue;
+      const setting = commandSettingsStore.getNamespaceSetting(ns);
+      const enabledCount = claudeNames.filter((cn) => commandSettingsStore.getCommandSetting(cn).enabled).length;
+      const modeLabel = setting.mode === 'submenu' ? 'Submenu' : 'Direct';
+      const toggleLabel = setting.mode === 'submenu' ? '\u2192 Direct' : '\u2192 Submenu';
+      const toggleMode = setting.mode === 'submenu' ? 'direct' : 'submenu';
+      nsLines.push(`<b>${escapeHtml(ns)}</b> (${enabledCount}) \u2014 ${modeLabel}`);
+      menuCount += setting.mode === 'submenu' ? 1 : enabledCount;
+
+      kb.text(`${ns}: ${toggleLabel}`, `nsmode:${ns}:${toggleMode}`);
+      rowItems++;
+      if (rowItems % 2 === 0) kb.row();
+    }
+
+    kb.row();
+    kb.text('\uD83D\uDD04 Refresh Menu', 'cmd_refresh');
+
+    const header =
+      `\uD83D\uDCCB <b>Commands</b> \u2014 ${menuCount} in Telegram menu (${totalCount} total)\n\n` +
+      nsLines.join('\n');
+
+    try {
+      await ctx.reply(header, {
+        reply_markup: kb,
+        message_thread_id: ctx.message?.message_thread_id,
+      });
+    } catch (err) {
+      console.warn('Failed to send /commands overview:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  // --- Namespace mode toggle ---
+  bot.callbackQuery(/^nsmode:([^:]+):(direct|submenu)$/, async (ctx) => {
+    const ns = ctx.match[1];
+    const newMode = ctx.match[2] as 'direct' | 'submenu';
+    commandSettingsStore.setNamespaceSetting(ns, { mode: newMode });
+    await ctx.answerCallbackQuery({ text: `${ns}: switched to ${newMode}` });
+
+    // Re-render the overview in-place
+    const chatId = ctx.chat?.id;
+    if (!chatId) return;
+
+    const nsByMode = commandRegistry.getCommandsByNamespace();
+    const allEntries = commandRegistry.getEntries();
+    const totalCount = allEntries.length;
+
+    let menuCount = 0;
+    const nsLines: string[] = [];
+    const kb = new InlineKeyboard();
+
+    const topLevel = nsByMode.get('') ?? [];
+    if (topLevel.length > 0) {
+      const enabledCount = topLevel.filter((cn) => commandSettingsStore.getCommandSetting(cn).enabled).length;
+      nsLines.push(`<b>(top-level)</b> (${enabledCount}) \u2014 Direct`);
+      menuCount += enabledCount;
+    }
+
+    let rowItems = 0;
+    for (const [nsCurrent, claudeNames] of nsByMode) {
+      if (!nsCurrent) continue;
+      const setting = commandSettingsStore.getNamespaceSetting(nsCurrent);
+      const enabledCount = claudeNames.filter((cn) => commandSettingsStore.getCommandSetting(cn).enabled).length;
+      const modeLabel = setting.mode === 'submenu' ? 'Submenu' : 'Direct';
+      const toggleLabel = setting.mode === 'submenu' ? '\u2192 Direct' : '\u2192 Submenu';
+      const toggleMode = setting.mode === 'submenu' ? 'direct' : 'submenu';
+      nsLines.push(`<b>${escapeHtml(nsCurrent)}</b> (${enabledCount}) \u2014 ${modeLabel}`);
+      menuCount += setting.mode === 'submenu' ? 1 : enabledCount;
+
+      kb.text(`${nsCurrent}: ${toggleLabel}`, `nsmode:${nsCurrent}:${toggleMode}`);
+      rowItems++;
+      if (rowItems % 2 === 0) kb.row();
+    }
+
+    kb.row();
+    kb.text('\uD83D\uDD04 Refresh Menu', 'cmd_refresh');
+
+    const header =
+      `\uD83D\uDCCB <b>Commands</b> \u2014 ${menuCount} in Telegram menu (${totalCount} total)\n\n` +
+      nsLines.join('\n');
+
+    try {
+      await ctx.editMessageText(header, { reply_markup: kb });
+    } catch (err) {
+      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+        console.warn('Failed to edit commands overview:', err instanceof Error ? err.message : err);
+      }
+    }
+  });
+
+  // --- Refresh Telegram menu ---
+  bot.callbackQuery('cmd_refresh', async (ctx) => {
+    await ctx.answerCallbackQuery({ text: 'Refreshing Telegram menu...' });
+    try {
+      await onRefreshMenu?.();
+    } catch (err) {
+      console.warn('Menu refresh error:', err instanceof Error ? err.message : err);
+    }
+  });
+
+  // CLI command forwarding also needs to handle pending subcmd parameter input
   // --- CLI command forwarding (catch-all for non-bot-native commands) ---
   bot.on('message:text', async (ctx, next) => {
     const text = ctx.message.text;
@@ -485,13 +842,42 @@ export async function createBot(
     // Phase 12: Ignore text messages in settings topic
     if (threadId === runtimeSettings.settingsTopicId) return;
 
+    const chatId = ctx.chat?.id;
+    const rawText = ctx.message.text;
+
+    // --- Pending subcommand parameter interception ---
+    // If the user has a pending subcommand waiting for params, treat this non-command message as args.
+    // (Commands starting with '/' are handled by the command handler above, not here.)
+    if (chatId && !rawText.startsWith('/')) {
+      const pending = pendingSubcmd.get(chatId);
+      if (pending && threadId === pending.threadId) {
+        pendingSubcmd.delete(chatId);
+        const session = sessionStore.getByThreadId(threadId);
+        if (!session || session.status !== 'active') {
+          await ctx.reply('\u274C No active session in this topic.', { message_thread_id: threadId });
+          return;
+        }
+        commandSettingsStore.recordUse(pending.claudeName);
+        const result = await inputRouter.send(session.sessionId, `/${pending.claudeName} ${rawText}`);
+        if (result.status === 'sent') {
+          try { await ctx.react('\u26A1'); } catch { /* ignore */ }
+        } else {
+          await ctx.reply(
+            `\u274C Failed to send command: ${result.error}`,
+            { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
+          );
+        }
+        return;
+      }
+    }
+
     // Find session for this topic
     const session = sessionStore.getByThreadId(threadId);
     if (!session) return; // Not a managed session topic
     if (session.status !== 'active') return; // Session is closed
 
     // Include quoted message context when replying to a specific message
-    let text = ctx.message.text;
+    let text = rawText;
     const replied = ctx.message.reply_to_message;
     if (replied && 'text' in replied && replied.text) {
       text = `> ${replied.text.split('\n').join('\n> ')}\n\n${text}`;

@@ -14,9 +14,8 @@ const ENV_VAR_NAME = 'CLAUDE_CODE_TELEGRAM_SECRET';
  * ~/.claude-o-gram/hook-secret with mode 0o600 (owner-only).
  * On subsequent runs, reads the existing secret.
  *
- * Also sets the secret as an environment variable so Claude Code processes
- * (which inherit the bot's environment) can reference it in hook headers
- * via allowedEnvVars.
+ * Also sets the secret as an environment variable for compatibility and
+ * manual debugging workflows.
  */
 export function getOrCreateHookSecret(): string {
   if (!existsSync(SECRET_DIR)) {

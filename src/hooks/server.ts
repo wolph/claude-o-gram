@@ -11,6 +11,13 @@ import type {
   SubagentStopPayload,
 } from '../types/hooks.js';
 import type { HookHandlers } from './handlers.js';
+import type { HookEvent } from '../runtime/runtime-status.js';
+
+interface HookServerObservability {
+  onHookReceived?: (event: HookEvent) => void;
+  onAuthFailure?: (route: string) => void;
+  onHandlerError?: (route: string, error: unknown) => void;
+}
 /**
  * Create and configure the Fastify HTTP server with hook routes.
  *
@@ -25,8 +32,9 @@ export async function createHookServer(
   handlers: HookHandlers,
   hookSecret: string,
   onAgentToolDetected?: (sessionId: string, toolName: string, toolInput: Record<string, unknown>) => void,
+  observability?: HookServerObservability,
 ): Promise<FastifyInstance> {
-  const fastify = Fastify({ logger: true });
+  const fastify = Fastify({ logger: false });
 
   // SECURITY: Validate Bearer token on all /hooks/* routes.
   // Rejects requests from other local processes that don't know the secret.
@@ -37,6 +45,7 @@ export async function createHookServer(
 
     const auth = request.headers.authorization;
     if (!auth || auth !== `Bearer ${hookSecret}`) {
+      observability?.onAuthFailure?.(request.url);
       reply.code(401).send({ error: 'Unauthorized' });
       return;
     }
@@ -46,9 +55,11 @@ export async function createHookServer(
   fastify.post<{ Body: SessionStartPayload }>(
     '/hooks/session-start',
     async (request) => {
+      observability?.onHookReceived?.('SessionStart');
       try {
         await handlers.handleSessionStart(request.body as SessionStartPayload);
       } catch (err) {
+        observability?.onHandlerError?.('/hooks/session-start', err);
         // Log but do not block Claude Code -- always return 200
         request.log.error(err, 'Error handling session-start hook');
       }
@@ -60,9 +71,11 @@ export async function createHookServer(
   fastify.post<{ Body: SessionEndPayload }>(
     '/hooks/session-end',
     async (request) => {
+      observability?.onHookReceived?.('SessionEnd');
       try {
         await handlers.handleSessionEnd(request.body as SessionEndPayload);
       } catch (err) {
+        observability?.onHandlerError?.('/hooks/session-end', err);
         request.log.error(err, 'Error handling session-end hook');
       }
       return {};
@@ -74,10 +87,12 @@ export async function createHookServer(
   fastify.post<{ Body: PostToolUsePayload }>(
     '/hooks/post-tool-use',
     async (request) => {
+      observability?.onHookReceived?.('PostToolUse');
       // Fire and forget -- process asynchronously
       handlers
         .handlePostToolUse(request.body as PostToolUsePayload)
         .catch((err) => {
+          observability?.onHandlerError?.('/hooks/post-tool-use', err);
           request.log.error(err, 'Error handling post-tool-use hook');
         });
       return {};
@@ -89,9 +104,11 @@ export async function createHookServer(
   fastify.post<{ Body: NotificationPayload }>(
     '/hooks/notification',
     async (request) => {
+      observability?.onHookReceived?.('Notification');
       handlers
         .handleNotification(request.body as NotificationPayload)
         .catch((err) => {
+          observability?.onHandlerError?.('/hooks/notification', err);
           request.log.error(err, 'Error handling notification hook');
         });
       return {};
@@ -103,7 +120,9 @@ export async function createHookServer(
   fastify.post<{ Body: StopPayload }>(
     '/hooks/stop',
     async (request) => {
+      observability?.onHookReceived?.('Stop');
       handlers.handleStop(request.body as StopPayload).catch((err) => {
+        observability?.onHandlerError?.('/hooks/stop', err);
         request.log.error(err, 'Error handling stop hook');
       });
       return {};
@@ -118,6 +137,7 @@ export async function createHookServer(
   fastify.post<{ Body: PreToolUsePayload }>(
     '/hooks/pre-tool-use',
     async (request) => {
+      observability?.onHookReceived?.('PreToolUse');
       const payload = request.body as PreToolUsePayload;
 
       // Stash Agent/Task description for SubagentStart correlation
@@ -127,6 +147,7 @@ export async function createHookServer(
 
       // Fire and forget — post informational message to Telegram asynchronously
       handlers.handlePreToolUse(payload).catch((err) => {
+        observability?.onHandlerError?.('/hooks/pre-tool-use', err);
         request.log.error(err, 'Error handling pre-tool-use hook');
       });
 
@@ -136,12 +157,14 @@ export async function createHookServer(
   );
 
   // POST /hooks/subagent-start (fire-and-forget)
-  // SubagentStart arrives via command hook bridge (shell script -> curl -> here)
+  // SubagentStart arrives directly from an HTTP hook.
   fastify.post<{ Body: SubagentStartPayload }>(
     '/hooks/subagent-start',
     async (request) => {
+      observability?.onHookReceived?.('SubagentStart');
       handlers.handleSubagentStart(request.body as SubagentStartPayload)
         .catch((err) => {
+          observability?.onHandlerError?.('/hooks/subagent-start', err);
           request.log.error(err, 'Error handling subagent-start hook');
         });
       return {};
@@ -152,8 +175,10 @@ export async function createHookServer(
   fastify.post<{ Body: SubagentStopPayload }>(
     '/hooks/subagent-stop',
     async (request) => {
+      observability?.onHookReceived?.('SubagentStop');
       handlers.handleSubagentStop(request.body as SubagentStopPayload)
         .catch((err) => {
+          observability?.onHandlerError?.('/hooks/subagent-stop', err);
           request.log.error(err, 'Error handling subagent-stop hook');
         });
       return {};

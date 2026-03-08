@@ -59,6 +59,7 @@ export class TranscriptWatcher {
   private onSidechainMessage?: (text: string) => void;
   private onAskUserQuestion?: (data: AskUserQuestionData) => void;
   private onAskUserQuestionResult?: (toolUseId: string, answer: string) => void;
+  private onUserMessage?: (text: string) => void;
 
   constructor(
     filePath: string,
@@ -67,6 +68,7 @@ export class TranscriptWatcher {
     onSidechainMessage?: (text: string) => void,
     onAskUserQuestion?: (data: AskUserQuestionData) => void,
     onAskUserQuestionResult?: (toolUseId: string, answer: string) => void,
+    onUserMessage?: (text: string) => void,
   ) {
     this.filePath = filePath;
     this.onAssistantMessage = onAssistantMessage;
@@ -74,6 +76,7 @@ export class TranscriptWatcher {
     this.onSidechainMessage = onSidechainMessage;
     this.onAskUserQuestion = onAskUserQuestion;
     this.onAskUserQuestionResult = onAskUserQuestionResult;
+    this.onUserMessage = onUserMessage;
   }
 
   /**
@@ -218,18 +221,7 @@ export class TranscriptWatcher {
 
       // Extract text content (same logic as main chain)
       const content = entry.message.content;
-      let text: string | null = null;
-      if (typeof content === 'string') {
-        text = content;
-      } else if (Array.isArray(content)) {
-        const textParts = (content as ContentBlock[])
-          .filter(
-            (block): block is { type: 'text'; text: string } =>
-              block.type === 'text',
-          )
-          .map((block) => block.text);
-        text = textParts.length > 0 ? textParts.join('\n') : null;
-      }
+      const text = this.extractTextContent(content);
 
       // Detect AskUserQuestion in sidechain entries too
       this.detectAskUserQuestion(content);
@@ -242,7 +234,12 @@ export class TranscriptWatcher {
 
     // Detect AskUserQuestion tool_result in user entries
     if (entry.type === 'user' || entry.message.role === 'user') {
-      this.detectAskUserQuestionResult(entry.message.content);
+      const content = entry.message.content;
+      this.detectAskUserQuestionResult(content);
+      const userText = this.extractTextContent(content);
+      if (userText && this.onUserMessage) {
+        this.onUserMessage(userText);
+      }
       return;
     }
 
@@ -252,21 +249,7 @@ export class TranscriptWatcher {
 
     // Extract text content from the message
     const content = entry.message.content;
-    let text: string | null = null;
-
-    if (typeof content === 'string') {
-      text = content;
-    } else if (Array.isArray(content)) {
-      // Filter for text blocks only, skip tool_use and tool_result
-      const textParts = (content as ContentBlock[])
-        .filter(
-          (block): block is { type: 'text'; text: string } =>
-            block.type === 'text',
-        )
-        .map((block) => block.text);
-
-      text = textParts.length > 0 ? textParts.join('\n') : null;
-    }
+    const text = this.extractTextContent(content);
 
     // Detect AskUserQuestion tool_use blocks
     this.detectAskUserQuestion(content);
@@ -314,6 +297,27 @@ export class TranscriptWatcher {
 
       this.onAskUserQuestion(parsed);
     }
+  }
+
+  /**
+   * Extract plain text content from a transcript message.
+   * Ignores tool_use/tool_result blocks.
+   */
+  private extractTextContent(content: string | ContentBlock[]): string | null {
+    if (typeof content === 'string') {
+      const trimmed = content.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    }
+    if (!Array.isArray(content)) return null;
+    const textParts = content
+      .filter(
+        (block): block is { type: 'text'; text: string } =>
+          block.type === 'text' && typeof block.text === 'string',
+      )
+      .map((block) => block.text.trim())
+      .filter((text) => text.length > 0);
+    if (textParts.length === 0) return null;
+    return textParts.join('\n');
   }
 
   /**
