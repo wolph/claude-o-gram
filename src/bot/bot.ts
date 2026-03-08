@@ -513,10 +513,11 @@ export async function createBot(
 
       if (entries.length === 0) continue;
 
-      // Register handler for /ns command (Telegram lowercases everything)
-      // Use message:text middleware pattern to handle dynamic namespace names
-      // (bot.command() works fine for lowercase ASCII names)
-      bot.command(ns.toLowerCase(), async (ctx) => {
+      // Sanitize namespace to valid Telegram command name
+      const tgNs = ns.toLowerCase().replace(/-/g, '_').replace(/[^a-z0-9_]/g, '').slice(0, 32);
+      if (!tgNs) continue;
+
+      bot.command(tgNs, async (ctx) => {
         const threadId = ctx.message?.message_thread_id;
         const chatId = ctx.chat?.id;
         if (!chatId) return;

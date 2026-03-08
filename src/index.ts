@@ -184,12 +184,15 @@ export async function main(): Promise<void> {
 
       if (setting.mode === 'submenu') {
         // Register one entry for the whole namespace
+        // Sanitize namespace name to valid Telegram command format (same rules as individual commands)
+        const tgNs = ns.toLowerCase().replace(/-/g, '_').replace(/[^a-z0-9_]/g, '').slice(0, 32);
+        if (!tgNs) continue;
         const descriptions = enabledNames
           .map((cn) => allEntries.find((x) => x.claudeName === cn)?.description || cn)
           .slice(0, 3)
           .join(', ');
         result.push({
-          command: ns.toLowerCase(),
+          command: tgNs,
           description: `${enabledNames.length} commands: ${descriptions}`.slice(0, 256),
         });
       } else {
