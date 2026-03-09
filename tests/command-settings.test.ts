@@ -96,4 +96,27 @@ describe('CommandSettingsStore', () => {
     expect(s.usageCount).toBe(6);
     expect(s.lastUsedAt).toBeGreaterThan(0);
   });
+
+  it('applyDefaults respects global directCutoff cap (already-direct commands reduce available slots)', () => {
+    const store = new CommandSettingsStore(filePath);
+    // Pre-populate with 2 existing direct commands
+    store.setCommandSetting('existing:a', { visibility: 'direct', usageCount: 0 });
+    store.setCommandSetting('existing:b', { visibility: 'direct', usageCount: 0 });
+    store.setDirectCutoff(2);
+    // New high-usage command — but cutoff is already full
+    const ns = new Map([['new', ['new:cmd']]]);
+    store.applyDefaults(ns, new Map([['new:cmd', 999]]));
+    // Should be submenu because the 2 slots are taken
+    expect(store.getCommandSetting('new:cmd').visibility).toBe('submenu');
+  });
+
+  it('applyTopDefaults only reassigns visibility for passed command names', () => {
+    const store = new CommandSettingsStore(filePath);
+    store.setCommandSetting('cmd:included', { visibility: 'hidden', usageCount: 50 });
+    store.setCommandSetting('cmd:excluded', { visibility: 'direct', usageCount: 0 });
+    store.setDirectCutoff(1);
+    store.applyTopDefaults(['cmd:included']); // 'cmd:excluded' not passed
+    expect(store.getCommandSetting('cmd:included').visibility).toBe('direct');
+    expect(store.getCommandSetting('cmd:excluded').visibility).toBe('direct'); // unchanged
+  });
 });
