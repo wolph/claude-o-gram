@@ -72,10 +72,12 @@ describe('CommandSettingsStore', () => {
     expect(store.getCommandSetting('gsd:progress').usageCount).toBe(5);
   });
 
-  it('setDirectCutoff persists and is readable', () => {
+  it('setDirectCutoff persists and is readable after reload', () => {
     const store = new CommandSettingsStore(filePath);
     store.setDirectCutoff(10);
-    expect(store.getDirectCutoff()).toBe(10);
+    store.shutdown(); // flush to disk
+    const reloaded = new CommandSettingsStore(filePath);
+    expect(reloaded.getDirectCutoff()).toBe(10);
   });
 
   it('applyTopDefaults reassigns visibility by current usageCount', () => {
@@ -118,5 +120,33 @@ describe('CommandSettingsStore', () => {
     store.applyTopDefaults(['cmd:included']); // 'cmd:excluded' not passed
     expect(store.getCommandSetting('cmd:included').visibility).toBe('direct');
     expect(store.getCommandSetting('cmd:excluded').visibility).toBe('direct'); // unchanged
+  });
+
+  it('persists command settings and reloads them correctly (round-trip)', () => {
+    const store = new CommandSettingsStore(filePath);
+    store.setCommandSetting('gsd:progress', { visibility: 'direct', usageCount: 42, lastUsedAt: 1000 });
+    store.setDirectCutoff(15);
+    store.shutdown(); // flush to disk
+
+    const reloaded = new CommandSettingsStore(filePath);
+    const s = reloaded.getCommandSetting('gsd:progress');
+    expect(s.visibility).toBe('direct');
+    expect(s.usageCount).toBe(42);
+    expect(s.lastUsedAt).toBe(1000);
+    expect(reloaded.getDirectCutoff()).toBe(15);
+  });
+
+  it('migrates versionless (legacy) data the same as v1', () => {
+    const versionlessData = {
+      // no version field
+      namespaces: { gsd: { mode: 'direct' } },
+      commands: {
+        'gsd:legacy': { enabled: true, usageCount: 3 },
+      },
+    };
+    writeFileSync(filePath, JSON.stringify(versionlessData));
+    const store = new CommandSettingsStore(filePath);
+    expect(store.getCommandSetting('gsd:legacy').visibility).toBe('submenu');
+    expect(store.getCommandSetting('gsd:legacy').usageCount).toBe(3);
   });
 });
