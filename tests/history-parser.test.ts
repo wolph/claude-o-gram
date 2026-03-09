@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseHistoryUsage } from '../src/monitoring/history-parser.js';
@@ -9,8 +9,7 @@ describe('parseHistoryUsage', () => {
   let historyPath: string;
 
   beforeEach(() => {
-    dir = join(tmpdir(), `history-test-${Date.now()}`);
-    mkdirSync(dir, { recursive: true });
+    dir = mkdtempSync(join(tmpdir(), 'history-test-'));
     historyPath = join(dir, 'history.jsonl');
   });
 
@@ -69,5 +68,18 @@ describe('parseHistoryUsage', () => {
 
     const result = await parseHistoryUsage(historyPath);
     expect(result.get('good')).toBe(1);
+  });
+
+  it('skips empty and whitespace-only lines', async () => {
+    const lines = [
+      JSON.stringify({ display: '/cmd1' }),
+      '',
+      '   ',
+      JSON.stringify({ display: '/cmd2' }),
+    ].join('\n');
+    writeFileSync(historyPath, lines);
+    const result = await parseHistoryUsage(historyPath);
+    expect(result.get('cmd1')).toBe(1);
+    expect(result.get('cmd2')).toBe(1);
   });
 });
