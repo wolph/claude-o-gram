@@ -156,8 +156,15 @@ export async function main(): Promise<void> {
   );
   // Parse ~/.claude/history.jsonl once at startup for usage-seeded defaults
   const historyPath = join(homedir(), '.claude', 'history.jsonl');
-  const usageCounts = await parseHistoryUsage(historyPath);
-  cli.info('CORE', 'Parsed command usage history', { commands: usageCounts.size });
+  let usageCounts = new Map<string, number>();
+  try {
+    usageCounts = await parseHistoryUsage(historyPath);
+    cli.info('CORE', 'Parsed command usage history', { commands: usageCounts.size });
+  } catch (err) {
+    cli.warn('CORE', 'Could not read command history, using empty counts', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   // Apply auto-defaults for all discovered namespaces/commands
   commandSettingsStore.applyDefaults(commandRegistry.getCommandsByNamespace(), usageCounts);
@@ -220,11 +227,23 @@ export async function main(): Promise<void> {
 
     if (result.length > 100) {
       const priorityScore = (cmd: string): number => {
+        // Direct command match
         const e = allEntries.find((x) => x.telegramName === cmd || x.claudeName === cmd);
-        if (!e) return 0;
-        if (e.source === 'builtin') return 3;
-        if (e.source === 'user') return 2;
-        return 1;
+        if (e) {
+          if (e.source === 'builtin') return 3;
+          if (e.source === 'user') return 2;
+          return 1;
+        }
+        // Namespace submenu entry — score by the best source in that namespace
+        const nsEntries = allEntries.filter((x) => {
+          const tgNs = x.claudeName.split(':')[0]
+            .toLowerCase().replace(/-/g, '_').replace(/[^a-z0-9_]/g, '').slice(0, 32);
+          return tgNs === cmd;
+        });
+        if (nsEntries.some((x) => x.source === 'builtin')) return 3;
+        if (nsEntries.some((x) => x.source === 'user')) return 2;
+        if (nsEntries.length > 0) return 1;
+        return 0;
       };
       cli.warn('TELEGRAM', 'Command list exceeds limit after grouping, truncating', {
         count: result.length,
