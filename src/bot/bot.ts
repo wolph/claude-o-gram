@@ -686,7 +686,7 @@ export async function createBot(
     await sendCommandsOverview(ctx, ctx.message?.message_thread_id);
   });
 
-  async function sendCommandsOverview(ctx: BotContext, threadId?: number): Promise<void> {
+  function buildOverviewPayload(): { text: string; keyboard: InlineKeyboard } {
     const nsByMode = commandRegistry.getCommandsByNamespace();
     const allEntries = commandRegistry.getEntries();
     const totalCount = allEntries.length;
@@ -715,7 +715,7 @@ export async function createBot(
         (cn) => commandSettingsStore.getCommandSetting(cn).visibility !== 'hidden',
       ).length;
       directCount += d;
-      if (visible > 0) directCount += 1; // namespace submenu entry itself
+      if (visible > 0) directCount += 1;
       nsLines.push(
         `<b>${escapeHtml(ns)}</b> (${claudeNames.length}) \u2014 ${d} direct, ${visible} visible`,
       );
@@ -730,12 +730,17 @@ export async function createBot(
     kb.row();
     kb.text('\uD83D\uDD04 Refresh Menu', 'cmd_refresh');
 
-    const header =
+    const text =
       `\uD83D\uDCCB <b>Commands</b> \u2014 ${directCount} in menu (${totalCount} total)\n\n` +
       nsLines.join('\n');
 
+    return { text, keyboard: kb };
+  }
+
+  async function sendCommandsOverview(ctx: BotContext, threadId?: number): Promise<void> {
+    const { text, keyboard } = buildOverviewPayload();
     try {
-      await ctx.reply(header, { parse_mode: 'HTML', reply_markup: kb, message_thread_id: threadId });
+      await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard, message_thread_id: threadId });
     } catch (err) {
       console.warn('Failed to send /commands overview:', err instanceof Error ? err.message : err);
     }
@@ -772,13 +777,14 @@ export async function createBot(
     ];
     const kb = new InlineKeyboard();
 
-    for (const { cn, setting } of pageItems) {
+    for (let i = 0; i < pageItems.length; i++) {
+      const { cn, setting } = pageItems[i];
       const count = setting.usageCount;
       const vis = setting.visibility;
       const label = cn.includes(':') ? cn.split(':').slice(1).join(':') : cn;
       const indicator = count > 0 ? '\u25CF' : '\u25CB';
       lines.push(`${indicator} <code>${escapeHtml(label)}</code>  ${count}`);
-      const cbBase = `cmdvis:${cn.slice(0, 50)}`;
+      const cbBase = `cmdvis:${ns}:${safePage}:${i}`;
       kb.text(vis === 'direct' ? '\u2713direct' : 'direct', `${cbBase}:d`);
       kb.text(vis === 'submenu' ? '\u2713submenu' : 'submenu', `${cbBase}:s`);
       kb.text(vis === 'hidden' ? '\u2713hidden' : 'hidden', `${cbBase}:h`);
@@ -786,9 +792,9 @@ export async function createBot(
     }
 
     if (totalPages > 1) {
-      if (safePage > 0) kb.text('\u2190 Prev', `nslist:${ns}:${safePage - 1}`);
+      if (safePage > 0) kb.text('\u2190 Prev', `nslp:${ns}:${safePage - 1}`);
       kb.text(`${safePage + 1}/${totalPages}`, 'subp_noop');
-      if (safePage < totalPages - 1) kb.text('Next \u2192', `nslist:${ns}:${safePage + 1}`);
+      if (safePage < totalPages - 1) kb.text('Next \u2192', `nslp:${ns}:${safePage + 1}`);
     }
 
     const text = lines.join('\n');
@@ -826,38 +832,9 @@ export async function createBot(
     commandSettingsStore.applyTopDefaults(allNames);
     try { await onRefreshMenu?.(); } catch { /* best-effort */ }
 
-    const nsByMode = commandRegistry.getCommandsByNamespace();
-    const allEntries = commandRegistry.getEntries();
-    const totalCount = allEntries.length;
-    const cutoff = commandSettingsStore.getDirectCutoff();
-    let directCount = 0;
-    const nsLines: string[] = [];
-    const kb = new InlineKeyboard();
-    const topLevel = nsByMode.get('') ?? [];
-    if (topLevel.length > 0) {
-      const d = topLevel.filter((cn) => commandSettingsStore.getCommandSetting(cn).visibility === 'direct').length;
-      directCount += d;
-      nsLines.push(`<b>(top-level)</b> (${topLevel.length}) \u2014 ${d} direct`);
-    }
-    let rowItems = 0;
-    for (const [ns, claudeNames] of nsByMode) {
-      if (!ns) continue;
-      const d = claudeNames.filter((cn) => commandSettingsStore.getCommandSetting(cn).visibility === 'direct').length;
-      const visible = claudeNames.filter((cn) => commandSettingsStore.getCommandSetting(cn).visibility !== 'hidden').length;
-      directCount += d + (visible > 0 ? 1 : 0);
-      nsLines.push(`<b>${escapeHtml(ns)}</b> (${claudeNames.length}) \u2014 ${d} direct, ${visible} visible`);
-      kb.text(`${ns} \u2192`, `nslist:${ns}:0`);
-      rowItems++;
-      if (rowItems % 2 === 0) kb.row();
-    }
-    kb.row();
-    kb.text('\uD83D\uDCCA Top Commands', 'cmd_top');
-    kb.text(`\u270F\uFE0F Cutoff: ${cutoff}`, 'cmd_cutoff');
-    kb.row();
-    kb.text('\uD83D\uDD04 Refresh Menu', 'cmd_refresh');
-    const header = `\uD83D\uDCCB <b>Commands</b> \u2014 ${directCount} in menu (${totalCount} total)\n\n` + nsLines.join('\n');
+    const { text: overviewText, keyboard: overviewKb } = buildOverviewPayload();
     try {
-      await ctx.editMessageText(header, { parse_mode: 'HTML', reply_markup: kb });
+      await ctx.editMessageText(overviewText, { parse_mode: 'HTML', reply_markup: overviewKb });
     } catch (err) {
       if (!(err instanceof Error && err.message.includes('message is not modified'))) {
         console.warn('cmd_top edit error:', err instanceof Error ? err.message : err);
@@ -877,38 +854,9 @@ export async function createBot(
     const next = CUTOFF_PRESETS[(idx + 1) % CUTOFF_PRESETS.length];
     commandSettingsStore.setDirectCutoff(next);
     await ctx.answerCallbackQuery({ text: `Cutoff set to ${next}` });
-    // Rebuild the full overview message with updated cutoff
-    const nsByMode2 = commandRegistry.getCommandsByNamespace();
-    const allEntries2 = commandRegistry.getEntries();
-    const totalCount2 = allEntries2.length;
-    let directCount2 = 0;
-    const nsLines2: string[] = [];
-    const kb2 = new InlineKeyboard();
-    const topLevel2 = nsByMode2.get('') ?? [];
-    if (topLevel2.length > 0) {
-      const d = topLevel2.filter((cn) => commandSettingsStore.getCommandSetting(cn).visibility === 'direct').length;
-      directCount2 += d;
-      nsLines2.push(`<b>(top-level)</b> (${topLevel2.length}) \u2014 ${d} direct`);
-    }
-    let rowItems2 = 0;
-    for (const [ns2, claudeNames2] of nsByMode2) {
-      if (!ns2) continue;
-      const d = claudeNames2.filter((cn) => commandSettingsStore.getCommandSetting(cn).visibility === 'direct').length;
-      const visible2 = claudeNames2.filter((cn) => commandSettingsStore.getCommandSetting(cn).visibility !== 'hidden').length;
-      directCount2 += d + (visible2 > 0 ? 1 : 0);
-      nsLines2.push(`<b>${escapeHtml(ns2)}</b> (${claudeNames2.length}) \u2014 ${d} direct, ${visible2} visible`);
-      kb2.text(`${ns2} \u2192`, `nslist:${ns2}:0`);
-      rowItems2++;
-      if (rowItems2 % 2 === 0) kb2.row();
-    }
-    kb2.row();
-    kb2.text('\uD83D\uDCCA Top Commands', 'cmd_top');
-    kb2.text(`\u270F\uFE0F Cutoff: ${next}`, 'cmd_cutoff');
-    kb2.row();
-    kb2.text('\uD83D\uDD04 Refresh Menu', 'cmd_refresh');
-    const header2 = `\uD83D\uDCCB <b>Commands</b> \u2014 ${directCount2} in menu (${totalCount2} total)\n\n` + nsLines2.join('\n');
+    const { text: overviewText, keyboard: overviewKb } = buildOverviewPayload();
     try {
-      await ctx.editMessageText(header2, { parse_mode: 'HTML', reply_markup: kb2 });
+      await ctx.editMessageText(overviewText, { parse_mode: 'HTML', reply_markup: overviewKb });
     } catch (err) {
       if (!(err instanceof Error && err.message.includes('message is not modified'))) {
         console.warn('cmd_cutoff edit error:', err instanceof Error ? err.message : err);
@@ -929,28 +877,53 @@ export async function createBot(
     await sendNsListPage(ctx, ns, page, false, threadId);
   });
 
-  // --- cmdvis: per-command visibility toggle ---
-  bot.callbackQuery(/^cmdvis:(.+):(d|s|h)$/, async (ctx) => {
+  // --- nslp: namespace drill-down pagination (edit in-place) ---
+  bot.callbackQuery(/^nslp:([^:]+):(\d+)$/, async (ctx) => {
     if (!isSettingsAuthorized(ctx)) {
       await ctx.answerCallbackQuery({ text: 'Unauthorized', show_alert: true });
       return;
     }
-    const claudeName = ctx.match[1];
-    const visChar = ctx.match[2];
+    const ns = ctx.match[1];
+    const page = parseInt(ctx.match[2], 10);
+    await ctx.answerCallbackQuery();
+    await sendNsListPage(ctx, ns, page, true);
+  });
+
+  // --- cmdvis: per-command visibility toggle ---
+  bot.callbackQuery(/^cmdvis:([^:]+):(\d+):(\d+):(d|s|h)$/, async (ctx) => {
+    if (!isSettingsAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({ text: 'Unauthorized', show_alert: true });
+      return;
+    }
+    const ns = ctx.match[1];
+    const page = parseInt(ctx.match[2], 10);
+    const idx = parseInt(ctx.match[3], 10);
+    const visChar = ctx.match[4];
     const visMap: Record<string, CommandVisibility> = { d: 'direct', s: 'submenu', h: 'hidden' };
     const visibility = visMap[visChar];
+
+    // Rebuild the same sorted list to find the claudeName by index
+    const nsByMode = commandRegistry.getCommandsByNamespace();
+    const claudeNames = nsByMode.get(ns) ?? [];
+    const allEntries = commandRegistry.getEntries();
+    const items = claudeNames
+      .map((cn) => ({
+        cn,
+        entry: allEntries.find((x) => x.claudeName === cn),
+        setting: commandSettingsStore.getCommandSetting(cn),
+      }))
+      .filter((x) => x.entry !== undefined)
+      .sort((a, b) => b.setting.usageCount - a.setting.usageCount);
+    const pageItems = items.slice(page * NS_DRILL_PAGE_SIZE, (page + 1) * NS_DRILL_PAGE_SIZE);
+    if (idx >= pageItems.length) {
+      await ctx.answerCallbackQuery({ text: 'Command not found', show_alert: true });
+      return;
+    }
+    const claudeName = pageItems[idx].cn;
+
     commandSettingsStore.setCommandVisibility(claudeName, visibility);
     await ctx.answerCallbackQuery({ text: `${claudeName}: ${visibility}` });
-    const msg = ctx.callbackQuery.message;
-    const nsByMode = commandRegistry.getCommandsByNamespace();
-    let foundNs = '';
-    for (const [ns, names] of nsByMode) {
-      if (names.includes(claudeName)) { foundNs = ns; break; }
-    }
-    if (!foundNs) { return; }
-    const pageMatch = (msg && 'text' in msg ? (msg.text ?? '') : '').match(/page (\d+)\//);
-    const currentPage = pageMatch ? parseInt(pageMatch[1], 10) - 1 : 0;
-    await sendNsListPage(ctx, foundNs, currentPage, true);
+    await sendNsListPage(ctx, ns, page, true);
     try { await onRefreshMenu?.(); } catch { /* best-effort */ }
   });
 
