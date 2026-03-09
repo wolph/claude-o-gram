@@ -500,8 +500,10 @@ export async function createBot(
 
     for (const [ns, claudeNames] of nsByMode) {
       if (!ns) continue; // skip top-level
-      const nsSetting = commandSettingsStore.getNamespaceSetting(ns);
-      if (nsSetting.defaultVisibility !== 'submenu') continue;
+      const hasVisible = claudeNames.some(
+        (cn) => commandSettingsStore.getCommandSetting(cn).visibility !== 'hidden',
+      );
+      if (!hasVisible) continue;
 
       const entries = claudeNames
         .map((cn) => {
@@ -774,7 +776,7 @@ export async function createBot(
       const count = setting.usageCount;
       const vis = setting.visibility;
       const label = cn.includes(':') ? cn.split(':').slice(1).join(':') : cn;
-      const indicator = vis !== 'hidden' ? '\u25CF' : '\u25CB';
+      const indicator = count > 0 ? '\u25CF' : '\u25CB';
       lines.push(`${indicator} <code>${escapeHtml(label)}</code>  ${count}`);
       const cbBase = `cmdvis:${cn.slice(0, 50)}`;
       kb.text(vis === 'direct' ? '\u2713direct' : 'direct', `${cbBase}:d`);
@@ -875,24 +877,43 @@ export async function createBot(
     const next = CUTOFF_PRESETS[(idx + 1) % CUTOFF_PRESETS.length];
     commandSettingsStore.setDirectCutoff(next);
     await ctx.answerCallbackQuery({ text: `Cutoff set to ${next}` });
+    // Rebuild the full overview message with updated cutoff
+    const nsByMode2 = commandRegistry.getCommandsByNamespace();
+    const allEntries2 = commandRegistry.getEntries();
+    const totalCount2 = allEntries2.length;
+    let directCount2 = 0;
+    const nsLines2: string[] = [];
+    const kb2 = new InlineKeyboard();
+    const topLevel2 = nsByMode2.get('') ?? [];
+    if (topLevel2.length > 0) {
+      const d = topLevel2.filter((cn) => commandSettingsStore.getCommandSetting(cn).visibility === 'direct').length;
+      directCount2 += d;
+      nsLines2.push(`<b>(top-level)</b> (${topLevel2.length}) \u2014 ${d} direct`);
+    }
+    let rowItems2 = 0;
+    for (const [ns2, claudeNames2] of nsByMode2) {
+      if (!ns2) continue;
+      const d = claudeNames2.filter((cn) => commandSettingsStore.getCommandSetting(cn).visibility === 'direct').length;
+      const visible2 = claudeNames2.filter((cn) => commandSettingsStore.getCommandSetting(cn).visibility !== 'hidden').length;
+      directCount2 += d + (visible2 > 0 ? 1 : 0);
+      nsLines2.push(`<b>${escapeHtml(ns2)}</b> (${claudeNames2.length}) \u2014 ${d} direct, ${visible2} visible`);
+      kb2.text(`${ns2} \u2192`, `nslist:${ns2}:0`);
+      rowItems2++;
+      if (rowItems2 % 2 === 0) kb2.row();
+    }
+    kb2.row();
+    kb2.text('\uD83D\uDCCA Top Commands', 'cmd_top');
+    kb2.text(`\u270F\uFE0F Cutoff: ${next}`, 'cmd_cutoff');
+    kb2.row();
+    kb2.text('\uD83D\uDD04 Refresh Menu', 'cmd_refresh');
+    const header2 = `\uD83D\uDCCB <b>Commands</b> \u2014 ${directCount2} in menu (${totalCount2} total)\n\n` + nsLines2.join('\n');
     try {
-      const msg = ctx.callbackQuery.message;
-      if (msg && 'text' in msg) {
-        const existingKb = msg.reply_markup?.inline_keyboard ?? [];
-        const rebuilt = new InlineKeyboard();
-        for (const row of existingKb) {
-          for (const btn of row) {
-            if ('callback_data' in btn && btn.callback_data === 'cmd_cutoff') {
-              rebuilt.text(`\u270F\uFE0F Cutoff: ${next}`, 'cmd_cutoff');
-            } else if ('callback_data' in btn) {
-              rebuilt.text(btn.text, btn.callback_data);
-            }
-          }
-          rebuilt.row();
-        }
-        await ctx.editMessageReplyMarkup({ reply_markup: rebuilt });
+      await ctx.editMessageText(header2, { parse_mode: 'HTML', reply_markup: kb2 });
+    } catch (err) {
+      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+        console.warn('cmd_cutoff edit error:', err instanceof Error ? err.message : err);
       }
-    } catch { /* best-effort */ }
+    }
   });
 
   // --- nslist: namespace drill-down ---
