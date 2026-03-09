@@ -8,6 +8,7 @@ import type { InputRouter } from '../input/input-router.js';
 import type { CommandRegistry } from './command-registry.js';
 import type { PermissionModeManager } from '../control/permission-modes.js';
 import type { CommandSettingsStore } from '../settings/command-settings.js';
+import type { CommandVisibility } from '../settings/command-settings.js';
 import {
   formatApprovalResult,
 } from './formatter.js';
@@ -500,7 +501,7 @@ export async function createBot(
     for (const [ns, claudeNames] of nsByMode) {
       if (!ns) continue; // skip top-level
       const nsSetting = commandSettingsStore.getNamespaceSetting(ns);
-      if (nsSetting.mode !== 'submenu') continue;
+      if (nsSetting.defaultVisibility !== 'submenu') continue;
 
       const entries = claudeNames
         .map((cn) => {
@@ -508,7 +509,7 @@ export async function createBot(
           return e ? { claudeName: e.claudeName, description: e.description } : null;
         })
         .filter((e): e is { claudeName: string; description: string } => e !== null)
-        .filter((e) => commandSettingsStore.getCommandSetting(e.claudeName).enabled);
+        .filter((e) => commandSettingsStore.getCommandSetting(e.claudeName).visibility !== 'hidden');
 
       if (entries.length === 0) continue;
 
@@ -615,7 +616,7 @@ export async function createBot(
         return e ? { claudeName: e.claudeName, description: e.description } : null;
       })
       .filter((e): e is { claudeName: string; description: string } => e !== null)
-      .filter((e) => commandSettingsStore.getCommandSetting(e.claudeName).enabled);
+      .filter((e) => commandSettingsStore.getCommandSetting(e.claudeName).visibility !== 'hidden');
 
     const kb = buildSubmenuKeyboard(ns, entries, page);
     const text = buildSubmenuText(ns, entries);
@@ -688,7 +689,7 @@ export async function createBot(
     // Top-level commands (no namespace)
     const topLevel = nsByMode.get('') ?? [];
     if (topLevel.length > 0) {
-      const enabledCount = topLevel.filter((cn) => commandSettingsStore.getCommandSetting(cn).enabled).length;
+      const enabledCount = topLevel.filter((cn) => commandSettingsStore.getCommandSetting(cn).visibility !== 'hidden').length;
       nsLines.push(`<b>(top-level)</b> (${enabledCount}) \u2014 Direct`);
       menuCount += enabledCount;
     }
@@ -697,12 +698,12 @@ export async function createBot(
     for (const [ns, claudeNames] of nsByMode) {
       if (!ns) continue;
       const setting = commandSettingsStore.getNamespaceSetting(ns);
-      const enabledCount = claudeNames.filter((cn) => commandSettingsStore.getCommandSetting(cn).enabled).length;
-      const modeLabel = setting.mode === 'submenu' ? 'Submenu' : 'Direct';
-      const toggleLabel = setting.mode === 'submenu' ? '\u2192 Direct' : '\u2192 Submenu';
-      const toggleMode = setting.mode === 'submenu' ? 'direct' : 'submenu';
+      const enabledCount = claudeNames.filter((cn) => commandSettingsStore.getCommandSetting(cn).visibility !== 'hidden').length;
+      const modeLabel = setting.defaultVisibility === 'submenu' ? 'Submenu' : 'Direct';
+      const toggleLabel = setting.defaultVisibility === 'submenu' ? '\u2192 Direct' : '\u2192 Submenu';
+      const toggleMode = setting.defaultVisibility === 'submenu' ? 'direct' : 'submenu';
       nsLines.push(`<b>${escapeHtml(ns)}</b> (${enabledCount}) \u2014 ${modeLabel}`);
-      menuCount += setting.mode === 'submenu' ? 1 : enabledCount;
+      menuCount += setting.defaultVisibility === 'submenu' ? 1 : enabledCount;
 
       kb.text(`${ns}: ${toggleLabel}`, `nsmode:${ns}:${toggleMode}`);
       rowItems++;
@@ -729,8 +730,8 @@ export async function createBot(
   // --- Namespace mode toggle ---
   bot.callbackQuery(/^nsmode:([^:]+):(direct|submenu)$/, async (ctx) => {
     const ns = ctx.match[1];
-    const newMode = ctx.match[2] as 'direct' | 'submenu';
-    commandSettingsStore.setNamespaceSetting(ns, { mode: newMode });
+    const newMode = ctx.match[2] as CommandVisibility;
+    commandSettingsStore.setNamespaceSetting(ns, { defaultVisibility: newMode });
     await ctx.answerCallbackQuery({ text: `${ns}: switched to ${newMode}` });
 
     // Re-render the overview in-place
@@ -747,7 +748,7 @@ export async function createBot(
 
     const topLevel = nsByMode.get('') ?? [];
     if (topLevel.length > 0) {
-      const enabledCount = topLevel.filter((cn) => commandSettingsStore.getCommandSetting(cn).enabled).length;
+      const enabledCount = topLevel.filter((cn) => commandSettingsStore.getCommandSetting(cn).visibility !== 'hidden').length;
       nsLines.push(`<b>(top-level)</b> (${enabledCount}) \u2014 Direct`);
       menuCount += enabledCount;
     }
@@ -756,12 +757,12 @@ export async function createBot(
     for (const [nsCurrent, claudeNames] of nsByMode) {
       if (!nsCurrent) continue;
       const setting = commandSettingsStore.getNamespaceSetting(nsCurrent);
-      const enabledCount = claudeNames.filter((cn) => commandSettingsStore.getCommandSetting(cn).enabled).length;
-      const modeLabel = setting.mode === 'submenu' ? 'Submenu' : 'Direct';
-      const toggleLabel = setting.mode === 'submenu' ? '\u2192 Direct' : '\u2192 Submenu';
-      const toggleMode = setting.mode === 'submenu' ? 'direct' : 'submenu';
+      const enabledCount = claudeNames.filter((cn) => commandSettingsStore.getCommandSetting(cn).visibility !== 'hidden').length;
+      const modeLabel = setting.defaultVisibility === 'submenu' ? 'Submenu' : 'Direct';
+      const toggleLabel = setting.defaultVisibility === 'submenu' ? '\u2192 Direct' : '\u2192 Submenu';
+      const toggleMode = setting.defaultVisibility === 'submenu' ? 'direct' : 'submenu';
       nsLines.push(`<b>${escapeHtml(nsCurrent)}</b> (${enabledCount}) \u2014 ${modeLabel}`);
-      menuCount += setting.mode === 'submenu' ? 1 : enabledCount;
+      menuCount += setting.defaultVisibility === 'submenu' ? 1 : enabledCount;
 
       kb.text(`${nsCurrent}: ${toggleLabel}`, `nsmode:${nsCurrent}:${toggleMode}`);
       rowItems++;

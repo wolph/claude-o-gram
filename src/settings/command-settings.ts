@@ -1,98 +1,80 @@
 import { writeFileSync, readFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+export type CommandVisibility = 'direct' | 'submenu' | 'hidden';
+
 export interface CommandSetting {
-  enabled: boolean;
+  visibility: CommandVisibility;
   usageCount: number;
   lastUsedAt?: number; // unix ms
 }
 
 export interface NamespaceSetting {
-  mode: 'direct' | 'submenu'; // direct = register each cmd; submenu = one entry → inline menu
+  defaultVisibility: CommandVisibility;
 }
 
 export interface CommandSettingsData {
-  version: 1;
-  namespaces: Record<string, NamespaceSetting>; // "gsd" → { mode: "submenu" }
-  commands: Record<string, CommandSetting>;      // "gsd:progress" → { enabled, usageCount }
+  version: 2;
+  directCutoff: number;
+  namespaces: Record<string, NamespaceSetting>;
+  commands: Record<string, CommandSetting>;
 }
 
-const DEFAULTS: CommandSettingsData = {
-  version: 1,
-  namespaces: {},
-  commands: {},
-};
-
 /**
- * Persists per-command and per-namespace settings to disk.
+ * Persists per-command visibility and usage to disk.
  *
- * Auto-defaults:
- * - Namespace with ≥ 5 commands → mode: 'submenu'
- * - Namespace with < 5 commands → mode: 'direct'
- * - All commands → enabled: true, usageCount: 0
+ * Three-state visibility per command:
+ * - 'direct':  registered in Telegram autocomplete AND shown in submenu keyboard
+ * - 'submenu': shown only in the inline submenu keyboard
+ * - 'hidden':  not shown anywhere
  *
+ * directCutoff: how many top-usage commands to mark 'direct' when applying defaults.
  * Persistence: atomic tmp+rename, 500ms debounce.
  */
 export class CommandSettingsStore {
   private data: CommandSettingsData;
-  private filePath: string;
+  private readonly filePath: string;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(filePath: string) {
     this.filePath = filePath;
-    this.data = { ...DEFAULTS, namespaces: {}, commands: {} };
+    this.data = { version: 2, directCutoff: 30, namespaces: {}, commands: {} };
     this.load();
   }
 
-  /**
-   * Apply auto-defaults for all entries discovered from the command registry.
-   * Namespaces and commands not yet in the data store get their defaults.
-   * @param commandsByNamespace Map of namespace → array of claudeNames in that namespace
-   */
-  applyDefaults(commandsByNamespace: Map<string, string[]>): void {
-    let dirty = false;
-
-    for (const [ns, cmds] of commandsByNamespace) {
-      // Namespace default
-      if (!(ns in this.data.namespaces)) {
-        this.data.namespaces[ns] = { mode: cmds.length >= 5 ? 'submenu' : 'direct' };
-        dirty = true;
-      }
-      // Per-command defaults
-      for (const claudeName of cmds) {
-        if (!(claudeName in this.data.commands)) {
-          this.data.commands[claudeName] = { enabled: true, usageCount: 0 };
-          dirty = true;
-        }
-      }
-    }
-
-    if (dirty) this.scheduleSave();
+  getDirectCutoff(): number {
+    return this.data.directCutoff;
   }
 
-  /** Get namespace setting, returning a default if not set */
+  setDirectCutoff(cutoff: number): void {
+    this.data.directCutoff = cutoff;
+    this.scheduleSave();
+  }
+
   getNamespaceSetting(ns: string): NamespaceSetting {
-    return this.data.namespaces[ns] ?? { mode: 'direct' };
+    return this.data.namespaces[ns] ?? { defaultVisibility: 'submenu' };
   }
 
-  /** Set namespace setting and persist */
   setNamespaceSetting(ns: string, setting: NamespaceSetting): void {
     this.data.namespaces[ns] = setting;
     this.scheduleSave();
   }
 
-  /** Get command setting, returning a default if not set */
   getCommandSetting(claudeName: string): CommandSetting {
-    return this.data.commands[claudeName] ?? { enabled: true, usageCount: 0 };
+    return this.data.commands[claudeName] ?? { visibility: 'submenu', usageCount: 0 };
   }
 
-  /** Set command setting and persist */
   setCommandSetting(claudeName: string, setting: CommandSetting): void {
     this.data.commands[claudeName] = setting;
     this.scheduleSave();
   }
 
-  /** Increment usage count for a command */
+  setCommandVisibility(claudeName: string, visibility: CommandVisibility): void {
+    const current = this.getCommandSetting(claudeName);
+    this.data.commands[claudeName] = { ...current, visibility };
+    this.scheduleSave();
+  }
+
   recordUse(claudeName: string): void {
     const current = this.getCommandSetting(claudeName);
     this.data.commands[claudeName] = {
@@ -103,17 +85,78 @@ export class CommandSettingsStore {
     this.scheduleSave();
   }
 
-  /** Get all namespace → setting pairs */
+  /**
+   * Apply defaults for first-seen namespaces and commands.
+   * Commands already in the store are NOT modified.
+   * New commands are set based on top-N usage from the provided map.
+   */
+  applyDefaults(
+    commandsByNamespace: Map<string, string[]>,
+    usageCounts: Map<string, number> = new Map(),
+  ): void {
+    const allCommands = [...commandsByNamespace.values()].flat();
+    const cutoff = this.data.directCutoff;
+
+    // Build sorted list of new (unseen) commands by usage to assign defaults
+    const newCommands = allCommands.filter((cn) => !(cn in this.data.commands));
+    const sorted = newCommands
+      .map((cn) => ({ cn, count: usageCounts.get(cn) ?? 0 }))
+      .sort((a, b) => b.count - a.count);
+
+    // How many direct slots remain (already-direct commands use some slots)
+    const alreadyDirect = Object.values(this.data.commands).filter(
+      (s) => s.visibility === 'direct',
+    ).length;
+    let directRemaining = Math.max(0, cutoff - alreadyDirect);
+
+    let dirty = false;
+
+    for (const [ns] of commandsByNamespace) {
+      if (!(ns in this.data.namespaces)) {
+        this.data.namespaces[ns] = { defaultVisibility: 'submenu' };
+        dirty = true;
+      }
+    }
+
+    for (const { cn, count } of sorted) {
+      const visibility: CommandVisibility =
+        count > 0 && directRemaining > 0 ? 'direct' : 'submenu';
+      if (visibility === 'direct') directRemaining--;
+      this.data.commands[cn] = { visibility, usageCount: count };
+      dirty = true;
+    }
+
+    if (dirty) this.scheduleSave();
+  }
+
+  /**
+   * Re-apply top-N defaults to ALL known commands based on current usageCount.
+   * Overwrites existing visibility. Called when user taps "Top Commands".
+   */
+  applyTopDefaults(allCommandNames: string[]): void {
+    const cutoff = this.data.directCutoff;
+    const sorted = allCommandNames
+      .map((cn) => ({ cn, count: this.getCommandSetting(cn).usageCount }))
+      .sort((a, b) => b.count - a.count);
+
+    for (let i = 0; i < sorted.length; i++) {
+      const { cn, count } = sorted[i];
+      const current = this.getCommandSetting(cn);
+      const visibility: CommandVisibility =
+        count > 0 && i < cutoff ? 'direct' : 'submenu';
+      this.data.commands[cn] = { ...current, visibility };
+    }
+    this.scheduleSave();
+  }
+
   getAllNamespaces(): Map<string, NamespaceSetting> {
     return new Map(Object.entries(this.data.namespaces));
   }
 
-  /** Get all command → setting pairs */
   getAllCommands(): Map<string, CommandSetting> {
     return new Map(Object.entries(this.data.commands));
   }
 
-  /** Flush pending save and clear timer (call on shutdown) */
   shutdown(): void {
     if (this.saveTimer) {
       clearTimeout(this.saveTimer);
@@ -132,19 +175,40 @@ export class CommandSettingsStore {
 
   private saveSync(): void {
     mkdirSync(dirname(this.filePath), { recursive: true });
-    const json = JSON.stringify(this.data, null, 2);
-    const tmpPath = this.filePath + '.tmp';
-    writeFileSync(tmpPath, json, 'utf-8');
-    renameSync(tmpPath, this.filePath);
+    const tmp = this.filePath + '.tmp';
+    writeFileSync(tmp, JSON.stringify(this.data, null, 2), 'utf-8');
+    renameSync(tmp, this.filePath);
   }
 
   private load(): void {
     if (!existsSync(this.filePath)) return;
     try {
       const raw = readFileSync(this.filePath, 'utf-8');
-      const parsed = JSON.parse(raw) as Partial<CommandSettingsData>;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const parsed = JSON.parse(raw) as any;
+
+      // v1 → v2 migration
+      if (!parsed.version || parsed.version === 1) {
+        for (const [ns] of Object.entries(parsed.namespaces ?? {})) {
+          this.data.namespaces[ns] = { defaultVisibility: 'submenu' };
+        }
+        for (const [cn, s] of Object.entries(parsed.commands ?? {})) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const old = s as any;
+          this.data.commands[cn] = {
+            visibility: old.enabled === false ? 'hidden' : 'submenu',
+            usageCount: old.usageCount ?? 0,
+            lastUsedAt: old.lastUsedAt,
+          };
+        }
+        this.data.directCutoff = parsed.directCutoff ?? 30;
+        return;
+      }
+
+      // v2: load as-is
       if (parsed.namespaces) this.data.namespaces = parsed.namespaces;
       if (parsed.commands) this.data.commands = parsed.commands;
+      if (typeof parsed.directCutoff === 'number') this.data.directCutoff = parsed.directCutoff;
     } catch (err) {
       console.warn(
         `Warning: Failed to load command settings from ${this.filePath}, using defaults.`,

@@ -170,7 +170,7 @@ export async function main(): Promise<void> {
     for (const [ns, claudeNames] of nsByMode) {
       const setting = commandSettingsStore.getNamespaceSetting(ns || '__toplevel__');
       const enabledNames = claudeNames.filter(
-        (cn) => commandSettingsStore.getCommandSetting(cn).enabled,
+        (cn) => commandSettingsStore.getCommandSetting(cn).visibility !== 'hidden',
       );
 
       if (!ns) {
@@ -182,7 +182,7 @@ export async function main(): Promise<void> {
         continue;
       }
 
-      if (setting.mode === 'submenu') {
+      if (setting.defaultVisibility === 'submenu') {
         // Register one entry for the whole namespace
         // Sanitize namespace name to valid Telegram command format (same rules as individual commands)
         const tgNs = ns.toLowerCase().replace(/-/g, '_').replace(/[^a-z0-9_]/g, '').slice(0, 32);
