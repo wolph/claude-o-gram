@@ -1,5 +1,7 @@
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { loadConfig } from './config.js';
+import { parseHistoryUsage } from './monitoring/history-parser.js';
 import { SessionStore } from './sessions/session-store.js';
 import { planInactiveCleanup } from './sessions/inactive-cleanup.js';
 import { discoverActiveClaudeSessions } from './sessions/live-session-discovery.js';
@@ -152,73 +154,83 @@ export async function main(): Promise<void> {
   const commandSettingsStore = new CommandSettingsStore(
     join(config.dataDir, 'command-settings.json'),
   );
+  // Parse ~/.claude/history.jsonl once at startup for usage-seeded defaults
+  const historyPath = join(homedir(), '.claude', 'history.jsonl');
+  const usageCounts = await parseHistoryUsage(historyPath);
+  cli.info('CORE', 'Parsed command usage history', { commands: usageCounts.size });
+
   // Apply auto-defaults for all discovered namespaces/commands
-  commandSettingsStore.applyDefaults(commandRegistry.getCommandsByNamespace());
+  commandSettingsStore.applyDefaults(commandRegistry.getCommandsByNamespace(), usageCounts);
 
   /**
-   * Build the Telegram command list using namespace-aware grouping.
+   * Build the Telegram command list using three-state visibility per command.
    *
-   * - Submenu namespaces: register one entry /<namespace> with a summary description.
-   * - Direct namespaces: register each enabled command individually.
+   * - 'direct': register the command individually (also appears in its namespace submenu)
+   * - 'submenu': only appears via the namespace submenu entry
+   * - 'hidden': excluded entirely
    * - If still > 100 after grouping: priority-truncate (builtin > user > plugin), then warn.
    */
   function buildTelegramCommandList(): Array<{ command: string; description: string }> {
     const nsByMode = commandRegistry.getCommandsByNamespace();
     const allEntries = commandRegistry.getEntries();
     const result: Array<{ command: string; description: string }> = [];
+    const registeredNs = new Set<string>(); // prevent duplicate namespace entries
 
     for (const [ns, claudeNames] of nsByMode) {
-      const setting = commandSettingsStore.getNamespaceSetting(ns || '__toplevel__');
-      const enabledNames = claudeNames.filter(
-        (cn) => commandSettingsStore.getCommandSetting(cn).visibility !== 'hidden',
-      );
-
       if (!ns) {
-        // Top-level commands: always register individually (no namespace)
-        for (const cn of enabledNames) {
-          const e = allEntries.find((x) => x.claudeName === cn);
-          if (e) result.push({ command: e.telegramName, description: e.description.slice(0, 256) });
+        // Top-level commands: register 'direct' ones individually
+        for (const cn of claudeNames) {
+          if (commandSettingsStore.getCommandSetting(cn).visibility === 'direct') {
+            const e = allEntries.find((x) => x.claudeName === cn);
+            if (e) result.push({ command: e.telegramName, description: e.description.slice(0, 256) });
+          }
         }
         continue;
       }
 
-      if (setting.defaultVisibility === 'submenu') {
-        // Register one entry for the whole namespace
-        // Sanitize namespace name to valid Telegram command format (same rules as individual commands)
-        const tgNs = ns.toLowerCase().replace(/-/g, '_').replace(/[^a-z0-9_]/g, '').slice(0, 32);
-        if (!tgNs) continue;
-        const descriptions = enabledNames
-          .map((cn) => allEntries.find((x) => x.claudeName === cn)?.description || cn)
+      const tgNs = ns.toLowerCase().replace(/-/g, '_').replace(/[^a-z0-9_]/g, '').slice(0, 32);
+      if (!tgNs) continue;
+
+      const directCmds = claudeNames.filter(
+        (cn) => commandSettingsStore.getCommandSetting(cn).visibility === 'direct',
+      );
+      const visibleCmds = claudeNames.filter(
+        (cn) => commandSettingsStore.getCommandSetting(cn).visibility !== 'hidden',
+      );
+
+      // Register each 'direct' command individually (also shows in submenu)
+      for (const cn of directCmds) {
+        const e = allEntries.find((x) => x.claudeName === cn);
+        if (e) result.push({ command: e.telegramName, description: e.description.slice(0, 256) });
+      }
+
+      // Register namespace submenu entry if ≥1 non-hidden command exists
+      if (visibleCmds.length > 0 && !registeredNs.has(tgNs)) {
+        registeredNs.add(tgNs);
+        const descriptions = visibleCmds
           .slice(0, 3)
+          .map((cn) => allEntries.find((x) => x.claudeName === cn)?.description || cn)
           .join(', ');
         result.push({
           command: tgNs,
-          description: `${enabledNames.length} commands: ${descriptions}`.slice(0, 256),
+          description: `${visibleCmds.length} commands: ${descriptions}`.slice(0, 256),
         });
-      } else {
-        // Register each enabled command individually
-        for (const cn of enabledNames) {
-          const e = allEntries.find((x) => x.claudeName === cn);
-          if (e) result.push({ command: e.telegramName, description: e.description.slice(0, 256) });
-        }
       }
     }
 
     if (result.length > 100) {
-      // Priority truncation: keep builtin > user > plugin
       const priorityScore = (cmd: string): number => {
         const e = allEntries.find((x) => x.telegramName === cmd || x.claudeName === cmd);
         if (!e) return 0;
         if (e.source === 'builtin') return 3;
         if (e.source === 'user') return 2;
-        return 1; // plugin
+        return 1;
       };
-      const sorted = result.sort((a, b) => priorityScore(b.command) - priorityScore(a.command));
-      cli.warn('TELEGRAM', 'Command list still exceeds Telegram limit after grouping, truncating', {
+      cli.warn('TELEGRAM', 'Command list exceeds limit after grouping, truncating', {
         count: result.length,
         limit: 100,
       });
-      return sorted.slice(0, 100);
+      return result.sort((a, b) => priorityScore(b.command) - priorityScore(a.command)).slice(0, 100);
     }
 
     return result;
