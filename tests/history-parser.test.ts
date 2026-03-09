@@ -50,6 +50,16 @@ describe('parseHistoryUsage', () => {
     expect(result.get('real')).toBe(1);
   });
 
+  it('normalizes underscores to colons in command names', async () => {
+    const lines = [
+      JSON.stringify({ display: '/gsd_progress', timestamp: 1 }),
+    ].join('\n');
+    writeFileSync(historyPath, lines);
+    const result = await parseHistoryUsage(historyPath);
+    expect(result.get('gsd:progress')).toBe(1);
+    expect(result.has('gsd_progress')).toBe(false);
+  });
+
   it('skips malformed JSON lines gracefully', async () => {
     const lines = [
       'not json',

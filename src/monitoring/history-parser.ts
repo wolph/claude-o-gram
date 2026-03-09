@@ -26,7 +26,7 @@ export async function parseHistoryUsage(historyPath: string): Promise<Map<string
       const entry = JSON.parse(line) as { display?: string };
       const display = entry.display ?? '';
       if (!display.startsWith('/') || display.startsWith('//')) continue;
-      const raw = display.split(/\s+/)[0].slice(1); // strip leading /
+      const raw = display.split(/\s+/)[0].slice(1).replace(/_/g, ':'); // strip leading /, normalize _ → :
       if (!raw) continue;
       counts.set(raw, (counts.get(raw) ?? 0) + 1);
     } catch {
