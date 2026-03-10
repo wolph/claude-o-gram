@@ -1,33 +1,75 @@
-# Claude-o-Gram
+<p align="center">
+  <img src="docs/assets/banner.png" alt="Claude-o-Gram banner" width="600" />
+</p>
 
-A Telegram bot that mirrors Claude Code sessions to forum topics, giving you full remote monitoring and control from your phone.
+<h1 align="center">Claude-o-Gram</h1>
 
-Each Claude Code session gets its own forum topic. You see every tool call, every text response, and every notification — and you can send text input back, all from Telegram.
+<p align="center"><strong>The missing remote for Claude Code.</strong></p>
 
-## Features
+<p align="center">
+  Every session. Every tool call. Every decision — live on Telegram.
+</p>
 
-**Session Lifecycle** — Sessions auto-create forum topics when they start and close them when they end. Concurrent sessions get isolated topics. New sessions in the same directory reuse recently closed topics. The bot reconnects to active sessions on restart.
+<p align="center">
+  <a href="https://github.com/wolph/claude-o-gram/actions/workflows/ci.yml"><img src="https://github.com/wolph/claude-o-gram/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSD--3--Clause-blue" alt="License" /></a>
+  <img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen" alt="Node >= 20" />
+  <img src="https://img.shields.io/badge/TypeScript-strict-3178c6" alt="TypeScript strict" />
+  <img src="https://img.shields.io/badge/bot-grammY-009dca" alt="grammY" />
+  <img src="https://img.shields.io/badge/server-Fastify-000000" alt="Fastify" />
+</p>
 
-**Real-time Monitoring** — Tool calls (file reads, edits, bash commands) are posted as they happen. Claude's text output is captured from JSONL transcripts. A pinned status message shows context window usage, tool counts, and files changed.
+---
 
-**Verbosity Control** — Three tiers: `/verbose` (everything), `/normal` (hide Read/Glob/Grep), `/quiet` (only Write/Edit/Bash). Change per-session at any time.
+## What You Get
 
-**Text Input** — Reply with text in a session topic and it gets delivered to Claude Code. Input is routed automatically via tmux (preferred), named pipe (FIFO), or SDK resume (fallback).
+| | Feature | Description |
+|---|---|---|
+| :red_circle: | **Live Sessions** | Every Claude Code session gets its own forum topic with real-time tool calls streaming in |
+| :iphone: | **Remote Control** | Reply in Telegram to send text input straight back to Claude Code |
+| :mag: | **Verbosity on Demand** | `/verbose`, `/normal`, `/quiet` — tune the noise level per session, any time |
+| :robot: | **Sub-agent Tracking** | Spawn/complete visibility with live task checklists |
+| :zap: | **Command Forwarding** | Slash commands typed in Telegram are forwarded to the CLI, auto-discovered |
+| :lock: | **Locked Down** | Owner-only access, bearer-token auth, localhost-bound hook server |
 
-**Sub-agent Tracking** — Sub-agent spawns and completions are tracked with optional visibility toggle. Task checklists show live progress.
+## See It In Action
 
-**Command Forwarding** — Claude Code slash commands (e.g., `/commit`, `/review-pr`) typed in a session topic are forwarded to the CLI. The bot auto-discovers available commands and skills for Telegram autocomplete.
+<p align="center">
+  <img src="docs/assets/session-topic.png" alt="Live session topic with tool calls streaming" width="360" /><br />
+  <em>Live session topic — tool calls stream in as they happen</em>
+</p>
 
-## Prerequisites
+<p align="center">
+  <img src="docs/assets/approval-prompt.png" alt="Approval prompt in Telegram" width="360" /><br />
+  <em>Approval prompts — accept or deny tool calls from your phone</em>
+</p>
 
-- Node.js >= 20
-- A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- A Telegram supergroup with **Topics enabled** (Group Settings > Topics)
-- Your bot added as an **admin** in the group (needs permission to manage topics and pin messages)
-- Claude Code installed on the machine
-- Your Telegram user ID (get it from [@userinfobot](https://t.me/userinfobot))
+<p align="center">
+  <img src="docs/assets/status-message.png" alt="Pinned status message" width="360" /><br />
+  <em>Pinned status — context usage, tool counts, files changed at a glance</em>
+</p>
 
-## Setup
+## Quickstart
+
+> **You need:** Node.js >= 20, a Telegram bot token, a forum-enabled supergroup, and Claude Code on the machine.
+
+```bash
+git clone https://github.com/wolph/claude-o-gram.git
+cd claude-o-gram
+npm install
+cp .env.example .env   # then fill in your tokens
+npm run build
+npm start
+```
+
+That's it. The bot generates its auth secret, installs Claude Code hooks, starts the HTTP server on `127.0.0.1:3456`, and begins polling Telegram. Fire up a Claude Code session and watch the forum topic appear.
+
+> **Tip:** Run Claude Code inside tmux for full text-input support. The bot auto-detects the pane and injects your replies directly into the terminal.
+
+## Deep Dive
+
+<details>
+<summary><strong>Detailed Setup Guide</strong></summary>
 
 ### 1. Create a Telegram Bot
 
@@ -40,12 +82,12 @@ Each Claude Code session gets its own forum topic. You see every tool call, ever
 1. Create a new Telegram group (or use an existing one)
 2. Go to Group Settings > Topics and enable topics
 3. Add your bot to the group and make it an admin
-4. Get the group's chat ID — the easiest way is to add [@RawDataBot](https://t.me/RawDataBot) to the group, note the chat ID from its message, then remove it. The ID will be a negative number like `-1001234567890`.
+4. Get the group's chat ID — add [@RawDataBot](https://t.me/RawDataBot) to the group, note the chat ID from its message, then remove it. The ID will be a negative number like `-1001234567890`.
 
 ### 3. Install and Configure
 
 ```bash
-git clone https://github.com/nicobailon/claude-o-gram.git
+git clone https://github.com/wolph/claude-o-gram.git
 cd claude-o-gram
 npm install
 ```
@@ -79,7 +121,10 @@ The bot will:
 
 Now start a Claude Code session — a forum topic will appear automatically.
 
-## Environment Variables
+</details>
+
+<details>
+<summary><strong>Environment Variables</strong></summary>
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -97,7 +142,10 @@ Now start a Claude Code session — a forum topic will appear automatically.
 | `CLI_DASHBOARD` | No | `auto` | Live CLI status panel mode: `auto`, `on`, `off` |
 | `CLI_LOG_LEVEL` | No | `info` | CLI minimum log level: `debug`, `info`, `warn`, `error` |
 
-## Bot Commands
+</details>
+
+<details>
+<summary><strong>Bot Commands</strong></summary>
 
 Run these in any session topic:
 
@@ -108,7 +156,10 @@ Run these in any session topic:
 | `/normal` | Hide Read, Glob, Grep (default) |
 | `/quiet` | Show only Write, Edit, and Bash |
 
-## How It Works
+</details>
+
+<details>
+<summary><strong>How It Works</strong></summary>
 
 The bot runs a single process with two components:
 
@@ -118,7 +169,7 @@ The bot runs a single process with two components:
 
 On startup, the bot auto-installs HTTP hooks into `~/.claude/settings.json` with Bearer token headers. These hooks tell Claude Code to POST events to the local Fastify server.
 
-### Text Input
+### Text Input Routing
 
 When you send a text message in a session topic, the bot routes it to Claude Code using the best available method:
 
@@ -130,7 +181,10 @@ When you send a text message in a session topic, the bot routes it to Claude Cod
 
 Session state is persisted to `DATA_DIR/sessions.json` using atomic writes. On restart, the bot reconnects to any sessions that were still active, sending a "Reconnected" notice to their topics.
 
-## Running with tmux (Recommended)
+</details>
+
+<details>
+<summary><strong>Running as a Service</strong></summary>
 
 For full text input support, run Claude Code inside tmux:
 
@@ -141,9 +195,7 @@ claude  # start Claude Code inside tmux
 
 The bot automatically detects the tmux pane. Text replies in Telegram will be injected directly into the Claude Code terminal.
 
-## Running as a Service
-
-To keep the bot running in the background:
+To keep the bot itself running in the background:
 
 ```bash
 # Using tmux
@@ -153,20 +205,23 @@ tmux new-session -d -s telegram-bot 'cd /path/to/claude-o-gram && npm start'
 pm2 start dist/index.js --name claude-telegram
 ```
 
-## CLI Runtime Observability
+</details>
 
-The bot process now includes a richer terminal UX for operational visibility:
+<details>
+<summary><strong>CLI Observability</strong></summary>
+
+The bot process includes a rich terminal UX for operational visibility:
 
 - **Colorful structured logs** for startup, session lifecycle, hook/auth activity, permission flow, and subagent lifecycle.
 - **Live status dashboard** (TTY mode) that refreshes in place and shows:
-  - uptime
-  - active sessions
-  - pending approvals
-  - hook throughput totals
-  - auth failures
-  - active/completed subagents
-  - warning/error counts
-  - last significant runtime event
+  - Uptime
+  - Active sessions
+  - Pending approvals
+  - Hook throughput totals
+  - Auth failures
+  - Active/completed subagents
+  - Warning/error counts
+  - Last significant runtime event
 
 Use environment flags to tune behavior:
 
@@ -177,16 +232,19 @@ Use environment flags to tune behavior:
 Examples:
 
 ```bash
-# Always show colors + dashboard, include debug events
+# Full observability — colors, dashboard, debug events
 CLI_COLOR=on CLI_DASHBOARD=on CLI_LOG_LEVEL=debug npm start
 
-# Plain logs only (no in-place dashboard)
+# Plain logs only — no in-place dashboard
 CLI_COLOR=off CLI_DASHBOARD=off CLI_LOG_LEVEL=info npm start
 ```
 
-## Security
+</details>
 
-The bot has two authentication layers:
+<details>
+<summary><strong>Security</strong></summary>
+
+Two authentication layers keep everything locked down.
 
 **Telegram access control** — A global middleware checks every incoming Telegram update against `BOT_OWNER_ID`. Updates from any other user are silently dropped. This is enforced before all commands, callback queries, and text messages. `BOT_OWNER_ID` is a required environment variable — the bot will not start without it.
 
@@ -196,25 +254,31 @@ The bot has two authentication layers:
 - Referenced in hook HTTP headers via Claude Code's `allowedEnvVars` mechanism
 - Validated by a Fastify `onRequest` hook on all `/hooks/*` routes (returns 401 on mismatch)
 
-The hook server binds to `127.0.0.1` by default (localhost only, not exposed to the network).
+The hook server binds to `127.0.0.1` by default — localhost only, not exposed to the network.
 
 **Secret leak prevention** — The repository enforces secret scanning in two places:
 - **CI:** GitHub Actions runs `gitleaks` on every push/PR and fails the workflow if leaks are detected.
 - **Local pre-commit hook:** Run `npm run hooks:install` once per clone to enable `.githooks/pre-commit`, which scans staged changes before each commit.
 
-## Development
+</details>
+
+<details>
+<summary><strong>Development</strong></summary>
 
 ```bash
-npm run dev        # Watch mode with tsx
-npm run typecheck  # Type-check without emitting
-npm run lint       # ESLint
-npm test           # Run all tests
-npm run hooks:install     # Install repository git hooks (run once per clone)
-npm run secrets:scan      # Full-history secret scan
+npm run dev                  # Watch mode with tsx
+npm run typecheck            # Type-check without emitting
+npm run lint                 # ESLint
+npm test                     # Run all tests
+npm run hooks:install        # Install repository git hooks (run once per clone)
+npm run secrets:scan         # Full-history secret scan
 npm run secrets:scan:staged  # Scan staged changes (used by pre-commit)
 ```
 
-## Architecture
+</details>
+
+<details>
+<summary><strong>Architecture</strong></summary>
 
 ```
 src/
@@ -269,6 +333,8 @@ src/
     install-hooks.ts        # Auto-install hooks into settings
 ```
 
+</details>
+
 ## License
 
-BSD 3-Clause. See [LICENSE](LICENSE).
+[BSD 3-Clause](LICENSE)

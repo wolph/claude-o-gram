@@ -144,7 +144,6 @@ export function installHooks(port: number, secret: string): void {
   // For PreToolUse, append our hook to existing user hooks rather than replacing
   const existingPreToolUse = (existingHooks.PreToolUse as unknown[]) || [];
   const ourPreToolUse = hookConfig.PreToolUse as unknown[];
-  const ourUrl = `${baseUrl}/hooks/pre-tool-use`;
   const legacyLocalPreToolUseUrl = /^http:\/\/127\.0\.0\.1:\d+\/hooks\/pre-tool-use$/;
 
   const isManagedPreToolUseHook = (hook: Record<string, unknown>): boolean => {
