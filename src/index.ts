@@ -337,15 +337,20 @@ export async function main(): Promise<void> {
     if (!botRef) return;
     const toRegister = buildTelegramCommandList();
     if (toRegister.length === 0) return;
-    try {
-      await botRef.api.setMyCommands(toRegister, {
-        scope: { type: 'chat', chat_id: config.telegramChatId },
-      });
-      cli.info('TELEGRAM', 'Re-registered commands with Telegram (refresh)', { count: toRegister.length });
-    } catch (err) {
-      cli.warn('TELEGRAM', 'Failed to re-register Telegram commands', {
-        error: err instanceof Error ? err.message : err,
-      });
+    const scopes = [
+      { type: 'chat' as const, chat_id: config.telegramChatId },
+      { type: 'chat_member' as const, chat_id: config.telegramChatId, user_id: config.botOwnerId },
+    ];
+    for (const scope of scopes) {
+      try {
+        await botRef.api.setMyCommands(toRegister, { scope });
+        cli.info('TELEGRAM', 'Re-registered commands with Telegram (refresh)', { scope: scope.type, count: toRegister.length });
+      } catch (err) {
+        cli.warn('TELEGRAM', 'Failed to re-register Telegram commands', {
+          scope: scope.type,
+          error: err instanceof Error ? err.message : err,
+        });
+      }
     }
   };
 
@@ -1550,17 +1555,24 @@ export async function main(): Promise<void> {
   cli.info('TELEGRAM', 'Bot started (polling)');
 
   // 12b. Register discovered commands with Telegram autocomplete menu (namespace-aware)
+  //      Register for both chat scope and chat_member scope (bot owner) so commands
+  //      appear in forum topic autocomplete.
   const toRegister = buildTelegramCommandList();
   if (toRegister.length > 0) {
-    try {
-      await bot.api.setMyCommands(toRegister, {
-        scope: { type: 'chat', chat_id: config.telegramChatId },
-      });
-      cli.info('TELEGRAM', 'Registered commands with Telegram', { count: toRegister.length });
-    } catch (err) {
-      cli.warn('TELEGRAM', 'Failed to register Telegram commands', {
-        error: err instanceof Error ? err.message : err,
-      });
+    const scopes = [
+      { type: 'chat' as const, chat_id: config.telegramChatId },
+      { type: 'chat_member' as const, chat_id: config.telegramChatId, user_id: config.botOwnerId },
+    ];
+    for (const scope of scopes) {
+      try {
+        await bot.api.setMyCommands(toRegister, { scope });
+        cli.info('TELEGRAM', 'Registered commands with Telegram', { scope: scope.type, count: toRegister.length });
+      } catch (err) {
+        cli.warn('TELEGRAM', 'Failed to register Telegram commands', {
+          scope: scope.type,
+          error: err instanceof Error ? err.message : err,
+        });
+      }
     }
   }
 

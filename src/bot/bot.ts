@@ -459,6 +459,24 @@ export async function createBot(
     await sendCommandsOverview(ctx, threadId);
   });
 
+  bot.callbackQuery('set_cmd:reregister', async (ctx) => {
+    if (!isSettingsAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({ text: 'Unauthorized', show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: 'Re-registering commands...' });
+    try {
+      await onRefreshMenu?.();
+      await ctx.reply('\u2705 Commands re-registered with Telegram.', {
+        message_thread_id: ctx.callbackQuery.message?.message_thread_id,
+      });
+    } catch (err) {
+      await ctx.reply(`\u274C Failed to re-register: ${err instanceof Error ? err.message : err}`, {
+        message_thread_id: ctx.callbackQuery.message?.message_thread_id,
+      });
+    }
+  });
+
   // --- Submenu state machine ---
   // Tracks which user is waiting to provide parameters for a subcommand.
   // Keyed by chatId (the forum group ID). Resets on restart (intentional).

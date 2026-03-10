@@ -61,6 +61,7 @@ export function buildSettingsKeyboard(subagentVisible: boolean, defaultMode: str
   // Commands management
   kb.row();
   kb.text('\uD83D\uDCCB Manage Commands', 'set_cmd:overview');
+  kb.text('\uD83D\uDD04 Re-register Commands', 'set_cmd:reregister');
   return kb;
 }
 
