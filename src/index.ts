@@ -169,6 +169,14 @@ export async function main(): Promise<void> {
   // Apply auto-defaults for all discovered namespaces/commands
   commandSettingsStore.applyDefaults(commandRegistry.getCommandsByNamespace(), usageCounts);
 
+  // If no commands are 'direct' (migration from pre-history version), auto-apply top-N
+  const allCmdSettings = commandSettingsStore.getAllCommands();
+  const hasAnyDirect = [...allCmdSettings.values()].some((s) => s.visibility === 'direct');
+  if (!hasAnyDirect) {
+    commandSettingsStore.applyTopDefaults(commandRegistry.getEntries().map((e) => e.claudeName));
+    cli.info('CORE', 'Applied top-N usage defaults (no direct commands found)');
+  }
+
   /**
    * Build the Telegram command list using three-state visibility per command.
    *

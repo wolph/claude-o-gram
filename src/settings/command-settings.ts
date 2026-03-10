@@ -126,6 +126,17 @@ export class CommandSettingsStore {
       dirty = true;
     }
 
+    // Seed usage counts from history for existing commands (migration path)
+    for (const cn of allCommands) {
+      if (cn in this.data.commands) {
+        const historyCount = usageCounts.get(cn) ?? 0;
+        if (historyCount > this.data.commands[cn].usageCount) {
+          this.data.commands[cn].usageCount = historyCount;
+          dirty = true;
+        }
+      }
+    }
+
     if (dirty) this.scheduleSave();
   }
 

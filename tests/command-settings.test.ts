@@ -47,13 +47,56 @@ describe('CommandSettingsStore', () => {
     expect(store.getCommandSetting('gsd:progress').usageCount).toBe(42);
   });
 
-  it('applyDefaults does not overwrite existing command settings', () => {
+  it('applyDefaults does not overwrite existing visibility but seeds higher usage count', () => {
     const store = new CommandSettingsStore(filePath);
     store.setCommandSetting('gsd:progress', { visibility: 'hidden', usageCount: 99 });
     const ns = new Map([['gsd', ['gsd:progress']]]);
     store.applyDefaults(ns, new Map([['gsd:progress', 100]]));
-    // Still hidden — applyDefaults only sets commands not yet in the store
+    // Visibility stays hidden — applyDefaults only sets visibility for new commands
     expect(store.getCommandSetting('gsd:progress').visibility).toBe('hidden');
+    // But usage count is seeded from history (100 > 99)
+    expect(store.getCommandSetting('gsd:progress').usageCount).toBe(100);
+  });
+
+  it('applyDefaults seeds usage counts for pre-existing commands with 0 usage (migration)', () => {
+    const store = new CommandSettingsStore(filePath);
+    // Simulate pre-history-parser state: commands exist with 0 usage
+    store.setCommandSetting('gsd:progress', { visibility: 'submenu', usageCount: 0 });
+    store.setCommandSetting('gsd:plan', { visibility: 'submenu', usageCount: 0 });
+    store.setCommandSetting('gsd:execute', { visibility: 'submenu', usageCount: 0 });
+    const ns = new Map([['gsd', ['gsd:progress', 'gsd:plan', 'gsd:execute']]]);
+    const usage = new Map([['gsd:progress', 50], ['gsd:plan', 30]]);
+    store.applyDefaults(ns, usage);
+    // Usage counts seeded from history
+    expect(store.getCommandSetting('gsd:progress').usageCount).toBe(50);
+    expect(store.getCommandSetting('gsd:plan').usageCount).toBe(30);
+    expect(store.getCommandSetting('gsd:execute').usageCount).toBe(0);
+    // Visibility unchanged (existing commands keep their visibility)
+    expect(store.getCommandSetting('gsd:progress').visibility).toBe('submenu');
+  });
+
+  it('full migration: pre-existing 0-count commands get history counts + top-N visibility', () => {
+    const store = new CommandSettingsStore(filePath);
+    // Simulate pre-history-parser state
+    store.setCommandSetting('gsd:progress', { visibility: 'submenu', usageCount: 0 });
+    store.setCommandSetting('gsd:plan', { visibility: 'submenu', usageCount: 0 });
+    store.setCommandSetting('gsd:execute', { visibility: 'submenu', usageCount: 0 });
+    store.setDirectCutoff(2);
+    const ns = new Map([['gsd', ['gsd:progress', 'gsd:plan', 'gsd:execute']]]);
+    const usage = new Map([['gsd:progress', 50], ['gsd:plan', 30]]);
+    // Step 1: applyDefaults seeds usage counts
+    store.applyDefaults(ns, usage);
+    expect(store.getCommandSetting('gsd:progress').usageCount).toBe(50);
+    expect(store.getCommandSetting('gsd:plan').usageCount).toBe(30);
+    // Step 2: check no direct commands (they're still submenu)
+    const allCmds = store.getAllCommands();
+    const hasAnyDirect = [...allCmds.values()].some((s) => s.visibility === 'direct');
+    expect(hasAnyDirect).toBe(false);
+    // Step 3: applyTopDefaults re-assigns visibility based on seeded counts
+    store.applyTopDefaults(['gsd:progress', 'gsd:plan', 'gsd:execute']);
+    expect(store.getCommandSetting('gsd:progress').visibility).toBe('direct');
+    expect(store.getCommandSetting('gsd:plan').visibility).toBe('direct');
+    expect(store.getCommandSetting('gsd:execute').visibility).toBe('submenu');
   });
 
   it('migrates v1 data: enabled:true → submenu, enabled:false → hidden', () => {

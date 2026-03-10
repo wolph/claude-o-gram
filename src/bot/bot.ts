@@ -49,6 +49,17 @@ export async function createBot(
   bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 60 }));
   bot.api.config.use(apiThrottler());
 
+  // Auto-delete forum topic service messages (e.g. "Bot changed topic name to ...")
+  // Must run BEFORE the auth middleware since these come from the bot itself, not the owner.
+  bot.on(['message:forum_topic_edited', 'message:forum_topic_created', 'message:forum_topic_closed', 'message:forum_topic_reopened'], async (ctx) => {
+    try {
+      await ctx.deleteMessage();
+    } catch {
+      // Ignore: message may already be deleted or bot lacks permission
+    }
+    // Do not call next() — consume the update
+  });
+
   // SECURITY: Global middleware — only the bot owner can interact with the bot.
   // This gates ALL commands, callback queries, text messages, and any other updates.
   // Silently drops updates from unauthorized users (no error reply to avoid leaking info).
@@ -702,7 +713,7 @@ export async function createBot(
         (cn) => commandSettingsStore.getCommandSetting(cn).visibility === 'direct',
       ).length;
       directCount += d;
-      nsLines.push(`<b>(top-level)</b> (${topLevel.length}) \u2014 ${d} direct`);
+      nsLines.push(`\u2699\uFE0F <b>(top-level)</b> \u2014 ${d}/${topLevel.length} in menu`);
     }
 
     let rowItems = 0;
@@ -711,27 +722,30 @@ export async function createBot(
       const d = claudeNames.filter(
         (cn) => commandSettingsStore.getCommandSetting(cn).visibility === 'direct',
       ).length;
-      const visible = claudeNames.filter(
-        (cn) => commandSettingsStore.getCommandSetting(cn).visibility !== 'hidden',
+      const hidden = claudeNames.filter(
+        (cn) => commandSettingsStore.getCommandSetting(cn).visibility === 'hidden',
       ).length;
+      const visible = claudeNames.length - hidden;
       directCount += d;
       if (visible > 0) directCount += 1;
+      const icon = hidden > 0 ? '\uD83D\uDCC2' : '\uD83D\uDCC1'; // 📂 if some hidden, 📁 otherwise
       nsLines.push(
-        `<b>${escapeHtml(ns)}</b> (${claudeNames.length}) \u2014 ${d} direct, ${visible} visible`,
+        `${icon} <b>${escapeHtml(ns)}</b> \u2014 ${d} \u2B50 ${visible} \u2705${hidden > 0 ? ` ${hidden} \uD83D\uDEAB` : ''}`,
       );
-      kb.text(`${ns} \u2192`, `nslist:${ns}:0`);
+      kb.text(`\uD83D\uDCC1 ${ns} \u2192`, `nslist:${ns}:0`);
       rowItems++;
       if (rowItems % 2 === 0) kb.row();
     }
 
     kb.row();
-    kb.text('\uD83D\uDCCA Top Commands', 'cmd_top');
-    kb.text(`\u270F\uFE0F Cutoff: ${cutoff}`, 'cmd_cutoff');
+    kb.text('\uD83C\uDFC6 Top Commands', 'cmd_top');
+    kb.text(`\u2702\uFE0F Cutoff: ${cutoff}`, 'cmd_cutoff');
     kb.row();
     kb.text('\uD83D\uDD04 Refresh Menu', 'cmd_refresh');
 
     const text =
-      `\uD83D\uDCCB <b>Commands</b> \u2014 ${directCount} in menu (${totalCount} total)\n\n` +
+      `\uD83D\uDCCB <b>Commands</b> \u2014 ${directCount} in menu (${totalCount} total)\n` +
+      `\u2B50 = direct  \u2705 = visible  \uD83D\uDEAB = hidden\n\n` +
       nsLines.join('\n');
 
     return { text, keyboard: kb };
@@ -746,7 +760,7 @@ export async function createBot(
     }
   }
 
-  const NS_DRILL_PAGE_SIZE = 6;
+  const NS_DRILL_PAGE_SIZE = 20;
 
   async function sendNsListPage(
     ctx: BotContext,
@@ -772,9 +786,8 @@ export async function createBot(
     const safePage = Math.min(page, totalPages - 1);
     const pageItems = items.slice(safePage * NS_DRILL_PAGE_SIZE, (safePage + 1) * NS_DRILL_PAGE_SIZE);
 
-    const lines: string[] = [
-      `\uD83D\uDCC1 <b>${escapeHtml(ns)}</b> \u2014 ${items.length} commands (page ${safePage + 1}/${totalPages})\n`,
-    ];
+    const headerText =
+      `\uD83D\uDCC1 <b>${escapeHtml(ns)}</b> \u2014 ${items.length} commands (page ${safePage + 1}/${totalPages})`;
     const kb = new InlineKeyboard();
 
     for (let i = 0; i < pageItems.length; i++) {
@@ -782,22 +795,23 @@ export async function createBot(
       const count = setting.usageCount;
       const vis = setting.visibility;
       const label = cn.includes(':') ? cn.split(':').slice(1).join(':') : cn;
-      const indicator = count > 0 ? '\u25CF' : '\u25CB';
-      lines.push(`${indicator} <code>${escapeHtml(label)}</code>  ${count}`);
+      const heat = count >= 10 ? '\uD83D\uDD25' : count > 0 ? '\u26A1' : '\u2022';
+      const visLabel = vis === 'direct' ? '\u2B50 direct' : vis === 'hidden' ? '\uD83D\uDEAB hidden' : '\u2705 submenu';
       const cbBase = `cmdvis:${ns}:${safePage}:${i}`;
-      kb.text(vis === 'direct' ? '\u2713direct' : 'direct', `${cbBase}:d`);
-      kb.text(vis === 'submenu' ? '\u2713submenu' : 'submenu', `${cbBase}:s`);
-      kb.text(vis === 'hidden' ? '\u2713hidden' : 'hidden', `${cbBase}:h`);
+      // Single full-width button: tap to cycle direct → submenu → hidden
+      kb.text(`${heat} ${label} (${count})  \u00B7  ${visLabel}  \u25B8`, `${cbBase}:cycle`);
       kb.row();
     }
 
     if (totalPages > 1) {
-      if (safePage > 0) kb.text('\u2190 Prev', `nslp:${ns}:${safePage - 1}`);
-      kb.text(`${safePage + 1}/${totalPages}`, 'subp_noop');
-      if (safePage < totalPages - 1) kb.text('Next \u2192', `nslp:${ns}:${safePage + 1}`);
+      if (safePage > 0) kb.text('\u25C0\uFE0F Prev', `nslp:${ns}:${safePage - 1}`);
+      kb.text(`\uD83D\uDCCD ${safePage + 1}/${totalPages}`, 'subp_noop');
+      if (safePage < totalPages - 1) kb.text('Next \u25B6\uFE0F', `nslp:${ns}:${safePage + 1}`);
+      kb.row();
     }
+    kb.text('\u2B05\uFE0F Back to overview', 'cmd_overview');
 
-    const text = lines.join('\n');
+    const text = headerText;
     try {
       if (edit) {
         await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
@@ -811,8 +825,29 @@ export async function createBot(
     }
   }
 
+  // --- cmd_overview: back to overview from drill-down ---
+  bot.callbackQuery('cmd_overview', async (ctx) => {
+    if (!isSettingsAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({ text: 'Unauthorized', show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery();
+    const { text: overviewText, keyboard: overviewKb } = buildOverviewPayload();
+    try {
+      await ctx.editMessageText(overviewText, { parse_mode: 'HTML', reply_markup: overviewKb });
+    } catch (err) {
+      if (!(err instanceof Error && err.message.includes('message is not modified'))) {
+        console.warn('cmd_overview edit error:', err instanceof Error ? err.message : err);
+      }
+    }
+  });
+
   // --- Refresh Telegram menu ---
   bot.callbackQuery('cmd_refresh', async (ctx) => {
+    if (!isSettingsAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({ text: 'Unauthorized', show_alert: true });
+      return;
+    }
     await ctx.answerCallbackQuery({ text: 'Refreshing Telegram menu...' });
     try {
       await onRefreshMenu?.();
@@ -874,7 +909,7 @@ export async function createBot(
     const page = parseInt(ctx.match[2], 10);
     await ctx.answerCallbackQuery();
     const threadId = ctx.callbackQuery.message?.message_thread_id;
-    await sendNsListPage(ctx, ns, page, false, threadId);
+    await sendNsListPage(ctx, ns, page, true, threadId);
   });
 
   // --- nslp: namespace drill-down pagination (edit in-place) ---
@@ -890,7 +925,9 @@ export async function createBot(
   });
 
   // --- cmdvis: per-command visibility toggle ---
-  bot.callbackQuery(/^cmdvis:([^:]+):(\d+):(\d+):(d|s|h)$/, async (ctx) => {
+  // --- cmdvis cycle: tap to cycle direct → submenu → hidden ---
+  const cycleOrder: CommandVisibility[] = ['direct', 'submenu', 'hidden'];
+  bot.callbackQuery(/^cmdvis:([^:]+):(\d+):(\d+):cycle$/, async (ctx) => {
     if (!isSettingsAuthorized(ctx)) {
       await ctx.answerCallbackQuery({ text: 'Unauthorized', show_alert: true });
       return;
@@ -898,9 +935,6 @@ export async function createBot(
     const ns = ctx.match[1];
     const page = parseInt(ctx.match[2], 10);
     const idx = parseInt(ctx.match[3], 10);
-    const visChar = ctx.match[4];
-    const visMap: Record<string, CommandVisibility> = { d: 'direct', s: 'submenu', h: 'hidden' };
-    const visibility = visMap[visChar];
 
     // Rebuild the same sorted list to find the claudeName by index
     const nsByMode = commandRegistry.getCommandsByNamespace();
@@ -919,10 +953,12 @@ export async function createBot(
       await ctx.answerCallbackQuery({ text: 'Command not found', show_alert: true });
       return;
     }
-    const claudeName = pageItems[idx].cn;
+    const { cn: claudeName, setting } = pageItems[idx];
+    const curIdx = cycleOrder.indexOf(setting.visibility);
+    const nextVis = cycleOrder[(curIdx + 1) % cycleOrder.length];
 
-    commandSettingsStore.setCommandVisibility(claudeName, visibility);
-    await ctx.answerCallbackQuery({ text: `${claudeName}: ${visibility}` });
+    commandSettingsStore.setCommandVisibility(claudeName, nextVis);
+    await ctx.answerCallbackQuery({ text: `${claudeName}: ${nextVis}` });
     await sendNsListPage(ctx, ns, page, true);
     try { await onRefreshMenu?.(); } catch { /* best-effort */ }
   });
