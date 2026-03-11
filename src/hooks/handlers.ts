@@ -26,6 +26,8 @@ export interface HookCallbacks {
   onSessionStart(session: SessionInfo, source: 'new' | 'resume' | 'clear' | 'reuse'): Promise<void>;
   onSessionEnd(session: SessionInfo, reason: string): Promise<void>;
   onToolUse(session: SessionInfo, payload: PostToolUsePayload): Promise<void>;
+  /** Called on every PostToolUse, before verbosity filter. For cleanup tasks like approval button removal. */
+  onToolComplete?: (session: SessionInfo, payload: PostToolUsePayload) => Promise<void>;
   onNotification(session: SessionInfo, payload: NotificationPayload): Promise<void>;
   onPreToolUse(session: SessionInfo, payload: PreToolUsePayload): Promise<void>;
   onStop(session: SessionInfo, payload: StopPayload): Promise<void>;
@@ -402,6 +404,11 @@ export class HookHandlers {
       if (filePath) {
         this.sessionStore.addChangedFile(payload.session_id, filePath);
       }
+    }
+
+    // Always run cleanup (approval button removal) regardless of verbosity
+    if (this.callbacks.onToolComplete) {
+      await this.callbacks.onToolComplete(session, payload);
     }
 
     // Verbosity filter: check if this tool call should be posted to Telegram

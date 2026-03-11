@@ -1127,13 +1127,8 @@ export async function main(): Promise<void> {
       await topicManager.closeTopic(latest.threadId, latest.topicName);
     },
 
-    onToolUse: async (session, payload) => {
-      cli.debug('TOOL', 'Tool completed', {
-        session: session.sessionId.slice(0, 8),
-        tool: payload.tool_name,
-      });
-      // Auto-approve resolution: if there's a pending approval for this tool_use_id,
-      // update the message
+    onToolComplete: async (_session, payload) => {
+      // Clean up approval buttons when tool completes (user approved locally or auto-approved)
       const pendingApproval = approvalManager.resolvePending(payload.tool_use_id);
       if (pendingApproval) {
         try {
@@ -1150,6 +1145,13 @@ export async function main(): Promise<void> {
           }
         }
       }
+    },
+
+    onToolUse: async (session, payload) => {
+      cli.debug('TOOL', 'Tool completed', {
+        session: session.sessionId.slice(0, 8),
+        tool: payload.tool_name,
+      });
 
       // Guard: skip if threadId not yet assigned (race during topic creation)
       if (!session.threadId) return;
