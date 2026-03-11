@@ -2,12 +2,29 @@ import { type Bot, InlineKeyboard } from 'grammy';
 import type { StatusData } from '../types/monitoring.js';
 import { escapeHtml } from '../utils/text.js';
 
+/** Minimum context % change to trigger a status update */
+const CONTEXT_DELTA_THRESHOLD = 10;
+
+/**
+ * Determine if the new status data represents a meaningful change
+ * worth sending to Telegram. Status transitions (active/idle) are
+ * handled separately by the settle timer, not here.
+ */
+export function hasMeaningfulChange(data: StatusData, lastSent: StatusData | null): boolean {
+  if (!lastSent) return true;
+  const ctxDelta = Math.abs(data.contextPercent - lastSent.contextPercent);
+  if (ctxDelta >= CONTEXT_DELTA_THRESHOLD) return true;
+  if (data.filesChanged !== lastSent.filesChanged) return true;
+  return false;
+}
+
 /**
  * StatusMessage manages a pinned status message per session topic,
  * updated in place via editMessageText with debouncing.
  *
- * Debounces updates to a minimum 3-second interval to avoid
- * Telegram API rate limits on editMessageText. Detects identical
+ * Debounces updates to a minimum 10-second interval and only flushes
+ * on meaningful changes (context % delta >= 10, filesChanged).
+ * Status transitions use a 5-second settle timer. Detects identical
  * content to skip unnecessary API calls.
  */
 export class StatusMessage {
@@ -23,7 +40,16 @@ export class StatusMessage {
   private activeKeyboard: InlineKeyboard | undefined = undefined;
 
   /** Minimum milliseconds between editMessageText calls */
-  private static readonly MIN_UPDATE_INTERVAL_MS = 3000;
+  private static readonly MIN_UPDATE_INTERVAL_MS = 10_000;
+
+  /** How long a status transition must persist before flushing */
+  private static readonly STATUS_SETTLE_MS = 5_000;
+
+  /** Track last sent data for meaningful change detection */
+  private lastSentData: StatusData | null = null;
+
+  /** Timer for status transition settle detection */
+  private statusSettleTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(bot: Bot, chatId: number, threadId: number) {
     this.bot = bot;
@@ -89,13 +115,44 @@ export class StatusMessage {
   /**
    * Request a status update with new data.
    *
-   * If enough time has elapsed since the last update (>= 3 seconds),
-   * flushes immediately. Otherwise, schedules a flush when the interval
-   * elapses. Only one pending timer exists at a time.
+   * Only flushes on meaningful changes (context % delta >= 10,
+   * filesChanged). Status transitions (active ↔ idle) use a 5-second
+   * settle timer to avoid flickering. Respects a 10-second minimum
+   * interval between API calls.
    */
   requestUpdate(data: StatusData): void {
     this.pendingData = data;
 
+    // Status transition detection (active ↔ idle): wait for settle
+    if (this.lastSentData && data.status !== this.lastSentData.status
+        && data.status !== 'closed') {
+      // Start settle timer if not already running
+      if (!this.statusSettleTimer) {
+        this.statusSettleTimer = setTimeout(() => {
+          this.statusSettleTimer = null;
+          // Status held — treat as meaningful, schedule flush
+          this.scheduleFlush();
+        }, StatusMessage.STATUS_SETTLE_MS);
+      }
+      return;
+    }
+
+    // Status reverted before settle — cancel timer, skip update
+    if (this.statusSettleTimer && this.lastSentData
+        && data.status === this.lastSentData.status) {
+      clearTimeout(this.statusSettleTimer);
+      this.statusSettleTimer = null;
+      // Fall through to check for other meaningful changes
+    }
+
+    // Only flush on meaningful changes
+    if (!hasMeaningfulChange(data, this.lastSentData)) return;
+
+    this.scheduleFlush();
+  }
+
+  /** Schedule a flush respecting the minimum update interval */
+  private scheduleFlush(): void {
     const elapsed = Date.now() - this.lastUpdateTime;
     if (elapsed >= StatusMessage.MIN_UPDATE_INTERVAL_MS) {
       void this.flush();
@@ -155,6 +212,7 @@ export class StatusMessage {
         reply_markup: this.activeKeyboard ?? undefined,
       });
       this.lastSentText = text;
+      this.lastSentData = data;
     } catch (err) {
       // Ignore "message is not modified" errors
       if (err instanceof Error && err.message.includes('message is not modified')) {
@@ -175,6 +233,10 @@ export class StatusMessage {
     if (this.updateTimer) {
       clearTimeout(this.updateTimer);
       this.updateTimer = null;
+    }
+    if (this.statusSettleTimer) {
+      clearTimeout(this.statusSettleTimer);
+      this.statusSettleTimer = null;
     }
 
     // Send final "session ended" status, best-effort
