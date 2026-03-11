@@ -1204,6 +1204,11 @@ export async function main(): Promise<void> {
         if (permMode === 'bypassPermissions' || permMode === 'dontAsk') {
           return;
         }
+        // Suppress if Telegram mode auto-approves all tools
+        const modeState = permissionModeManager.getMode(session.sessionId);
+        if (modeState.mode === 'accept-all' || modeState.mode === 'until-done') {
+          return;
+        }
         // Log unsuppressed permission prompts to diagnose bypass mismatches
         cli.warn('NOTIFY', 'permission_prompt not suppressed', {
           permMode,
@@ -1249,6 +1254,13 @@ export async function main(): Promise<void> {
       const permMode = payload.permission_mode || session.permissionMode;
       if (permMode === 'bypassPermissions' || permMode === 'dontAsk') {
         bypassBatcher.add(session.sessionId, session.threadId, payload);
+        return;
+      }
+
+      // Telegram auto-approve modes: route to bypass batcher, no approval buttons needed
+      if (permissionModeManager.shouldAutoApprove(session.sessionId, payload.tool_name, payload.tool_input)) {
+        bypassBatcher.add(session.sessionId, session.threadId, payload);
+        permissionModeManager.incrementAutoApproved(session.sessionId);
         return;
       }
 
