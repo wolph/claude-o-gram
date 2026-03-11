@@ -27,11 +27,11 @@ export function shouldPostToolCall(toolName: string, tier: VerbosityTier): boole
 
 /**
  * Parse a string value into a valid VerbosityTier.
- * Returns 'normal' as the default per user decision.
+ * Returns 'minimal' as the default — only Write/Edit/Bash shown in Telegram.
  */
 export function parseVerbosityTier(value: string | undefined): VerbosityTier {
   if (value === 'minimal' || value === 'normal' || value === 'verbose') {
     return value;
   }
-  return 'normal';
+  return 'minimal';
 }

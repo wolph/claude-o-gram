@@ -54,9 +54,9 @@ describe('parseVerbosityTier', () => {
     expect(parseVerbosityTier('verbose')).toBe('verbose');
   });
 
-  it('defaults to normal for invalid values', () => {
-    expect(parseVerbosityTier('invalid')).toBe('normal');
-    expect(parseVerbosityTier(undefined)).toBe('normal');
-    expect(parseVerbosityTier('')).toBe('normal');
+  it('defaults to minimal for invalid values', () => {
+    expect(parseVerbosityTier('invalid')).toBe('minimal');
+    expect(parseVerbosityTier(undefined)).toBe('minimal');
+    expect(parseVerbosityTier('')).toBe('minimal');
   });
 });

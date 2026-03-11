@@ -412,7 +412,7 @@ export class HookHandlers {
     }
 
     // Verbosity filter: check if this tool call should be posted to Telegram
-    const verbosity = session.verbosity || 'normal';
+    const verbosity = session.verbosity || 'minimal';
     if (!shouldPostToolCall(payload.tool_name, verbosity)) {
       // Track suppressed call for periodic summary
       this.sessionStore.incrementSuppressedCount(payload.session_id, payload.tool_name);
