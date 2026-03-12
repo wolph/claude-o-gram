@@ -74,7 +74,7 @@ export class HookHandlers {
       transcriptPath: payload.transcript_path,
       toolCallCount: 0,
       filesChanged: new Set<string>(),
-      verbosity: 'normal',
+      verbosity: 'minimal',
       statusMessageId: 0,
       suppressedCounts: {},
       contextPercent: 0,
@@ -344,7 +344,7 @@ export class HookHandlers {
       transcriptPath: payload.transcript_path,
       toolCallCount: 0,
       filesChanged: new Set<string>(),
-      verbosity: 'normal', // Will be overridden by config default in wiring layer
+      verbosity: 'minimal', // May be overridden by config default in wiring layer
       statusMessageId: 0,
       suppressedCounts: {},
       contextPercent: 0,
