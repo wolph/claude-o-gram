@@ -33,6 +33,7 @@ import { TaskChecklist } from './monitoring/task-checklist.js';
 import { escapeHtml, markdownToHtml, isProceduralNarration, convertCommandsForTelegram } from './utils/text.js';
 import { ApprovalManager } from './control/approval-manager.js';
 import { BypassBatcher } from './control/bypass-batcher.js';
+import { PreToolUseStash } from './control/pretooluse-stash.js';
 import { InputRouter } from './input/input-router.js';
 import { CommandRegistry } from './bot/command-registry.js';
 import { expandCache, cacheKey } from './bot/expand-cache.js';
@@ -512,6 +513,12 @@ export async function main(): Promise<void> {
     const messageId = parseInt(ctx.match[1], 10);
     await ctx.answerCallbackQuery();
     await bypassBatcher.toggleExpand(messageId);
+  });
+
+  // 7d2. PreToolUse stash: holds payloads until Notification correlation confirms approval needed
+  const preToolUseStash = new PreToolUseStash(2000, (sessionId, threadId, payload) => {
+    // Timer expired — no Notification came, tool was auto-approved → route to bypass batcher
+    bypassBatcher.add(sessionId, threadId, payload);
   });
 
   // 7e. Task checklist: live-updating task progress per session
@@ -1081,6 +1088,7 @@ export async function main(): Promise<void> {
         inputRouter.cleanup(session.sessionId);
         subagentTracker.cleanup(session.sessionId);
         bypassBatcher.cleanupSession(session.sessionId);
+        preToolUseStash.cleanupSession(session.sessionId);
         seenAskIds.delete(session.sessionId);
         taskChecklist.cleanup(session.sessionId);
 
@@ -1115,6 +1123,7 @@ export async function main(): Promise<void> {
       inputRouter.cleanup(session.sessionId);
       subagentTracker.cleanup(session.sessionId);
       bypassBatcher.cleanupSession(session.sessionId);
+      preToolUseStash.cleanupSession(session.sessionId);
       seenAskIds.delete(session.sessionId);
       taskChecklist.cleanup(session.sessionId);
 
@@ -1127,8 +1136,16 @@ export async function main(): Promise<void> {
       await topicManager.closeTopic(latest.threadId, latest.topicName);
     },
 
-    onToolComplete: async (_session, payload) => {
-      // Clean up approval buttons when tool completes (user approved locally or auto-approved)
+    onToolComplete: async (session, payload) => {
+      // Check if this tool was stashed (no Notification came — auto-approved)
+      const stashed = preToolUseStash.removeByToolUseId(session.sessionId, payload.tool_use_id);
+      if (stashed) {
+        // Auto-approved: route to bypassBatcher (no approval buttons were ever shown)
+        bypassBatcher.add(session.sessionId, stashed.threadId, stashed.payload);
+        return;
+      }
+
+      // Not stashed — check if there's a pending approval message to clean up
       const pendingApproval = approvalManager.resolvePending(payload.tool_use_id);
       if (pendingApproval) {
         try {
@@ -1200,22 +1217,46 @@ export async function main(): Promise<void> {
       // Suppress idle notifications — status message already shows idle state
       if (payload.notification_type === 'idle_prompt') return;
 
-      // Suppress permission_prompt notifications in bypass mode — they're misleading
-      const permMode = payload.permission_mode || session.permissionMode;
+      // permission_prompt: correlate with stashed PreToolUse to show approval buttons
       if (payload.notification_type === 'permission_prompt') {
-        if (permMode === 'bypassPermissions' || permMode === 'dontAsk') {
+        const stashed = preToolUseStash.popOldest(session.sessionId);
+        if (stashed) {
+          // Build approval message from the stashed PreToolUse context
+          let approvalHtml = formatApprovalRequest(stashed.payload);
+          if (stashed.agentPrefix) {
+            approvalHtml = stashed.agentPrefix + approvalHtml;
+          }
+
+          cli.info('PERM', 'Permission request (Notification correlated)', {
+            tool: stashed.payload.tool_name,
+            session: session.sessionId.slice(0, 8),
+          });
+
+          const keyboard = makeApprovalKeyboard(stashed.payload.tool_use_id);
+          const msg = await bot.api.sendMessage(config.telegramChatId, approvalHtml, {
+            message_thread_id: stashed.threadId,
+            parse_mode: 'HTML',
+            reply_markup: keyboard,
+          });
+
+          approvalManager.trackPending(
+            stashed.payload.tool_use_id,
+            session.sessionId,
+            stashed.threadId,
+            msg.message_id,
+            stashed.payload.tool_name,
+            approvalHtml,
+          );
+
+          // Set topic to green — waiting for user approval (= waiting for input)
+          topicStatusManager.setStatus(stashed.threadId, 'green');
           return;
         }
-        // Suppress if Telegram mode auto-approves all tools
-        const modeState = permissionModeManager.getMode(session.sessionId);
-        if (modeState.mode === 'accept-all' || modeState.mode === 'until-done') {
-          return;
-        }
-        // Log unsuppressed permission prompts to diagnose bypass mismatches
-        cli.warn('NOTIFY', 'permission_prompt not suppressed', {
-          permMode,
-          payloadMode: payload.permission_mode,
-          sessionMode: session.permissionMode,
+
+        // No stashed PreToolUse — fall through to show notification as-is
+        // (can happen if PreToolUse was already flushed by timer)
+        cli.warn('NOTIFY', 'permission_prompt with no stashed PreToolUse', {
+          session: session.sessionId.slice(0, 8),
         });
       }
 
@@ -1230,8 +1271,6 @@ export async function main(): Promise<void> {
       await batcher.enqueueImmediate(session.threadId, summary);
     },
 
-    // PreToolUse: informational message to Telegram (non-blocking).
-    // Claude Code shows its local dialog. Telegram buttons send keystrokes via tmux.
     onPreToolUse: async (session, payload: PreToolUsePayload) => {
       cli.debug('PERM', 'PreToolUse received', {
         session: session.sessionId.slice(0, 8),
@@ -1252,57 +1291,30 @@ export async function main(): Promise<void> {
         );
       }
 
-      // Bypass mode: batch tool calls instead of sending individual approval messages
+      // Fast path: known bypass modes skip stashing entirely
       const permMode = payload.permission_mode || session.permissionMode;
       if (permMode === 'bypassPermissions' || permMode === 'dontAsk') {
         bypassBatcher.add(session.sessionId, session.threadId, payload);
         return;
       }
 
-      // Telegram auto-approve modes: route to bypass batcher, no approval buttons needed
+      // Telegram auto-approve modes: route to bypass batcher, no stashing needed
       if (permissionModeManager.shouldAutoApprove(session.sessionId, payload.tool_name, payload.tool_input)) {
         bypassBatcher.add(session.sessionId, session.threadId, payload);
         permissionModeManager.incrementAutoApproved(session.sessionId);
         return;
       }
 
-      // Format approval request message
-      let approvalHtml = formatApprovalRequest(payload);
-
-      // Prefix with agent name if tool call is from a subagent
+      // Compute agent prefix now (subagent state may change by the time Notification arrives)
+      let agentPrefix: string | null = null;
       const activeAgent = subagentTracker.getActiveAgent(session.sessionId);
       if (activeAgent) {
         const indent = subagentTracker.getIndent(activeAgent.agentId);
-        const agentPrefix = `${indent}<b>[${escapeHtml(activeAgent.displayName)}]</b> `;
-        approvalHtml = agentPrefix + approvalHtml;
+        agentPrefix = `${indent}<b>[${escapeHtml(activeAgent.displayName)}]</b> `;
       }
 
-      cli.info('PERM', 'Permission request (local dialog shown)', {
-        tool: payload.tool_name,
-        session: session.sessionId.slice(0, 8),
-      });
-
-      const keyboard = makeApprovalKeyboard(payload.tool_use_id);
-
-      // Post informational message with Approve/Deny buttons
-      const msg = await bot.api.sendMessage(config.telegramChatId, approvalHtml, {
-        message_thread_id: session.threadId,
-        parse_mode: 'HTML',
-        reply_markup: keyboard,
-      });
-
-      // Track pending approval for Telegram message updates
-      approvalManager.trackPending(
-        payload.tool_use_id,
-        session.sessionId,
-        session.threadId,
-        msg.message_id,
-        payload.tool_name,
-        approvalHtml,
-      );
-
-      // Set topic to green -- waiting for user approval (= waiting for input)
-      topicStatusManager.setStatus(session.threadId, 'green');
+      // Stash payload — wait for Notification correlation before showing buttons
+      preToolUseStash.push(session.sessionId, session.threadId, payload, agentPrefix);
     },
 
     onStop: async (session, _payload) => {
@@ -1614,6 +1626,7 @@ export async function main(): Promise<void> {
     // Phase 3+7: Clean up control managers
     approvalManager.shutdown();
     bypassBatcher.shutdown();
+    preToolUseStash.shutdown();
     taskChecklist.shutdown();
     commandSettingsStore.shutdown();
     // Clean up permission mode and subagent tracker state for all sessions
