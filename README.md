@@ -256,9 +256,9 @@ Two authentication layers keep everything locked down.
 
 The hook server binds to `127.0.0.1` by default — localhost only, not exposed to the network.
 
-**Secret leak prevention** — The repository enforces secret scanning in two places:
-- **CI:** GitHub Actions runs `gitleaks` on every push/PR and fails the workflow if leaks are detected.
-- **Local pre-commit hook:** Run `npm run hooks:install` once per clone to enable `.githooks/pre-commit`, which scans staged changes before each commit.
+**Secret leak prevention** — The repository enforces secret scanning via [lefthook](https://github.com/evilmartians/lefthook):
+- **CI:** GitHub Actions runs `npx lefthook run quality` which includes a full-history gitleaks scan.
+- **Local pre-commit hook:** Installed automatically by `npm install` (via the `prepare` script). Runs lint, typecheck, tests, and staged secrets scan in parallel before each commit.
 
 </details>
 
@@ -270,7 +270,7 @@ npm run dev                  # Watch mode with tsx
 npm run typecheck            # Type-check without emitting
 npm run lint                 # ESLint
 npm test                     # Run all tests
-npm run hooks:install        # Install repository git hooks (run once per clone)
+npx lefthook run quality     # Full quality gate (lint + typecheck + test + secrets)
 npm run secrets:scan         # Full-history secret scan
 npm run secrets:scan:staged  # Scan staged changes (used by pre-commit)
 ```

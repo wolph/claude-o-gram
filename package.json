@@ -13,7 +13,7 @@
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "typecheck": "tsc --noEmit",
-    "hooks:install": "bash scripts/install-hooks.sh",
+    "prepare": "lefthook install",
     "secrets:scan": "bash scripts/gitleaks.sh git --no-banner --redact=100 --log-opts='--all --full-history --reflog' .",
     "secrets:scan:staged": "bash scripts/gitleaks.sh git --no-banner --redact=100 --staged ."
   },
@@ -42,6 +42,7 @@
     "eslint": "^10.0.2",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.18"
+    "vitest": "^4.0.18",
+    "@evilmartians/lefthook": "^1.12.4"
   }
 }

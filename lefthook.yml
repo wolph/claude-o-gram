@@ -1,0 +1,26 @@
+# Pre-commit: fast checks on every commit (staged files for lint)
+pre-commit:
+  parallel: true
+  commands:
+    lint:
+      glob: "*.ts"
+      run: npx eslint {staged_files}
+    typecheck:
+      run: npx tsc --noEmit
+    test:
+      run: npx vitest run
+    secrets:
+      run: npm run secrets:scan:staged
+
+# Full quality gate: CI + Claude/agent guard (all files)
+quality:
+  parallel: true
+  commands:
+    lint:
+      run: npx eslint src/
+    typecheck:
+      run: npx tsc --noEmit
+    test:
+      run: npx vitest run
+    secrets:
+      run: npm run secrets:scan

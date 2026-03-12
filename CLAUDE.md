@@ -10,6 +10,7 @@ npm run lint         # ESLint
 npm run lint:fix     # ESLint with auto-fix
 npm test             # Vitest (all tests)
 npm run test:watch   # Vitest in watch mode
+npx lefthook run quality   # Full quality gate (CI parity)
 ```
 
 ## Architecture
