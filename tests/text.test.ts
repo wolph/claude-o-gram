@@ -77,6 +77,21 @@ describe('markdownToHtml', () => {
     expect(markdownToHtml(input)).toContain('<pre>');
     expect(markdownToHtml(input)).toContain('const x = 1;');
   });
+
+  it('does not convert asterisks inside inline code to italic/bold', () => {
+    const input = 'uses `*args: object, **kwargs: object` for forwarding';
+    const result = markdownToHtml(input);
+    expect(result).toContain('<code>*args: object, **kwargs: object</code>');
+    expect(result).not.toContain('<i>');
+    expect(result).not.toContain('<b>');
+  });
+
+  it('does not convert asterisks inside pre blocks to italic/bold', () => {
+    const input = '```\ndef foo(*args, **kwargs):\n    pass\n```';
+    const result = markdownToHtml(input);
+    expect(result).toContain('*args');
+    expect(result).not.toContain('<i>');
+  });
 });
 
 describe('truncateText', () => {

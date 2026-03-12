@@ -164,11 +164,22 @@ export function markdownToHtml(text: string): string {
   // Inline code: `...` → <code>...</code>
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
 
+  // Protect <code> and <pre> blocks from bold/italic conversion.
+  // Asterisks inside code (e.g., *args, **kwargs) must not become <i>/<b> tags.
+  const codeBlocks: string[] = [];
+  html = html.replace(/<(code|pre)>([\s\S]*?)<\/\1>/g, (match) => {
+    codeBlocks.push(match);
+    return `\x00CODE${codeBlocks.length - 1}\x00`;
+  });
+
   // Bold: **...** → <b>...</b>
   html = html.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
 
   // Italic: *...* → <i>...</i> (but not inside words like file*name)
   html = html.replace(/(?<!\w)\*([^*]+)\*(?!\w)/g, '<i>$1</i>');
+
+  // Restore protected code blocks
+  html = html.replace(/\x00CODE(\d+)\x00/g, (_m, idx) => codeBlocks[parseInt(idx, 10)]);
 
   // Links: [text](url) → <a href="url">text</a>
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
