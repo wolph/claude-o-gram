@@ -373,8 +373,11 @@ export async function createBot(
   // --- AskUserQuestion callback query handlers ---
   // Buttons send number keystrokes (1-4) via tmux to select an option.
 
-  bot.callbackQuery(/^ask:([a-f0-9]+):(\w+)$/, async (ctx) => {
+  bot.callbackQuery(/^ask:([\w]+):(\w+)$/, async (ctx) => {
     const optionStr = ctx.match[2];
+    const idPrefix = ctx.match[1];
+    const threadId = ctx.callbackQuery.message?.message_thread_id;
+    console.log(`[ASK] Button pressed: ask:${idPrefix}:${optionStr} in thread ${threadId}`);
 
     // "Other →" button: show toast, no keystroke
     if (optionStr === 'other') {
@@ -392,7 +395,6 @@ export async function createBot(
     }
 
     // Find the session from the thread
-    const threadId = ctx.callbackQuery.message?.message_thread_id;
     if (!threadId) {
       await ctx.answerCallbackQuery({ text: 'No session found.', show_alert: true });
       return;
@@ -446,6 +448,12 @@ export async function createBot(
         console.warn('Failed to edit ask message:', err instanceof Error ? err.message : err);
       }
     }
+  });
+
+  // Catch-all for unmatched ask: callbacks (defense in depth — log regex mismatches)
+  bot.callbackQuery(/^ask:/, async (ctx) => {
+    console.warn('[ASK] Unmatched callback data:', ctx.callbackQuery.data);
+    await ctx.answerCallbackQuery({ text: 'Button format not recognized', show_alert: true });
   });
 
   // --- Commands overview from settings topic ---
