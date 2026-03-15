@@ -51,6 +51,14 @@ export class ConversationStore {
     return true;
   }
 
+  peekQueued(threadId: number): InboundMessage | undefined {
+    return this.conversations.get(threadId)?.queue[0];
+  }
+
+  shiftQueue(threadId: number): InboundMessage | undefined {
+    return this.conversations.get(threadId)?.queue.shift();
+  }
+
   attachReplacementBinding(threadId: number, binding: ReplacementConversationBinding): boolean {
     const conversation = this.conversations.get(threadId);
     if (!conversation) {
@@ -67,5 +75,9 @@ export class ConversationStore {
     conversation.permissionMode = binding.permissionMode;
     conversation.state = 'active';
     return true;
+  }
+
+  deleteByThreadId(threadId: number): boolean {
+    return this.conversations.delete(threadId);
   }
 }

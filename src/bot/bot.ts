@@ -3,6 +3,7 @@ import { autoRetry } from '@grammyjs/auto-retry';
 import { apiThrottler } from '@grammyjs/transformer-throttler';
 import type { AppConfig } from '../types/config.js';
 import type { SessionStore } from '../sessions/session-store.js';
+import type { ConversationStore } from '../sessions/conversation-store.js';
 import type { ApprovalManager } from '../control/approval-manager.js';
 import type { InputRouter } from '../input/input-router.js';
 import type { CommandRegistry } from './command-registry.js';
@@ -39,6 +40,7 @@ export type BotContext = Context;
 export async function createBot(
   config: AppConfig,
   sessionStore: SessionStore,
+  conversationStore: ConversationStore,
   approvalManager: ApprovalManager,
   inputRouter: InputRouter,
   commandRegistry: CommandRegistry,
@@ -54,17 +56,53 @@ export async function createBot(
   const inboundRouter = new InboundRouter({
     send: (sessionId, text) => inputRouter.send(sessionId, text),
     log: (message) => console.log(`[INBOUND] ${message}`),
-    queue: () => {
-      return {
-        status: 'failed',
-        error: 'queueing not wired yet during clear transition',
-      };
-    },
+    queue: (input) => (
+      conversationStore.enqueue(input.threadId, {
+        telegramMessageId: input.telegramMessageId,
+        kind: input.kind,
+        rawText: input.rawText,
+        routedText: input.routedText,
+        receivedAt: input.receivedAt,
+      })
+        ? { status: 'queued' }
+        : {
+          status: 'failed',
+          error: 'No conversation is registered for this topic',
+        }
+    ),
   });
 
   interface InboundRouteEffects {
     onFailed?: (error: string) => Promise<void>;
     onSent?: () => Promise<void>;
+  }
+
+  function getInboundConversation(threadId: number): {
+    state: 'active' | 'transitioning';
+    sessionId: string;
+    inputMethod?: 'tmux' | 'fifo' | 'sdk-resume';
+  } | null {
+    const conversation = conversationStore.getByThreadId(threadId);
+    if (conversation) {
+      return {
+        state: conversation.state,
+        sessionId: conversation.currentSessionId,
+        inputMethod: conversation.currentInputMethod
+          ?? inputRouter.getMethod(conversation.currentSessionId)
+          ?? undefined,
+      };
+    }
+
+    const session = sessionStore.getByThreadId(threadId);
+    if (!session || session.status !== 'active') {
+      return null;
+    }
+
+    return {
+      state: 'active',
+      sessionId: session.sessionId,
+      inputMethod: inputRouter.getMethod(session.sessionId) ?? session.inputMethod ?? undefined,
+    };
   }
 
   async function handleInboundRoute(
@@ -663,8 +701,8 @@ export async function createBot(
     if (entry.parameters === 'none') {
       pendingSubcmd.delete(chatId);
       commandSettingsStore.recordUse(claudeName);
-      const session = threadId ? sessionStore.getByThreadId(threadId) : null;
-      if (!threadId || !session || session.status !== 'active') {
+      const conversation = threadId ? getInboundConversation(threadId) : null;
+      if (!threadId || !conversation) {
         await ctx.editMessageText(`\u274C No active session in this topic.`, { reply_markup: undefined });
         return;
       }
@@ -674,9 +712,9 @@ export async function createBot(
         kind: 'command',
         rawText: `/${claudeName}`,
         routedText: `/${claudeName}`,
-        state: 'active',
-        sessionId: session.sessionId,
-        inputMethod: inputRouter.getMethod(session.sessionId) ?? session.inputMethod ?? undefined,
+        state: conversation.state,
+        sessionId: conversation.sessionId,
+        inputMethod: conversation.inputMethod,
         receivedAt: new Date().toISOString(),
       }, 'send command', {
         onSent: async () => {
@@ -765,9 +803,9 @@ export async function createBot(
     await ctx.answerCallbackQuery();
 
     commandSettingsStore.recordUse(pending.claudeName);
-    const session = threadId ? sessionStore.getByThreadId(threadId) : null;
+    const conversation = threadId ? getInboundConversation(threadId) : null;
     const messageId = ctx.callbackQuery.message?.message_id;
-    if (!threadId || !messageId || !session || session.status !== 'active') {
+    if (!threadId || !messageId || !conversation) {
       await ctx.editMessageText(`\u274C No active session in this topic.`, { reply_markup: undefined });
       return;
     }
@@ -777,9 +815,9 @@ export async function createBot(
       kind: 'command',
       rawText: `/${pending.claudeName}`,
       routedText: `/${pending.claudeName}`,
-      state: 'active',
-      sessionId: session.sessionId,
-      inputMethod: inputRouter.getMethod(session.sessionId) ?? session.inputMethod ?? undefined,
+      state: conversation.state,
+      sessionId: conversation.sessionId,
+      inputMethod: conversation.inputMethod,
       receivedAt: new Date().toISOString(),
     }, 'send command', {
       onSent: async () => {
@@ -1085,8 +1123,8 @@ export async function createBot(
     // Phase 12: Ignore commands in settings topic
     if (threadId === runtimeSettings.settingsTopicId) return next();
 
-    const session = sessionStore.getByThreadId(threadId);
-    if (!session || session.status !== 'active') return next();
+    const conversation = getInboundConversation(threadId);
+    if (!conversation) return next();
 
     // Parse command: "/gsd_progress args" or "/gsd_progress@botname args"
     const match = text.match(/^\/([a-z0-9_]+)(?:@\w+)?(?:\s+(.*))?$/);
@@ -1109,9 +1147,9 @@ export async function createBot(
       kind: 'command',
       rawText: text,
       routedText: cliCommand,
-      state: 'active',
-      sessionId: session.sessionId,
-      inputMethod: inputRouter.getMethod(session.sessionId) ?? session.inputMethod ?? undefined,
+      state: conversation.state,
+      sessionId: conversation.sessionId,
+      inputMethod: conversation.inputMethod,
       receivedAt: new Date(ctx.message.date * 1000).toISOString(),
     }, 'send command');
   });
@@ -1244,8 +1282,8 @@ export async function createBot(
       const pending = pendingSubcmd.get(chatId);
       if (pending && threadId === pending.threadId) {
         pendingSubcmd.delete(chatId);
-        const session = sessionStore.getByThreadId(threadId);
-        if (!session || session.status !== 'active') {
+        const conversation = getInboundConversation(threadId);
+        if (!conversation) {
           await ctx.reply('\u274C No active session in this topic.', { message_thread_id: threadId });
           return;
         }
@@ -1256,9 +1294,9 @@ export async function createBot(
           kind: 'command',
           rawText,
           routedText: `/${pending.claudeName} ${rawText}`,
-          state: 'active',
-          sessionId: session.sessionId,
-          inputMethod: inputRouter.getMethod(session.sessionId) ?? session.inputMethod ?? undefined,
+          state: conversation.state,
+          sessionId: conversation.sessionId,
+          inputMethod: conversation.inputMethod,
           receivedAt: new Date(ctx.message.date * 1000).toISOString(),
         }, 'send command');
         return;
@@ -1266,9 +1304,8 @@ export async function createBot(
     }
 
     // Find session for this topic
-    const session = sessionStore.getByThreadId(threadId);
-    if (!session) return; // Not a managed session topic
-    if (session.status !== 'active') return; // Session is closed
+    const conversation = getInboundConversation(threadId);
+    if (!conversation) return; // Not a managed session topic
 
     // Include quoted message context when replying to a specific message
     let text = rawText;
@@ -1283,9 +1320,9 @@ export async function createBot(
       kind: 'text',
       rawText,
       routedText: text,
-      state: 'active',
-      sessionId: session.sessionId,
-      inputMethod: inputRouter.getMethod(session.sessionId) ?? session.inputMethod ?? undefined,
+      state: conversation.state,
+      sessionId: conversation.sessionId,
+      inputMethod: conversation.inputMethod,
       receivedAt: new Date(ctx.message.date * 1000).toISOString(),
     }, 'send input');
   });

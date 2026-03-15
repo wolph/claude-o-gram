@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { loadConfig } from './config.js';
 import { parseHistoryUsage } from './monitoring/history-parser.js';
 import { SessionStore } from './sessions/session-store.js';
+import { ConversationStore } from './sessions/conversation-store.js';
 import { planInactiveCleanup } from './sessions/inactive-cleanup.js';
 import { discoverActiveClaudeSessions } from './sessions/live-session-discovery.js';
 import { createHookHandlers, type HookCallbacks } from './hooks/handlers.js';
@@ -98,6 +99,9 @@ export async function main(): Promise<void> {
   // 2. Initialize session store
   const sessionStore = new SessionStore(
     join(config.dataDir, 'sessions.json'),
+  );
+  const conversationStore = new ConversationStore(
+    join(config.dataDir, 'conversations.json'),
   );
 
   // 2b. Initialize bot-level state store and runtime settings
@@ -356,7 +360,7 @@ export async function main(): Promise<void> {
     }
   };
 
-  const bot = await createBot(config, sessionStore, approvalManager, inputRouter, commandRegistry, permissionModeManager, runtimeSettings, commandSettingsStore, onCleanupInactiveTopics, refreshSettings, async () => cleanupOldButtonsFn?.() ?? 0, onRefreshMenu);
+  const bot = await createBot(config, sessionStore, conversationStore, approvalManager, inputRouter, commandRegistry, permissionModeManager, runtimeSettings, commandSettingsStore, onCleanupInactiveTopics, refreshSettings, async () => cleanupOldButtonsFn?.() ?? 0, onRefreshMenu);
   botRef = bot;
 
   // 5b. Wire late-bound cleanup for orphaned approval buttons
@@ -561,6 +565,100 @@ export async function main(): Promise<void> {
   // Per-CWD clear detectors (filesystem watcher for /clear bypass of hooks)
   const clearDetectors = new Map<string, ClearDetector>();
 
+  function syncActiveConversation(session: SessionInfo): void {
+    if (session.threadId <= 0) {
+      return;
+    }
+
+    conversationStore.upsertActive({
+      threadId: session.threadId,
+      cwd: session.cwd,
+      topicName: session.topicName,
+      sessionId: session.sessionId,
+      transcriptPath: session.transcriptPath,
+      inputMethod: inputRouter.getMethod(session.sessionId) ?? session.inputMethod ?? undefined,
+      permissionMode: session.permissionMode,
+      statusMessageId: session.statusMessageId,
+    });
+  }
+
+  async function drainQueuedConversation(threadId: number): Promise<void> {
+    for (;;) {
+      const conversation = conversationStore.getByThreadId(threadId);
+      if (!conversation) {
+        return;
+      }
+
+      const queued = conversationStore.peekQueued(threadId);
+      if (!queued) {
+        return;
+      }
+
+      const result = await inputRouter.send(conversation.currentSessionId, queued.routedText);
+      if (result.status !== 'sent') {
+        cli.warn('INBOUND', 'Failed to drain queued message after clear', {
+          threadId,
+          session: conversation.currentSessionId.slice(0, 8),
+          error: result.error,
+        });
+        return;
+      }
+
+      conversationStore.shiftQueue(threadId);
+    }
+  }
+
+  async function registerInputForActiveConversation(session: SessionInfo): Promise<void> {
+    await inputRouter.register(session.sessionId, session.cwd, session.permissionMode);
+
+    const method = inputRouter.getMethod(session.sessionId);
+    if (method) {
+      sessionStore.updateInputMethod(session.sessionId, method);
+      session.inputMethod = method;
+    }
+
+    const latestSession = sessionStore.get(session.sessionId);
+    if (!latestSession || latestSession.status !== 'active') {
+      return;
+    }
+
+    syncActiveConversation(latestSession);
+  }
+
+  async function registerInputForReplacementConversation(session: SessionInfo): Promise<void> {
+    await inputRouter.register(session.sessionId, session.cwd, session.permissionMode);
+
+    const method = inputRouter.getMethod(session.sessionId);
+    if (!method) {
+      cli.warn('INBOUND', 'Replacement session has no input method after register', {
+        threadId: session.threadId,
+        session: session.sessionId.slice(0, 8),
+      });
+      return;
+    }
+
+    sessionStore.updateInputMethod(session.sessionId, method);
+    session.inputMethod = method;
+
+    const latestSession = sessionStore.get(session.sessionId);
+    if (!latestSession || latestSession.status !== 'active') {
+      return;
+    }
+
+    const attached = conversationStore.attachReplacementBinding(latestSession.threadId, {
+      sessionId: latestSession.sessionId,
+      transcriptPath: latestSession.transcriptPath,
+      inputMethod: method,
+      permissionMode: latestSession.permissionMode,
+    });
+
+    if (!attached) {
+      syncActiveConversation(latestSession);
+    }
+
+    await drainQueuedConversation(latestSession.threadId);
+  }
+
   /**
    * Start a ClearDetector for a session's CWD if one isn't already running.
    * Detects /clear via filesystem when HTTP hooks don't fire (bug #6428).
@@ -630,6 +728,8 @@ export async function main(): Promise<void> {
     const threadId = oldSession?.threadId ?? pending?.threadId ?? 0;
     if (threadId === 0) return;
 
+    conversationStore.startClearTransition(threadId);
+
     // Clean up clearPending if it was used
     if (pending) clearPending.delete(cwd);
 
@@ -692,13 +792,8 @@ export async function main(): Promise<void> {
       detector.updateSessionId(newSessionId);
     }
 
-    // Re-detect input method
-    void inputRouter.register(newSessionId, cwd, newSession.permissionMode).then(() => {
-      const method = inputRouter.getMethod(newSessionId);
-      if (method) {
-        sessionStore.updateInputMethod(newSessionId, method);
-      }
-    });
+    // Re-detect input method, rebind the durable conversation, then drain any queued Telegram input.
+    void registerInputForReplacementConversation(newSession);
   }
 
   /**
@@ -899,8 +994,10 @@ export async function main(): Promise<void> {
       // Brand new session: send + pin a new status message
       void statusMsg.initialize().then((statusMessageId) => {
         sessionStore.updateStatusMessageId(session.sessionId, statusMessageId);
+        session.statusMessageId = statusMessageId;
         // Set default verbosity from config
         sessionStore.updateVerbosity(session.sessionId, config.defaultVerbosity);
+        syncActiveConversation(session);
       }).catch((err) => {
         cli.warn('STATUS', 'Failed to initialize status message', {
           error: err instanceof Error ? err.message : err,
@@ -946,6 +1043,8 @@ export async function main(): Promise<void> {
           clearPending.delete(session.cwd);
         }
 
+        conversationStore.startClearTransition(session.threadId);
+
         // Clean up OLD monitoring for the previous session ID.
         // Since SessionEnd may not have fired, the old monitor may still be running.
         // Find it by matching cwd (not sessionId, since the new session has a different ID).
@@ -987,13 +1086,8 @@ export async function main(): Promise<void> {
         // Update ClearDetector for the new session ID
         startClearDetector(session);
 
-        // Re-detect input method
-        void inputRouter.register(session.sessionId, session.cwd, session.permissionMode).then(() => {
-          const method = inputRouter.getMethod(session.sessionId);
-          if (method) {
-            sessionStore.updateInputMethod(session.sessionId, method);
-          }
-        });
+        // Re-detect input method, rebind the durable conversation, then drain queued input.
+        void registerInputForReplacementConversation(session);
 
         return;
       }
@@ -1013,6 +1107,8 @@ export async function main(): Promise<void> {
         // Reset counters for the fresh session
         sessionStore.resetCounters(session.sessionId);
 
+        syncActiveConversation(session);
+
         // Initialize monitoring
         initMonitoring(session);
 
@@ -1020,12 +1116,7 @@ export async function main(): Promise<void> {
         startClearDetector(session);
 
         // Detect input method
-        void inputRouter.register(session.sessionId, session.cwd, session.permissionMode).then(() => {
-          const method = inputRouter.getMethod(session.sessionId);
-          if (method) {
-            sessionStore.updateInputMethod(session.sessionId, method);
-          }
-        });
+        void registerInputForActiveConversation(session);
 
         // Clean up duplicate topics for this cwd (best-effort, async)
         void cleanupDuplicateTopics(session.cwd, session.threadId);
@@ -1057,6 +1148,8 @@ export async function main(): Promise<void> {
         );
       }
 
+      syncActiveConversation(session);
+
       // Initialize monitoring components for this session
       initMonitoring(session);
 
@@ -1064,12 +1157,7 @@ export async function main(): Promise<void> {
       startClearDetector(session);
 
       // Detect and register input method (tmux / FIFO / SDK resume)
-      void inputRouter.register(session.sessionId, session.cwd, session.permissionMode).then(() => {
-        const method = inputRouter.getMethod(session.sessionId);
-        if (method) {
-          sessionStore.updateInputMethod(session.sessionId, method);
-        }
-      });
+      void registerInputForActiveConversation(session);
     },
 
     onSessionEnd: async (session, reason) => {
@@ -1079,9 +1167,17 @@ export async function main(): Promise<void> {
       });
       // Re-fetch session from store to get latest toolCallCount/filesChanged
       const latest = sessionStore.get(session.sessionId) || session;
+      const conversation = latest.threadId > 0
+        ? conversationStore.getByThreadId(latest.threadId)
+        : undefined;
+      const ownsConversation = conversation?.currentSessionId === session.sessionId;
 
       if (reason === 'clear') {
         // /clear transition: keep topic open, clean up monitoring but preserve threadId
+        if (!conversation || ownsConversation) {
+          conversationStore.startClearTransition(latest.threadId);
+        }
+
         const monitor = monitors.get(session.sessionId);
         if (monitor) {
           monitor.transcriptWatcher.stop();
@@ -1100,16 +1196,22 @@ export async function main(): Promise<void> {
         taskChecklist.cleanup(session.sessionId);
 
         // Store threadId for the upcoming SessionStart(source=clear)
-        clearPending.set(latest.cwd, {
-          threadId: latest.threadId,
-          statusMessageId: latest.statusMessageId,
-        });
+        if (!conversation || ownsConversation) {
+          clearPending.set(latest.cwd, {
+            threadId: latest.threadId,
+            statusMessageId: latest.statusMessageId,
+          });
+        }
 
         // Do NOT close the topic, do NOT post session end summary (SESS-06)
         return;
       }
 
       // Normal session end: clean up monitoring
+      if (!conversation || ownsConversation) {
+        conversationStore.deleteByThreadId(latest.threadId);
+      }
+
       const monitor = monitors.get(session.sessionId);
       if (monitor) {
         monitor.transcriptWatcher.stop();
@@ -1513,12 +1615,14 @@ export async function main(): Promise<void> {
         session.statusMessageId = 0;
       }
 
+      syncActiveConversation(session);
+
       // Re-initialize monitoring for active sessions on restart
       initMonitoring(session);
       // Start /clear detector (filesystem workaround for bug #6428)
       startClearDetector(session);
       // Re-detect input method
-      void inputRouter.register(session.sessionId, session.cwd, session.permissionMode);
+      void registerInputForActiveConversation(session);
       // Clean up duplicate topics for this cwd (best-effort, async)
       void cleanupDuplicateTopics(session.cwd, session.threadId);
       reconnectedCount++;
