@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/logo.png" alt="Claude-o-Gram banner" width="600" />
+  <img src="docs/assets/logo.png" alt="Claude-o-Gram banner" width="200" />
 </p>
 
 <h1 align="center">Claude-o-Gram</h1>
