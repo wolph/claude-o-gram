@@ -7,7 +7,7 @@ import { planInactiveCleanup } from './sessions/inactive-cleanup.js';
 import { discoverActiveClaudeSessions } from './sessions/live-session-discovery.js';
 import { createHookHandlers, type HookCallbacks } from './hooks/handlers.js';
 import { createHookServer } from './hooks/server.js';
-import { createBot, makeApprovalKeyboard, makeAskKeyboard } from './bot/bot.js';
+import { createBot, makeApprovalKeyboard, makeAskKeyboard, makePlanKeyboard } from './bot/bot.js';
 import { PermissionModeManager } from './control/permission-modes.js';
 // PermissionModeManager kept for session cleanup; no longer used for auto-approval
 import { TopicManager } from './bot/topics.js';
@@ -21,6 +21,7 @@ import {
   formatSubagentDone,
   formatBypassBatch,
   formatAskUserQuestion,
+  formatPlanPrompt,
 } from './bot/formatter.js';
 import { SubagentTracker } from './monitoring/subagent-tracker.js';
 import { installHooks } from './utils/install-hooks.js';
@@ -30,7 +31,7 @@ import { StatusMessage } from './monitoring/status-message.js';
 import { TopicStatusManager } from './monitoring/topic-status.js';
 import { ClearDetector } from './monitoring/clear-detector.js';
 import { TaskChecklist } from './monitoring/task-checklist.js';
-import { escapeHtml, markdownToHtml, isProceduralNarration, convertCommandsForTelegram, stripSystemTags } from './utils/text.js';
+import { escapeHtml, markdownToHtml, isProceduralNarration, convertCommandsForTelegram, stripSystemTags, parseNumberedOptions, extractPromptText } from './utils/text.js';
 import { ApprovalManager } from './control/approval-manager.js';
 import { BypassBatcher } from './control/bypass-batcher.js';
 import { PreToolUseStash } from './control/pretooluse-stash.js';
@@ -1227,6 +1228,14 @@ export async function main(): Promise<void> {
       if (payload.notification_type === 'permission_prompt') {
         const stashed = preToolUseStash.popOldest(session.sessionId);
         if (stashed) {
+          // AskUserQuestion: skip approval UI — transcript watcher shows interactive buttons
+          if (stashed.payload.tool_name === 'AskUserQuestion') {
+            cli.debug('PERM', 'Skipping approval UI for AskUserQuestion (transcript watcher handles it)', {
+              session: session.sessionId.slice(0, 8),
+            });
+            return;
+          }
+
           // Build approval message from the stashed PreToolUse context
           let approvalHtml = formatApprovalRequest(stashed.payload);
           if (stashed.agentPrefix) {
@@ -1259,8 +1268,31 @@ export async function main(): Promise<void> {
           return;
         }
 
-        // No stashed PreToolUse — fall through to show notification as-is
-        // (can happen if PreToolUse was already flushed by timer)
+        // No stashed PreToolUse — check for multi-choice prompt (e.g. plan mode)
+        const parsedOptions = parseNumberedOptions(payload.message);
+        if (parsedOptions.length > 1) {
+          // Multi-choice prompt: show options as inline buttons
+          const syntheticId = `plan${Date.now()}`;
+          const promptText = extractPromptText(payload.message);
+          const html = formatPlanPrompt(promptText);
+          const keyboard = makePlanKeyboard(syntheticId, parsedOptions);
+
+          cli.info('NOTIFY', 'Plan/multi-choice prompt detected', {
+            session: session.sessionId.slice(0, 8),
+            options: parsedOptions.length,
+          });
+
+          await bot.api.sendMessage(config.telegramChatId, html, {
+            message_thread_id: session.threadId,
+            parse_mode: 'HTML',
+            reply_markup: keyboard,
+          });
+
+          topicStatusManager.setStatus(session.threadId, 'green');
+          return;
+        }
+
+        // Plain permission_prompt with no options — show as-is
         cli.warn('NOTIFY', 'permission_prompt with no stashed PreToolUse', {
           session: session.sessionId.slice(0, 8),
         });

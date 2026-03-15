@@ -300,6 +300,33 @@ export function shortenCommand(command: string): string {
 }
 
 /**
+ * Parse numbered options from a multi-choice prompt message.
+ * Matches lines like "1. Yes, auto-accept edits" or "❯ 1. Yes, clear context..."
+ * Returns the option labels in order, or empty array if no numbered options found.
+ */
+export function parseNumberedOptions(message: string): Array<{ index: number; label: string }> {
+  const options: Array<{ index: number; label: string }> = [];
+  const regex = /^\s*(?:[❯>]\s*)?\d+\.\s+(.+)$/gm;
+  let match;
+  while ((match = regex.exec(message)) !== null) {
+    options.push({ index: options.length, label: match[1].trim() });
+  }
+  return options;
+}
+
+/**
+ * Extract the question/prompt text from a message that contains numbered options.
+ * Returns everything before the first numbered option line.
+ */
+export function extractPromptText(message: string): string {
+  const firstOptionMatch = message.match(/^\s*(?:[❯>]\s*)?\d+\./m);
+  if (firstOptionMatch?.index != null) {
+    return message.slice(0, firstOptionMatch.index).trim();
+  }
+  return message.trim();
+}
+
+/**
  * Detect markdown tables (header | separator | data rows) and wrap in <pre> blocks
  * so they render in monospace on Telegram's proportional font.
  */

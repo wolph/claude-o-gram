@@ -14,6 +14,8 @@ import {
 } from './formatter.js';
 import { expandCache, cacheKey, buildExpandedHtml } from './expand-cache.js';
 import { escapeHtml } from '../utils/text.js';
+import { downloadTelegramFile } from '../utils/telegram-file.js';
+import { join } from 'node:path';
 import type { RuntimeSettings } from '../settings/runtime-settings.js';
 
 /** Bot context type alias for use across the bot module */
@@ -1035,6 +1037,113 @@ export async function createBot(
     }
   });
 
+  // --- Image upload handlers ---
+
+  const UPLOAD_SUBDIR = '.claude-telegram/uploads';
+  const IMAGE_MIME_TYPES = new Set([
+    'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+    'image/bmp', 'image/tiff', 'image/svg+xml',
+  ]);
+
+  // Handle photos sent to forum topics — download and send path to Claude Code
+  bot.on('message:photo', async (ctx) => {
+    const threadId = ctx.message.message_thread_id;
+    if (!threadId) return;
+    if (threadId === runtimeSettings.settingsTopicId) return;
+
+    const session = sessionStore.getByThreadId(threadId);
+    if (!session || session.status !== 'active') {
+      await ctx.reply('\u274C No active session in this topic.', { message_thread_id: threadId });
+      return;
+    }
+
+    try {
+      const photos = ctx.message.photo;
+      const largest = photos[photos.length - 1];
+      const destDir = join(session.cwd, UPLOAD_SUBDIR);
+
+      const { filePath } = await downloadTelegramFile(
+        config.telegramBotToken,
+        largest.file_id,
+        largest.file_unique_id,
+        destDir,
+      );
+
+      const caption = ctx.message.caption;
+      const prompt = caption
+        ? `The user uploaded an image with caption: "${caption}"\n\nView it at: ${filePath}`
+        : `The user uploaded an image. View it at: ${filePath}`;
+
+      const result = await inputRouter.send(session.sessionId, prompt);
+
+      if (result.status === 'sent') {
+        try { await ctx.react('\u26A1'); } catch { /* ignore */ }
+      } else {
+        await ctx.reply(
+          `\u274C Failed to send input: ${result.error}`,
+          { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
+        );
+      }
+    } catch (err) {
+      console.error('Photo upload error:', err);
+      await ctx.reply(
+        `\u274C Failed to download image: ${err instanceof Error ? err.message : String(err)}`,
+        { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
+      );
+    }
+  });
+
+  // Handle image documents sent to forum topics (uncompressed images sent as files)
+  bot.on('message:document', async (ctx) => {
+    const threadId = ctx.message.message_thread_id;
+    if (!threadId) return;
+    if (threadId === runtimeSettings.settingsTopicId) return;
+
+    const doc = ctx.message.document;
+    if (!doc.mime_type || !IMAGE_MIME_TYPES.has(doc.mime_type)) return; // Silently ignore non-image documents
+
+    const session = sessionStore.getByThreadId(threadId);
+    if (!session || session.status !== 'active') {
+      await ctx.reply('\u274C No active session in this topic.', { message_thread_id: threadId });
+      return;
+    }
+
+    try {
+      const destDir = join(session.cwd, UPLOAD_SUBDIR);
+
+      const { filePath } = await downloadTelegramFile(
+        config.telegramBotToken,
+        doc.file_id,
+        doc.file_unique_id,
+        destDir,
+        doc.file_name,
+        doc.mime_type,
+      );
+
+      const caption = ctx.message.caption;
+      const prompt = caption
+        ? `The user uploaded an image with caption: "${caption}"\n\nView it at: ${filePath}`
+        : `The user uploaded an image. View it at: ${filePath}`;
+
+      const result = await inputRouter.send(session.sessionId, prompt);
+
+      if (result.status === 'sent') {
+        try { await ctx.react('\u26A1'); } catch { /* ignore */ }
+      } else {
+        await ctx.reply(
+          `\u274C Failed to send input: ${result.error}`,
+          { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
+        );
+      }
+    } catch (err) {
+      console.error('Document upload error:', err);
+      await ctx.reply(
+        `\u274C Failed to download image: ${err instanceof Error ? err.message : String(err)}`,
+        { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
+      );
+    }
+  });
+
   // --- Text input handler (tmux / FIFO / SDK resume) ---
 
   // Listen for text messages in forum topics.
@@ -1130,6 +1239,30 @@ export function makeApprovalKeyboard(toolUseId: string): InlineKeyboard {
  * The 64-byte Telegram callback_data limit is respected:
  * "ask:" (4) + 8-char ID (8) + ":" (1) + index (1-2) = 14-15 bytes max.
  */
+/**
+ * Create an InlineKeyboard for plan mode completion options.
+ * Uses `ask:` callback data format so the existing ask callback handler works.
+ * Single column layout (1 button per row) since plan labels are long.
+ * No "Other →" button — the last option typically IS the free-text option.
+ */
+export function makePlanKeyboard(
+  syntheticId: string,
+  options: Array<{ label: string }>,
+): InlineKeyboard {
+  const idPrefix = syntheticId.slice(0, 8);
+  const kb = new InlineKeyboard();
+
+  for (let i = 0; i < options.length; i++) {
+    const label = options[i].label.slice(0, 50);
+    kb.text(label, `ask:${idPrefix}:${i}`);
+    if (i < options.length - 1) {
+      kb.row();
+    }
+  }
+
+  return kb;
+}
+
 export function makeAskKeyboard(
   toolUseId: string,
   options: Array<{ label: string }>,

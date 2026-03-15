@@ -35,18 +35,13 @@
 ## See It In Action
 
 <p align="center">
-  <img src="docs/assets/session-topic.png" alt="Live session topic with tool calls streaming" width="360" /><br />
-  <em>Live session topic — tool calls stream in as they happen</em>
+  <img src="docs/assets/settings-panel.png" alt="Settings panel with permission modes and admin actions" width="360" /><br />
+  <em>Settings panel — permission modes, sub-agent visibility, and admin actions</em>
 </p>
 
 <p align="center">
-  <img src="docs/assets/approval-prompt.png" alt="Approval prompt in Telegram" width="360" /><br />
-  <em>Approval prompts — accept or deny tool calls from your phone</em>
-</p>
-
-<p align="center">
-  <img src="docs/assets/status-message.png" alt="Pinned status message" width="360" /><br />
-  <em>Pinned status — context usage, tool counts, files changed at a glance</em>
+  <img src="docs/assets/ask-user-question.png" alt="Interactive question with tappable option buttons" width="360" /><br />
+  <em>Interactive questions — tappable option buttons forwarded from Claude Code</em>
 </p>
 
 ## Quickstart

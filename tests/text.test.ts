@@ -8,6 +8,8 @@ import {
   isProceduralNarration,
   convertCommandsForTelegram,
   stripSystemTags,
+  parseNumberedOptions,
+  extractPromptText,
 } from '../src/utils/text.js';
 
 describe('escapeHtml', () => {
@@ -204,5 +206,65 @@ describe('stripSystemTags', () => {
   it('collapses excessive blank lines', () => {
     const input = 'A\n\n\n\n\nB';
     expect(stripSystemTags(input)).toBe('A\n\nB');
+  });
+});
+
+describe('parseNumberedOptions', () => {
+  const planMessage = [
+    ' Claude has written up a plan and is ready to execute. Would you like to proceed?',
+    '',
+    ' \u276F 1. Yes, clear context (3% used) and auto-accept edits',
+    '   2. Yes, auto-accept edits',
+    '   3. Yes, manually approve edits',
+    '   4. Type here to tell Claude what to change',
+  ].join('\n');
+
+  it('parses all 4 plan mode options', () => {
+    const options = parseNumberedOptions(planMessage);
+    expect(options).toHaveLength(4);
+    expect(options[0].label).toBe('Yes, clear context (3% used) and auto-accept edits');
+    expect(options[1].label).toBe('Yes, auto-accept edits');
+    expect(options[2].label).toBe('Yes, manually approve edits');
+    expect(options[3].label).toBe('Type here to tell Claude what to change');
+  });
+
+  it('assigns sequential indices', () => {
+    const options = parseNumberedOptions(planMessage);
+    expect(options.map(o => o.index)).toEqual([0, 1, 2, 3]);
+  });
+
+  it('returns empty array for messages without numbered options', () => {
+    expect(parseNumberedOptions('Claude Code needs your approval.')).toEqual([]);
+  });
+
+  it('handles arrow indicator on first option', () => {
+    const msg = '❯ 1. Option A\n  2. Option B';
+    const options = parseNumberedOptions(msg);
+    expect(options).toHaveLength(2);
+    expect(options[0].label).toBe('Option A');
+    expect(options[1].label).toBe('Option B');
+  });
+
+  it('handles > as alternative arrow indicator', () => {
+    const msg = '> 1. First\n  2. Second';
+    const options = parseNumberedOptions(msg);
+    expect(options).toHaveLength(2);
+    expect(options[0].label).toBe('First');
+  });
+});
+
+describe('extractPromptText', () => {
+  it('extracts text before numbered options', () => {
+    const msg = 'Would you like to proceed?\n\n 1. Yes\n 2. No';
+    expect(extractPromptText(msg)).toBe('Would you like to proceed?');
+  });
+
+  it('returns full message when no options present', () => {
+    expect(extractPromptText('Just a plain message')).toBe('Just a plain message');
+  });
+
+  it('handles leading arrow indicators', () => {
+    const msg = 'Choose:\n❯ 1. A\n  2. B';
+    expect(extractPromptText(msg)).toBe('Choose:');
   });
 });

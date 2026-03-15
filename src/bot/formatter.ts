@@ -768,6 +768,18 @@ function bypassPreview(toolName: string, input: Record<string, unknown>): string
  *
  * Only formats the first question (Claude Code sends 1-4 but typically 1).
  */
+/**
+ * Format a plan completion prompt for Telegram display.
+ * Shows the question text (without numbered options, which become buttons).
+ */
+export function formatPlanPrompt(promptText: string): string {
+  return [
+    `\u{1F4CB} <b>Plan Complete</b>`,
+    '',
+    escapeHtml(promptText),
+  ].join('\n');
+}
+
 export function formatAskUserQuestion(data: AskUserQuestionData): string {
   const q = data.questions[0];
   if (!q) return '\u2753 <b>Input Needed</b>';
