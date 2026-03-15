@@ -56,4 +56,22 @@ describe('ConversationStore', () => {
     expect(conversation?.currentSessionId).toBe('sess-new');
     expect(conversation?.queue).toHaveLength(1);
   });
+
+  it('keeps conversations in memory only for task 1', () => {
+    const firstStore = new ConversationStore(filePath);
+
+    firstStore.upsertActive({
+      threadId: 42,
+      cwd: '/tmp/project',
+      topicName: 'project',
+      sessionId: 'sess-old',
+      transcriptPath: '/tmp/old.jsonl',
+      inputMethod: 'tmux',
+      permissionMode: 'default',
+      statusMessageId: 7,
+    });
+
+    const secondStore = new ConversationStore(filePath);
+    expect(secondStore.getByThreadId(42)).toBeUndefined();
+  });
 });
