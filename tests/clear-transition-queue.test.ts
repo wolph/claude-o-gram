@@ -183,6 +183,25 @@ async function createBotHarness({
     can_read_all_group_messages: false,
     supports_inline_queries: false,
   };
+  bot.api.config.use(async (prev, method, payload, signal) => {
+    if (method === 'sendMessage') {
+      return {
+        ok: true,
+        result: {
+          message_id: 999,
+          date: 0,
+          chat: {
+            id: -100123,
+            type: 'supergroup',
+            title: 'Test Chat',
+            is_forum: true,
+          },
+          text: String(payload.text ?? ''),
+        },
+      };
+    }
+    return prev(method, payload, signal);
+  });
 
   function registerActiveSession({
     threadId,

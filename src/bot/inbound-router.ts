@@ -13,7 +13,7 @@ export interface RoutedInboundMessage extends InboundMessage {
 }
 
 export type QueueInboundResult =
-  | { status: 'queued' }
+  | { status: 'queued'; depth: number }
   | { status: 'failed'; error: string };
 
 interface InboundRouterCallbacks {
@@ -23,7 +23,7 @@ interface InboundRouterCallbacks {
 }
 
 export type InboundRouterResult =
-  | { action: 'queued' }
+  | { action: 'queued'; depth: number }
   | { action: 'sent' }
   | { action: 'failed'; error: string };
 
@@ -43,8 +43,8 @@ export class InboundRouter {
         );
         return { action: 'failed', error: queueResult.error };
       }
-      this.callbacks.log(`QUEUE thread=${input.threadId} reason=clear-transition`);
-      return { action: 'queued' };
+      this.callbacks.log(`QUEUE thread=${input.threadId} reason=clear-transition depth=${queueResult.depth}`);
+      return { action: 'queued', depth: queueResult.depth };
     }
 
     this.callbacks.log(

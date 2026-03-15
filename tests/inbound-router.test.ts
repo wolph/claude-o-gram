@@ -28,7 +28,7 @@ describe('InboundRouter', () => {
   it('queues while a clear transition is in progress', async () => {
     const send = vi.fn();
     const log = vi.fn();
-    const queue = vi.fn().mockReturnValue({ status: 'queued' });
+    const queue = vi.fn().mockReturnValue({ status: 'queued', depth: 1 });
 
     const router = new InboundRouter({ send, log, queue });
     const result = await router.handle({
@@ -42,7 +42,7 @@ describe('InboundRouter', () => {
       inputMethod: 'tmux',
     });
 
-    expect(result.action).toBe('queued');
+    expect(result).toEqual({ action: 'queued', depth: 1 });
     expect(send).not.toHaveBeenCalled();
     expect(queue).toHaveBeenCalled();
     expect(log.mock.invocationCallOrder[0]).toBeLessThan(queue.mock.invocationCallOrder[0]);

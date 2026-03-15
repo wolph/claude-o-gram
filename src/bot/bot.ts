@@ -56,25 +56,32 @@ export async function createBot(
   const inboundRouter = new InboundRouter({
     send: (sessionId, text) => inputRouter.send(sessionId, text),
     log: (message) => console.log(`[INBOUND] ${message}`),
-    queue: (input) => (
-      conversationStore.enqueue(input.threadId, {
+    queue: (input) => {
+      const queued = conversationStore.enqueue(input.threadId, {
         telegramMessageId: input.telegramMessageId,
         kind: input.kind,
         rawText: input.rawText,
         routedText: input.routedText,
         receivedAt: input.receivedAt,
-      })
-        ? { status: 'queued' }
-        : {
+      });
+      if (!queued) {
+        return {
           status: 'failed',
           error: 'No conversation is registered for this topic',
-        }
-    ),
+        };
+      }
+
+      return {
+        status: 'queued',
+        depth: conversationStore.getByThreadId(input.threadId)?.queue.length ?? 0,
+      };
+    },
   });
 
   interface InboundRouteEffects {
     onFailed?: (error: string) => Promise<void>;
     onSent?: () => Promise<void>;
+    onQueued?: (depth: number) => Promise<void>;
   }
 
   function getInboundConversation(threadId: number): {
@@ -121,6 +128,21 @@ export async function createBot(
         } catch {
           // Reaction not supported
         }
+      }
+      return result;
+    }
+
+    if (result.action === 'queued') {
+      if (effects.onQueued) {
+        await effects.onQueued(result.depth);
+      } else if (result.depth === 1) {
+        await ctx.reply(
+          'Queued while context is clearing; will send automatically.',
+          {
+            message_thread_id: input.threadId,
+            reply_to_message_id: input.telegramMessageId,
+          },
+        );
       }
       return result;
     }
@@ -720,6 +742,11 @@ export async function createBot(
         onSent: async () => {
           await ctx.editMessageText(`\u26A1 Running: <code>/${escapeHtml(claudeName)}</code>`, { reply_markup: undefined });
         },
+        onQueued: async (depth) => {
+          if (depth === 1) {
+            await ctx.editMessageText('Queued while context is clearing; will send automatically.', { reply_markup: undefined });
+          }
+        },
         onFailed: async (error) => {
           await ctx.editMessageText(`\u274C Failed: ${escapeHtml(error)}`, { reply_markup: undefined });
         },
@@ -822,6 +849,11 @@ export async function createBot(
     }, 'send command', {
       onSent: async () => {
         await ctx.editMessageText(`\u26A1 Running: <code>/${escapeHtml(pending.claudeName)}</code>`, { reply_markup: undefined });
+      },
+      onQueued: async (depth) => {
+        if (depth === 1) {
+          await ctx.editMessageText('Queued while context is clearing; will send automatically.', { reply_markup: undefined });
+        }
       },
       onFailed: async (error) => {
         await ctx.editMessageText(`\u274C Failed: ${escapeHtml(error)}`, { reply_markup: undefined });
