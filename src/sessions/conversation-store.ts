@@ -16,19 +16,26 @@ export class ConversationStore {
 
   upsertActive(binding: ActiveConversationBinding): void {
     const existing = this.conversations.get(binding.threadId);
+    this.conversations.set(binding.threadId, this.buildActiveConversation(binding, existing?.queue ?? []));
+  }
 
-    this.conversations.set(binding.threadId, {
-      threadId: binding.threadId,
-      cwd: binding.cwd,
-      topicName: binding.topicName,
-      statusMessageId: binding.statusMessageId,
-      state: 'active',
-      currentSessionId: binding.sessionId,
-      currentTranscriptPath: binding.transcriptPath,
-      currentInputMethod: binding.inputMethod,
-      permissionMode: binding.permissionMode,
-      queue: existing?.queue ?? [],
-    });
+  syncActive(binding: ActiveConversationBinding): boolean {
+    const existing = this.conversations.get(binding.threadId);
+    if (!existing) {
+      this.conversations.set(binding.threadId, this.buildActiveConversation(binding, []));
+      return true;
+    }
+
+    if (existing.state !== 'active') {
+      return false;
+    }
+
+    if (existing.currentSessionId !== binding.sessionId) {
+      return false;
+    }
+
+    this.conversations.set(binding.threadId, this.buildActiveConversation(binding, existing.queue));
+    return true;
   }
 
   startClearTransition(threadId: number): boolean {
@@ -79,5 +86,23 @@ export class ConversationStore {
 
   deleteByThreadId(threadId: number): boolean {
     return this.conversations.delete(threadId);
+  }
+
+  private buildActiveConversation(
+    binding: ActiveConversationBinding,
+    queue: InboundMessage[],
+  ): ConversationInfo {
+    return {
+      threadId: binding.threadId,
+      cwd: binding.cwd,
+      topicName: binding.topicName,
+      statusMessageId: binding.statusMessageId,
+      state: 'active',
+      currentSessionId: binding.sessionId,
+      currentTranscriptPath: binding.transcriptPath,
+      currentInputMethod: binding.inputMethod,
+      permissionMode: binding.permissionMode,
+      queue,
+    };
   }
 }

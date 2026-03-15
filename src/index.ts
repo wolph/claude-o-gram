@@ -570,7 +570,7 @@ export async function main(): Promise<void> {
       return;
     }
 
-    conversationStore.upsertActive({
+    conversationStore.syncActive({
       threadId: session.threadId,
       cwd: session.cwd,
       topicName: session.topicName,
