@@ -49,6 +49,11 @@ export class SdkResumeInputSender implements InputSender {
     try {
       const env = { ...process.env };
       delete env.CLAUDECODE;
+      // Strip secrets that the SDK child process does not need
+      delete env.TELEGRAM_BOT_TOKEN;
+      delete env.TELEGRAM_CHAT_ID;
+      delete env.BOT_OWNER_ID;
+      delete env.CLAUDE_CODE_TELEGRAM_SECRET;
 
       const options: Record<string, unknown> = {
         resume: this.sessionId,
