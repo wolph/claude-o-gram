@@ -12,15 +12,20 @@ export interface RoutedInboundMessage extends InboundMessage {
   inputMethod?: ConversationInputMethod;
 }
 
+export type QueueInboundResult =
+  | { status: 'queued' }
+  | { status: 'failed'; error: string };
+
 interface InboundRouterCallbacks {
   send: (sessionId: string, text: string) => Promise<SendResult>;
   log: (message: string) => void;
-  queue: (input: RoutedInboundMessage) => void;
+  queue: (input: RoutedInboundMessage) => QueueInboundResult | Promise<QueueInboundResult>;
 }
 
 export type InboundRouterResult =
   | { action: 'queued' }
-  | { action: 'sent'; delivery: SendResult };
+  | { action: 'sent' }
+  | { action: 'failed'; error: string };
 
 export class InboundRouter {
   constructor(private readonly callbacks: InboundRouterCallbacks) {}
@@ -31,7 +36,13 @@ export class InboundRouter {
     );
 
     if (input.state === 'transitioning') {
-      this.callbacks.queue(input);
+      const queueResult = await this.callbacks.queue(input);
+      if (queueResult.status === 'failed') {
+        this.callbacks.log(
+          `FAIL thread=${input.threadId} reason=${queueResult.error}`,
+        );
+        return { action: 'failed', error: queueResult.error };
+      }
       this.callbacks.log(`QUEUE thread=${input.threadId} reason=clear-transition`);
       return { action: 'queued' };
     }
@@ -40,6 +51,10 @@ export class InboundRouter {
       `ROUTE thread=${input.threadId} state=active session=${input.sessionId} via=${input.inputMethod ?? 'unknown'}`,
     );
     const delivery = await this.callbacks.send(input.sessionId, input.routedText);
-    return { action: 'sent', delivery };
+    if (delivery.status === 'failed') {
+      this.callbacks.log(`FAIL thread=${input.threadId} reason=${delivery.error}`);
+      return { action: 'failed', error: delivery.error };
+    }
+    return { action: 'sent' };
   }
 }

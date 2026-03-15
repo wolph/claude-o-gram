@@ -9,7 +9,11 @@ import type { CommandRegistry } from './command-registry.js';
 import type { PermissionModeManager } from '../control/permission-modes.js';
 import type { CommandSettingsStore } from '../settings/command-settings.js';
 import type { CommandVisibility } from '../settings/command-settings.js';
-import { InboundRouter, type RoutedInboundMessage } from './inbound-router.js';
+import {
+  InboundRouter,
+  type InboundRouterResult,
+  type RoutedInboundMessage,
+} from './inbound-router.js';
 import {
   formatApprovalResult,
 } from './formatter.js';
@@ -50,39 +54,54 @@ export async function createBot(
   const inboundRouter = new InboundRouter({
     send: (sessionId, text) => inputRouter.send(sessionId, text),
     log: (message) => console.log(`[INBOUND] ${message}`),
-    queue: (input) => {
-      console.warn(
-        `[INBOUND] Queue requested without transition orchestration thread=${input.threadId} msg=${input.telegramMessageId}`,
-      );
+    queue: () => {
+      return {
+        status: 'failed',
+        error: 'queueing not wired yet during clear transition',
+      };
     },
   });
+
+  interface InboundRouteEffects {
+    onFailed?: (error: string) => Promise<void>;
+    onSent?: () => Promise<void>;
+  }
 
   async function handleInboundRoute(
     ctx: BotContext,
     input: RoutedInboundMessage,
     failurePrefix: string,
-  ): Promise<void> {
+    effects: InboundRouteEffects = {},
+  ): Promise<InboundRouterResult> {
     const result = await inboundRouter.handle(input);
-    if (result.action === 'queued') {
-      return;
-    }
-
-    if (result.delivery.status === 'sent') {
-      try {
-        await ctx.react('\u26A1');
-      } catch {
-        // Reaction not supported
+    if (result.action === 'sent') {
+      if (effects.onSent) {
+        await effects.onSent();
+      } else {
+        try {
+          await ctx.react('\u26A1');
+        } catch {
+          // Reaction not supported
+        }
       }
-      return;
+      return result;
     }
 
-    await ctx.reply(
-      `\u274C Failed to ${failurePrefix}: ${result.delivery.error}`,
-      {
-        message_thread_id: input.threadId,
-        reply_to_message_id: input.telegramMessageId,
-      },
-    );
+    if (result.action === 'failed') {
+      if (effects.onFailed) {
+        await effects.onFailed(result.error);
+      } else {
+        await ctx.reply(
+          `\u274C Failed to ${failurePrefix}: ${result.error}`,
+          {
+            message_thread_id: input.threadId,
+            reply_to_message_id: input.telegramMessageId,
+          },
+        );
+      }
+    }
+
+    return result;
   }
 
   // Layer 1 rate limiting: grammY API-level protection
@@ -645,16 +664,28 @@ export async function createBot(
       pendingSubcmd.delete(chatId);
       commandSettingsStore.recordUse(claudeName);
       const session = threadId ? sessionStore.getByThreadId(threadId) : null;
-      if (!session || session.status !== 'active') {
+      if (!threadId || !session || session.status !== 'active') {
         await ctx.editMessageText(`\u274C No active session in this topic.`, { reply_markup: undefined });
         return;
       }
-      const result = await inputRouter.send(session.sessionId, `/${claudeName}`);
-      if (result.status === 'sent') {
-        await ctx.editMessageText(`\u26A1 Running: <code>/${escapeHtml(claudeName)}</code>`, { reply_markup: undefined });
-      } else {
-        await ctx.editMessageText(`\u274C Failed: ${escapeHtml(result.error ?? 'unknown error')}`, { reply_markup: undefined });
-      }
+      await handleInboundRoute(ctx, {
+        threadId,
+        telegramMessageId: messageId,
+        kind: 'command',
+        rawText: `/${claudeName}`,
+        routedText: `/${claudeName}`,
+        state: 'active',
+        sessionId: session.sessionId,
+        inputMethod: inputRouter.getMethod(session.sessionId) ?? session.inputMethod ?? undefined,
+        receivedAt: new Date().toISOString(),
+      }, 'send command', {
+        onSent: async () => {
+          await ctx.editMessageText(`\u26A1 Running: <code>/${escapeHtml(claudeName)}</code>`, { reply_markup: undefined });
+        },
+        onFailed: async (error) => {
+          await ctx.editMessageText(`\u274C Failed: ${escapeHtml(error)}`, { reply_markup: undefined });
+        },
+      });
       return;
     }
 
@@ -735,16 +766,29 @@ export async function createBot(
 
     commandSettingsStore.recordUse(pending.claudeName);
     const session = threadId ? sessionStore.getByThreadId(threadId) : null;
-    if (!session || session.status !== 'active') {
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!threadId || !messageId || !session || session.status !== 'active') {
       await ctx.editMessageText(`\u274C No active session in this topic.`, { reply_markup: undefined });
       return;
     }
-    const result = await inputRouter.send(session.sessionId, `/${pending.claudeName}`);
-    if (result.status === 'sent') {
-      await ctx.editMessageText(`\u26A1 Running: <code>/${escapeHtml(pending.claudeName)}</code>`, { reply_markup: undefined });
-    } else {
-      await ctx.editMessageText(`\u274C Failed: ${escapeHtml(result.error ?? 'unknown error')}`, { reply_markup: undefined });
-    }
+    await handleInboundRoute(ctx, {
+      threadId,
+      telegramMessageId: messageId,
+      kind: 'command',
+      rawText: `/${pending.claudeName}`,
+      routedText: `/${pending.claudeName}`,
+      state: 'active',
+      sessionId: session.sessionId,
+      inputMethod: inputRouter.getMethod(session.sessionId) ?? session.inputMethod ?? undefined,
+      receivedAt: new Date().toISOString(),
+    }, 'send command', {
+      onSent: async () => {
+        await ctx.editMessageText(`\u26A1 Running: <code>/${escapeHtml(pending.claudeName)}</code>`, { reply_markup: undefined });
+      },
+      onFailed: async (error) => {
+        await ctx.editMessageText(`\u274C Failed: ${escapeHtml(error)}`, { reply_markup: undefined });
+      },
+    });
   });
 
   // --- Submenu cancel ---
