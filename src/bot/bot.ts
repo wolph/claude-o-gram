@@ -9,6 +9,7 @@ import type { CommandRegistry } from './command-registry.js';
 import type { PermissionModeManager } from '../control/permission-modes.js';
 import type { CommandSettingsStore } from '../settings/command-settings.js';
 import type { CommandVisibility } from '../settings/command-settings.js';
+import { InboundRouter, type RoutedInboundMessage } from './inbound-router.js';
 import {
   formatApprovalResult,
 } from './formatter.js';
@@ -46,6 +47,43 @@ export async function createBot(
   onRefreshMenu?: () => Promise<void>,
 ): Promise<Bot<BotContext>> {
   const bot = new Bot<BotContext>(config.telegramBotToken);
+  const inboundRouter = new InboundRouter({
+    send: (sessionId, text) => inputRouter.send(sessionId, text),
+    log: (message) => console.log(`[INBOUND] ${message}`),
+    queue: (input) => {
+      console.warn(
+        `[INBOUND] Queue requested without transition orchestration thread=${input.threadId} msg=${input.telegramMessageId}`,
+      );
+    },
+  });
+
+  async function handleInboundRoute(
+    ctx: BotContext,
+    input: RoutedInboundMessage,
+    failurePrefix: string,
+  ): Promise<void> {
+    const result = await inboundRouter.handle(input);
+    if (result.action === 'queued') {
+      return;
+    }
+
+    if (result.delivery.status === 'sent') {
+      try {
+        await ctx.react('\u26A1');
+      } catch {
+        // Reaction not supported
+      }
+      return;
+    }
+
+    await ctx.reply(
+      `\u274C Failed to ${failurePrefix}: ${result.delivery.error}`,
+      {
+        message_thread_id: input.threadId,
+        reply_to_message_id: input.telegramMessageId,
+      },
+    );
+  }
 
   // Layer 1 rate limiting: grammY API-level protection
   bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 60 }));
@@ -1021,20 +1059,17 @@ export async function createBot(
       ? `/${claudeName}${args ? ' ' + args : ''}`
       : `/${tgCommand}${args ? ' ' + args : ''}`;
 
-    const result = await inputRouter.send(session.sessionId, cliCommand);
-
-    if (result.status === 'sent') {
-      try {
-        await ctx.react('\u26A1');
-      } catch {
-        // Reaction not supported
-      }
-    } else {
-      await ctx.reply(
-        `\u274C Failed to send command: ${result.error}`,
-        { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
-      );
-    }
+    await handleInboundRoute(ctx, {
+      threadId,
+      telegramMessageId: ctx.message.message_id,
+      kind: 'command',
+      rawText: text,
+      routedText: cliCommand,
+      state: 'active',
+      sessionId: session.sessionId,
+      inputMethod: inputRouter.getMethod(session.sessionId) ?? session.inputMethod ?? undefined,
+      receivedAt: new Date(ctx.message.date * 1000).toISOString(),
+    }, 'send command');
   });
 
   // --- Image upload handlers ---
@@ -1171,15 +1206,17 @@ export async function createBot(
           return;
         }
         commandSettingsStore.recordUse(pending.claudeName);
-        const result = await inputRouter.send(session.sessionId, `/${pending.claudeName} ${rawText}`);
-        if (result.status === 'sent') {
-          try { await ctx.react('\u26A1'); } catch { /* ignore */ }
-        } else {
-          await ctx.reply(
-            `\u274C Failed to send command: ${result.error}`,
-            { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
-          );
-        }
+        await handleInboundRoute(ctx, {
+          threadId,
+          telegramMessageId: ctx.message.message_id,
+          kind: 'command',
+          rawText,
+          routedText: `/${pending.claudeName} ${rawText}`,
+          state: 'active',
+          sessionId: session.sessionId,
+          inputMethod: inputRouter.getMethod(session.sessionId) ?? session.inputMethod ?? undefined,
+          receivedAt: new Date(ctx.message.date * 1000).toISOString(),
+        }, 'send command');
         return;
       }
     }
@@ -1196,20 +1233,17 @@ export async function createBot(
       text = `> ${replied.text.split('\n').join('\n> ')}\n\n${text}`;
     }
 
-    const result = await inputRouter.send(session.sessionId, text);
-
-    if (result.status === 'sent') {
-      try {
-        await ctx.react('\u26A1');
-      } catch {
-        // Reaction not supported -- ignore
-      }
-    } else {
-      await ctx.reply(
-        `\u274C Failed to send input: ${result.error}`,
-        { message_thread_id: threadId, reply_to_message_id: ctx.message.message_id },
-      );
-    }
+    await handleInboundRoute(ctx, {
+      threadId,
+      telegramMessageId: ctx.message.message_id,
+      kind: 'text',
+      rawText,
+      routedText: text,
+      state: 'active',
+      sessionId: session.sessionId,
+      inputMethod: inputRouter.getMethod(session.sessionId) ?? session.inputMethod ?? undefined,
+      receivedAt: new Date(ctx.message.date * 1000).toISOString(),
+    }, 'send input');
   });
 
   // Global error handler -- prevent unhandled errors from crashing the bot
