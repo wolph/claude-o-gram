@@ -7,6 +7,7 @@ import {
   splitForTelegram,
   isProceduralNarration,
   convertCommandsForTelegram,
+  stripSystemTags,
 } from '../src/utils/text.js';
 
 describe('escapeHtml', () => {
@@ -158,5 +159,50 @@ describe('convertCommandsForTelegram', () => {
 
   it('leaves simple commands unchanged', () => {
     expect(convertCommandsForTelegram('/status')).toBe('/status');
+  });
+});
+
+describe('stripSystemTags', () => {
+  it('strips system-reminder tags and content', () => {
+    const input = 'Hello\n<system-reminder>\nSystem instructions here\n</system-reminder>\nWorld';
+    expect(stripSystemTags(input)).toBe('Hello\n\nWorld');
+  });
+
+  it('strips local-command-caveat tags', () => {
+    const input = '<local-command-caveat>Caveat: messages were generated locally</local-command-caveat>\nText';
+    expect(stripSystemTags(input)).toBe('Text');
+  });
+
+  it('strips command-name, command-message, command-args tags', () => {
+    const input = '<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args></command-args>';
+    expect(stripSystemTags(input)).toBe('');
+  });
+
+  it('strips local-command-stdout tags', () => {
+    const input = '<local-command-stdout>\x1b[2mCompacted\x1b[22m</local-command-stdout>';
+    expect(stripSystemTags(input)).toBe('');
+  });
+
+  it('strips available-deferred-tools tags', () => {
+    const input = 'Before\n<available-deferred-tools>\nTool1\nTool2\n</available-deferred-tools>\nAfter';
+    expect(stripSystemTags(input)).toBe('Before\n\nAfter');
+  });
+
+  it('passes through normal text unchanged', () => {
+    expect(stripSystemTags('Hello world')).toBe('Hello world');
+  });
+
+  it('passes through HTML-like tags that are not system tags', () => {
+    expect(stripSystemTags('Use <b>bold</b> text')).toBe('Use <b>bold</b> text');
+  });
+
+  it('handles multiple system tags in one string', () => {
+    const input = '<system-reminder>A</system-reminder>Keep this<command-name>X</command-name>';
+    expect(stripSystemTags(input)).toBe('Keep this');
+  });
+
+  it('collapses excessive blank lines', () => {
+    const input = 'A\n\n\n\n\nB';
+    expect(stripSystemTags(input)).toBe('A\n\nB');
   });
 });

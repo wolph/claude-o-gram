@@ -30,7 +30,7 @@ import { StatusMessage } from './monitoring/status-message.js';
 import { TopicStatusManager } from './monitoring/topic-status.js';
 import { ClearDetector } from './monitoring/clear-detector.js';
 import { TaskChecklist } from './monitoring/task-checklist.js';
-import { escapeHtml, markdownToHtml, isProceduralNarration, convertCommandsForTelegram } from './utils/text.js';
+import { escapeHtml, markdownToHtml, isProceduralNarration, convertCommandsForTelegram, stripSystemTags } from './utils/text.js';
 import { ApprovalManager } from './control/approval-manager.js';
 import { BypassBatcher } from './control/bypass-batcher.js';
 import { PreToolUseStash } from './control/pretooluse-stash.js';
@@ -713,11 +713,16 @@ export async function main(): Promise<void> {
       session.transcriptPath,
       // onAssistantMessage: post to Telegram via batcher
       (rawText) => {
+        // Strip system XML tags (e.g. <system-reminder>, <command-name>) that
+        // leak into transcript text after /compact or context injection
+        const cleaned = stripSystemTags(rawText);
+        if (cleaned.length === 0) return;
+
         // Filter short procedural narration ("Let me read...", "I'll check...")
-        if (isProceduralNarration(rawText)) return;
+        if (isProceduralNarration(cleaned)) return;
 
         // Convert Claude Code command references to Telegram-clickable format
-        const text = convertCommandsForTelegram(rawText);
+        const text = convertCommandsForTelegram(cleaned);
 
         if (text.length > 3000) {
           const truncated = text.slice(0, 1500) + '\n... (truncated)';
@@ -854,7 +859,8 @@ export async function main(): Promise<void> {
       },
       // onUserMessage: mirror prompts from Claude transcript (e.g. local terminal input)
       (rawText: string) => {
-        const compact = rawText.trim();
+        // Strip system XML tags that wrap local command metadata
+        const compact = stripSystemTags(rawText);
         if (compact.length === 0) return;
         const text = convertCommandsForTelegram(compact);
         if (text.length > 3000) {

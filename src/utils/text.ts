@@ -236,6 +236,43 @@ export function isProceduralNarration(text: string): boolean {
 }
 
 /**
+ * Strip Claude Code system XML tags from transcript text before sending to Telegram.
+ * These tags appear in user messages (especially after /compact) and contain
+ * system instructions, command metadata, and ANSI-escaped output that should
+ * not be forwarded to Telegram.
+ *
+ * Strips tag + content for system noise, collapses resulting blank lines.
+ */
+export function stripSystemTags(text: string): string {
+  // Known system tags injected by Claude Code into transcript text.
+  // These use hyphenated/underscored names (never plain HTML tags like <b>).
+  const STRIP_TAGS = [
+    'system-reminder',
+    'local-command-caveat',
+    'command-name',
+    'command-message',
+    'command-args',
+    'local-command-stdout',
+    'available-deferred-tools',
+    'antml:thinking',
+  ];
+  const tagPattern = STRIP_TAGS.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  // Match opening tag, content (possibly multiline), closing tag
+  let result = text.replace(
+    new RegExp(`<(${tagPattern})>[\\s\\S]*?</\\1>`, 'g'),
+    '',
+  );
+  // Also strip self-closing variants: <tag/>
+  result = result.replace(
+    new RegExp(`<(?:${tagPattern})\\s*/>`, 'g'),
+    '',
+  );
+  // Collapse runs of 3+ newlines into 2
+  result = result.replace(/\n{3,}/g, '\n\n');
+  return result.trim();
+}
+
+/**
  * Convert Claude Code command references to Telegram-clickable format.
  * Telegram commands only allow [a-z0-9_], so:
  *   /gsd:complete-milestone → /gsd_complete_milestone
