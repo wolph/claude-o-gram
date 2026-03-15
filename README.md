@@ -172,9 +172,11 @@ When you send a text message in a session topic, the bot routes it to Claude Cod
 2. **FIFO** — Writes to a named pipe at `~/.claude-o-gram/input/<session-id>.fifo`. For headless/automated setups.
 3. **SDK resume** (fallback) — Uses the Claude Agent SDK to resume an idle session with the text as a prompt. Only works when the CLI process has exited.
 
+If Claude Code is in the middle of `/clear`, Telegram messages are buffered instead of dropped. The forum topic stays the same visible conversation, the queued messages are replayed automatically into the replacement session, and the local bot console logs each ingress receipt, queue, route, drain, and failure decision.
+
 ### Session Persistence
 
-Session state is persisted to `DATA_DIR/sessions.json` using atomic writes. On restart, the bot reconnects to any sessions that were still active, sending a "Reconnected" notice to their topics.
+Session state is persisted to `DATA_DIR/sessions.json` using atomic writes. Durable Telegram conversation state, including queued `/clear` input, is persisted to `DATA_DIR/conversations.json`. On restart, the bot reconnects to any sessions that were still active and preserves buffered Telegram input across the transition.
 
 </details>
 
