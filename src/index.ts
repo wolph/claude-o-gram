@@ -1615,14 +1615,40 @@ export async function main(): Promise<void> {
         session.statusMessageId = 0;
       }
 
-      syncActiveConversation(session);
+      const persistedConversation = threadId > 0
+        ? conversationStore.getByThreadId(threadId)
+        : undefined;
+      const isWaitingForReplacement = persistedConversation?.state === 'transitioning';
+      const isReplacementSession = isWaitingForReplacement
+        && persistedConversation.currentSessionId !== session.sessionId;
+      const isOldTransitionSession = isWaitingForReplacement
+        && persistedConversation.currentSessionId === session.sessionId;
+
+      if (!isWaitingForReplacement) {
+        syncActiveConversation(session);
+      }
+
+      startClearDetector(session);
+
+      if (isOldTransitionSession) {
+        cli.info('STARTUP', 'Restored queued clear transition awaiting replacement session', {
+          threadId,
+          session: session.sessionId.slice(0, 8),
+          queued: persistedConversation?.queue.length ?? 0,
+        });
+        continue;
+      }
 
       // Re-initialize monitoring for active sessions on restart
       initMonitoring(session);
-      // Start /clear detector (filesystem workaround for bug #6428)
-      startClearDetector(session);
-      // Re-detect input method
-      void registerInputForActiveConversation(session);
+
+      if (isReplacementSession) {
+        void registerInputForReplacementConversation(session);
+      } else {
+        // Re-detect input method
+        void registerInputForActiveConversation(session);
+      }
+
       // Clean up duplicate topics for this cwd (best-effort, async)
       void cleanupDuplicateTopics(session.cwd, session.threadId);
       reconnectedCount++;

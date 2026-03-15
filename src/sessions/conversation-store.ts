@@ -1,3 +1,5 @@
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type {
   ActiveConversationBinding,
   ConversationInfo,
@@ -7,8 +9,12 @@ import type {
 
 export class ConversationStore {
   private conversations = new Map<number, ConversationInfo>();
+  private filePath: string;
 
-  constructor(_filePath: string) {}
+  constructor(filePath: string) {
+    this.filePath = filePath;
+    this.load();
+  }
 
   getByThreadId(threadId: number): ConversationInfo | undefined {
     return this.conversations.get(threadId);
@@ -17,12 +23,14 @@ export class ConversationStore {
   upsertActive(binding: ActiveConversationBinding): void {
     const existing = this.conversations.get(binding.threadId);
     this.conversations.set(binding.threadId, this.buildActiveConversation(binding, existing?.queue ?? []));
+    this.save();
   }
 
   syncActive(binding: ActiveConversationBinding): boolean {
     const existing = this.conversations.get(binding.threadId);
     if (!existing) {
       this.conversations.set(binding.threadId, this.buildActiveConversation(binding, []));
+      this.save();
       return true;
     }
 
@@ -35,6 +43,7 @@ export class ConversationStore {
     }
 
     this.conversations.set(binding.threadId, this.buildActiveConversation(binding, existing.queue));
+    this.save();
     return true;
   }
 
@@ -45,6 +54,7 @@ export class ConversationStore {
     }
 
     conversation.state = 'transitioning';
+    this.save();
     return true;
   }
 
@@ -55,6 +65,7 @@ export class ConversationStore {
     }
 
     conversation.queue.push(message);
+    this.save();
     return true;
   }
 
@@ -63,7 +74,11 @@ export class ConversationStore {
   }
 
   shiftQueue(threadId: number): InboundMessage | undefined {
-    return this.conversations.get(threadId)?.queue.shift();
+    const shifted = this.conversations.get(threadId)?.queue.shift();
+    if (shifted) {
+      this.save();
+    }
+    return shifted;
   }
 
   attachReplacementBinding(threadId: number, binding: ReplacementConversationBinding): boolean {
@@ -81,11 +96,16 @@ export class ConversationStore {
     conversation.currentInputMethod = binding.inputMethod;
     conversation.permissionMode = binding.permissionMode;
     conversation.state = 'active';
+    this.save();
     return true;
   }
 
   deleteByThreadId(threadId: number): boolean {
-    return this.conversations.delete(threadId);
+    const deleted = this.conversations.delete(threadId);
+    if (deleted) {
+      this.save();
+    }
+    return deleted;
   }
 
   private buildActiveConversation(
@@ -104,5 +124,35 @@ export class ConversationStore {
       permissionMode: binding.permissionMode,
       queue,
     };
+  }
+
+  private save(): void {
+    mkdirSync(dirname(this.filePath), { recursive: true });
+
+    const data = Object.fromEntries(this.conversations.entries());
+    const json = JSON.stringify(data, null, 2);
+    const tmpPath = this.filePath + '.tmp';
+    writeFileSync(tmpPath, json, 'utf-8');
+    renameSync(tmpPath, this.filePath);
+  }
+
+  private load(): void {
+    if (!existsSync(this.filePath)) {
+      return;
+    }
+
+    try {
+      const raw = readFileSync(this.filePath, 'utf-8');
+      const data = JSON.parse(raw) as Record<string, ConversationInfo>;
+
+      for (const [threadId, conversation] of Object.entries(data)) {
+        this.conversations.set(Number(threadId), conversation);
+      }
+    } catch (err) {
+      console.warn(
+        `Warning: Failed to load conversations from ${this.filePath}, using empty store.`,
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 }

@@ -93,15 +93,6 @@ describe('ConversationStore', () => {
     });
   });
 
-  it('keeps conversations in memory only for task 1', () => {
-    const firstStore = new ConversationStore(filePath);
-
-    firstStore.upsertActive(makeActiveBinding());
-
-    const secondStore = new ConversationStore(filePath);
-    expect(secondStore.getByThreadId(42)).toBeUndefined();
-  });
-
   it('reports missing-thread operations explicitly', () => {
     const store = new ConversationStore(filePath);
 
