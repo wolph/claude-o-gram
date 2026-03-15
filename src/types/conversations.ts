@@ -36,6 +36,6 @@ export interface ActiveConversationBinding {
 export interface ReplacementConversationBinding {
   sessionId: string;
   transcriptPath: string;
-  inputMethod?: ConversationInputMethod;
+  inputMethod: ConversationInputMethod;
   permissionMode?: string;
 }

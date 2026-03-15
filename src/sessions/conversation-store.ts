@@ -31,34 +31,41 @@ export class ConversationStore {
     });
   }
 
-  startClearTransition(threadId: number): void {
+  startClearTransition(threadId: number): boolean {
     const conversation = this.conversations.get(threadId);
     if (!conversation) {
-      return;
+      return false;
     }
 
     conversation.state = 'transitioning';
+    return true;
   }
 
-  enqueue(threadId: number, message: InboundMessage): void {
+  enqueue(threadId: number, message: InboundMessage): boolean {
     const conversation = this.conversations.get(threadId);
     if (!conversation) {
-      return;
+      return false;
     }
 
     conversation.queue.push(message);
+    return true;
   }
 
-  attachReplacementBinding(threadId: number, binding: ReplacementConversationBinding): void {
+  attachReplacementBinding(threadId: number, binding: ReplacementConversationBinding): boolean {
     const conversation = this.conversations.get(threadId);
     if (!conversation) {
-      return;
+      return false;
     }
 
-    conversation.state = 'active';
+    if (!binding.inputMethod) {
+      return false;
+    }
+
     conversation.currentSessionId = binding.sessionId;
     conversation.currentTranscriptPath = binding.transcriptPath;
     conversation.currentInputMethod = binding.inputMethod;
     conversation.permissionMode = binding.permissionMode;
+    conversation.state = 'active';
+    return true;
   }
 }
