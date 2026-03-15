@@ -604,6 +604,12 @@ export async function main(): Promise<void> {
         return;
       }
 
+      const queuedAgeMs = Date.now() - new Date(queued.receivedAt).getTime();
+      cli.info('INBOUND', 'Drained queued message after clear', {
+        threadId,
+        session: conversation.currentSessionId.slice(0, 8),
+        queuedForMs: Number.isFinite(queuedAgeMs) ? queuedAgeMs : undefined,
+      });
       conversationStore.shiftQueue(threadId);
     }
   }
@@ -622,7 +628,21 @@ export async function main(): Promise<void> {
       return;
     }
 
-    syncActiveConversation(latestSession);
+    const activation = conversationStore.activateRegisteredBinding({
+      threadId: latestSession.threadId,
+      cwd: latestSession.cwd,
+      topicName: latestSession.topicName,
+      sessionId: latestSession.sessionId,
+      transcriptPath: latestSession.transcriptPath,
+      inputMethod: latestSession.inputMethod,
+      permissionMode: latestSession.permissionMode,
+      statusMessageId: latestSession.statusMessageId,
+    });
+
+    if (activation === 'replacement') {
+      await drainQueuedConversation(latestSession.threadId);
+      return;
+    }
   }
 
   async function registerInputForReplacementConversation(session: SessionInfo): Promise<void> {

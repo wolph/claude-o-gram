@@ -47,6 +47,39 @@ export class ConversationStore {
     return true;
   }
 
+  activateRegisteredBinding(binding: ActiveConversationBinding): 'active' | 'replacement' | 'ignored' {
+    const existing = this.conversations.get(binding.threadId);
+    if (!existing) {
+      this.conversations.set(binding.threadId, this.buildActiveConversation(binding, []));
+      this.save();
+      return 'active';
+    }
+
+    if (existing.state === 'transitioning') {
+      if (!binding.inputMethod) {
+        return 'ignored';
+      }
+
+      existing.cwd = binding.cwd;
+      existing.topicName = binding.topicName;
+      existing.currentSessionId = binding.sessionId;
+      existing.currentTranscriptPath = binding.transcriptPath;
+      existing.currentInputMethod = binding.inputMethod;
+      existing.permissionMode = binding.permissionMode;
+      existing.state = 'active';
+      this.save();
+      return 'replacement';
+    }
+
+    if (existing.currentSessionId !== binding.sessionId) {
+      return 'ignored';
+    }
+
+    this.conversations.set(binding.threadId, this.buildActiveConversation(binding, existing.queue));
+    this.save();
+    return 'active';
+  }
+
   startClearTransition(threadId: number): boolean {
     const conversation = this.conversations.get(threadId);
     if (!conversation) {

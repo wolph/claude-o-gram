@@ -10,14 +10,14 @@ describe('ConversationStore persistence', () => {
   let filePath: string;
 
   beforeEach(() => {
-    testDir = join(tmpdir(), `conversation-store-persist-${randomBytes(4).toString('hex')}`);
+    testDir = join(tmpdir(), `conversation-store-persistence-${randomBytes(4).toString('hex')}`);
     mkdirSync(testDir, { recursive: true });
     filePath = join(testDir, 'conversations.json');
   });
 
   afterEach(() => {
     try { unlinkSync(filePath); } catch { /* ok */ }
-    try { unlinkSync(filePath + '.tmp'); } catch { /* ok */ }
+    try { unlinkSync(`${filePath}.tmp`); } catch { /* ok */ }
     try { rmdirSync(testDir); } catch { /* ok */ }
   });
 
@@ -58,6 +58,61 @@ describe('ConversationStore persistence', () => {
         kind: 'text',
         rawText: 'resume me',
         routedText: 'resume me',
+        receivedAt: '2026-03-15T00:00:00.000Z',
+      }],
+    });
+  });
+
+  it('reactivates a persisted clear transition when the replacement session registers after restart', () => {
+    const first = new ConversationStore(filePath);
+    first.upsertActive({
+      threadId: 42,
+      cwd: '/tmp/project',
+      topicName: 'project',
+      sessionId: 'sess-old',
+      transcriptPath: '/tmp/old.jsonl',
+      inputMethod: 'tmux',
+      permissionMode: 'default',
+      statusMessageId: 7,
+    });
+    expect(first.startClearTransition(42)).toBe(true);
+    expect(first.enqueue(42, {
+      telegramMessageId: 101,
+      kind: 'text',
+      rawText: 'recover me',
+      routedText: 'recover me',
+      receivedAt: '2026-03-15T00:00:00.000Z',
+    })).toBe(true);
+
+    const second = new ConversationStore(filePath);
+    expect(
+      second.activateRegisteredBinding({
+        threadId: 42,
+        cwd: '/tmp/project',
+        topicName: 'project',
+        sessionId: 'sess-new',
+        transcriptPath: '/tmp/new.jsonl',
+        inputMethod: 'fifo',
+        permissionMode: 'default',
+        statusMessageId: 7,
+      })
+    ).toBe('replacement');
+
+    expect(second.getByThreadId(42)).toEqual({
+      threadId: 42,
+      cwd: '/tmp/project',
+      topicName: 'project',
+      statusMessageId: 7,
+      state: 'active',
+      currentSessionId: 'sess-new',
+      currentTranscriptPath: '/tmp/new.jsonl',
+      currentInputMethod: 'fifo',
+      permissionMode: 'default',
+      queue: [{
+        telegramMessageId: 101,
+        kind: 'text',
+        rawText: 'recover me',
+        routedText: 'recover me',
         receivedAt: '2026-03-15T00:00:00.000Z',
       }],
     });
